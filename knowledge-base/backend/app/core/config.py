@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=('.env', '../.env'),
+        env_file_encoding='utf-8',
+        case_sensitive=False,
+        extra='ignore',
+    )
+
+    app_name: str = 'Knowledge Base API'
+    api_prefix: str = '/api'
+    environment: str = 'development'
+
+    database_url: str = Field(default='postgresql+psycopg://kb:kb@localhost:5432/knowledge_base')
+    cors_origins: str = 'http://localhost:3000,http://127.0.0.1:3000'
+
+    default_user_email: str = 'demo@knowledge-base.local'
+
+    openai_api_key: str = Field(default='')
+    openai_model: str = 'gpt-4.1-mini'
+    openai_embedding_model: str = 'text-embedding-3-small'
+    openai_timeout_seconds: float = 60.0
+
+    embedding_dimensions: int = 1536
+    retrieval_top_k: int = 5
+    max_note_chunk_chars: int = 900
+
+    search_provider: Literal['serper'] = 'serper'
+    search_api_key: str = Field(default='')
+    search_base_url: str = 'https://google.serper.dev/search'
+
+    log_level: str = 'INFO'
+
+    @model_validator(mode='after')
+    def normalize_database_url(self) -> 'Settings':
+        if self.database_url.startswith('postgres://'):
+            self.database_url = self.database_url.replace('postgres://', 'postgresql+psycopg://', 1)
+        elif self.database_url.startswith('postgresql://'):
+            self.database_url = self.database_url.replace('postgresql://', 'postgresql+psycopg://', 1)
+        return self
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [item.strip() for item in self.cors_origins.split(',') if item.strip()]
+
+    def validate_runtime_requirements(self) -> None:
+        errors: list[str] = []
+
+        if not self.database_url.startswith('postgresql+psycopg://'):
+            errors.append(
+                'DATABASE_URL must use PostgreSQL with psycopg driver, for example '
+                'postgresql+psycopg://kb:kb@localhost:5432/knowledge_base'
+            )
+
+        if not self.openai_api_key:
+            errors.append('OPENAI_API_KEY is required for live LLM and embeddings.')
+
+        if errors:
+            joined = '; '.join(errors)
+            raise RuntimeError(f'Invalid runtime configuration: {joined}')
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
