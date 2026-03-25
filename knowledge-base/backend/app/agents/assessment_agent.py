@@ -41,6 +41,7 @@ class ScoredQuestion:
     confidence_score: float | None
     strengths: list[str]
     missing_concepts: list[str]
+    graded: bool = True
 
 
 @dataclass
@@ -696,6 +697,8 @@ class AssessmentAgent:
         for question in question_rows:
             if question.question_type == AssessmentQuestionType.multiple_choice:
                 continue
+            if question.question_type == AssessmentQuestionType.reflection:
+                continue
             response = response_map.get(question.id, {})
             open_eval_payload.append(
                 {
@@ -742,6 +745,14 @@ class AssessmentAgent:
                 strengths = ['Correctly identified the right option.'] if score >= 1.0 else []
                 missing = [] if score >= 1.0 else (question.expected_concepts or [])
                 selected_indices_legacy.append(int(selected_option_index) if selected_option_index is not None else -1)
+                graded = True
+            elif question.question_type == AssessmentQuestionType.reflection:
+                score = 0.0
+                feedback = 'Recorded for your learning journal.'
+                strengths = []
+                missing = []
+                selected_indices_legacy.append(-1)
+                graded = False
             else:
                 evaluated = evaluation_map.get(question.id)
                 if evaluated is None:
@@ -755,6 +766,7 @@ class AssessmentAgent:
                     strengths = evaluated.strengths
                     missing = evaluated.missing_concepts
                 selected_indices_legacy.append(-1)
+                graded = True
 
             scored_questions.append(
                 ScoredQuestion(
@@ -768,10 +780,12 @@ class AssessmentAgent:
                     confidence_score=confidence_score,
                     strengths=strengths,
                     missing_concepts=missing,
+                    graded=graded,
                 )
             )
 
-        overall_score = self._clamp(mean(item.score for item in scored_questions))
+        graded_questions = [item for item in scored_questions if item.graded]
+        overall_score = self._clamp(mean(item.score for item in graded_questions)) if graded_questions else 0.0
         mastery_delta, confidence_avg = self._compute_mastery_delta(
             overall_score=overall_score,
             confidence_values=confidence_values,
@@ -805,7 +819,7 @@ class AssessmentAgent:
             {
                 'question_id': item.question.id,
                 'question_type': item.question.question_type.value,
-                'score': round(item.score, 3),
+                'score': round(item.score, 3) if item.graded else None,
                 'confidence_score': round(item.confidence_score, 3) if item.confidence_score is not None else None,
                 'feedback': item.feedback,
                 'missing_concepts': item.missing_concepts,

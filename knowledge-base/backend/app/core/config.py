@@ -32,6 +32,18 @@ class Settings(BaseSettings):
     jwt_secret_key: str = Field(default='change-me-in-production')
     jwt_algorithm: str = 'HS256'
     access_token_expire_minutes: int = 60 * 24
+    password_reset_token_ttl_minutes: int = 30
+    password_reset_base_url: str = 'http://localhost:3000/reset-password'
+    password_reset_debug_expose_token: bool = True
+    password_reset_allow_user_discovery: bool = False
+    password_reset_send_email: bool = False
+    password_reset_email_subject: str = 'Reset your Knowledge Base password'
+
+    email_provider: Literal['resend'] = 'resend'
+    resend_api_key: str = Field(default='')
+    resend_base_url: str = 'https://api.resend.com'
+    resend_from_email: str = Field(default='')
+    resend_reply_to: str = Field(default='')
 
     embedding_dimensions: int = 1536
     retrieval_top_k: int = 5
@@ -68,6 +80,11 @@ class Settings(BaseSettings):
             errors.append('OPENAI_API_KEY is required for live LLM and embeddings.')
         if self.jwt_secret_key == 'change-me-in-production' and self.environment.lower() == 'production':
             errors.append('JWT_SECRET_KEY must be set to a strong secret in production.')
+        if self.password_reset_send_email and self.email_provider == 'resend':
+            if not self.resend_api_key:
+                errors.append('RESEND_API_KEY is required when PASSWORD_RESET_SEND_EMAIL=true.')
+            if not self.resend_from_email:
+                errors.append('RESEND_FROM_EMAIL is required when PASSWORD_RESET_SEND_EMAIL=true.')
 
         if errors:
             joined = '; '.join(errors)

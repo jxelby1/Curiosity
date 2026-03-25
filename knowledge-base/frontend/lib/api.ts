@@ -8,6 +8,7 @@ import {
   ChatReply,
   DocumentItem,
   ExternalResource,
+  ForgotPasswordResult,
   NoteType,
   PersonalNote,
   ProgressUpdateResult,
@@ -21,6 +22,8 @@ import {
   TopicInitializationStatus,
   TopicProgress,
   TutorNoteSaveResult,
+  ResetPasswordResult,
+  TopicRetentionLoop,
   UserProgressSummary
 } from '@/lib/types';
 
@@ -98,6 +101,24 @@ export async function logout(): Promise<void> {
 
 export async function getMe(): Promise<AuthUser> {
   return request<AuthUser>('/auth/me');
+}
+
+export async function forgotPassword(email: string): Promise<ForgotPasswordResult> {
+  return request<ForgotPasswordResult>('/auth/forgot-password', {
+    method: 'POST',
+    auth: false,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email })
+  });
+}
+
+export async function resetPassword(input: { token: string; new_password: string }): Promise<ResetPasswordResult> {
+  return request<ResetPasswordResult>('/auth/reset-password', {
+    method: 'POST',
+    auth: false,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input)
+  });
 }
 
 export async function listTopics(): Promise<Topic[]> {
@@ -345,6 +366,22 @@ export async function getTopicProgress(topicId: number | string): Promise<TopicP
 
 export async function getMyProgressSummary(): Promise<UserProgressSummary> {
   return request<UserProgressSummary>('/users/me/progress-summary');
+}
+
+export async function getTopicRetentionLoop(topicId: number | string): Promise<TopicRetentionLoop> {
+  return request<TopicRetentionLoop>(`/topics/${topicId}/retention-loop`);
+}
+
+export async function markMilestoneSeen(topicId: number | string, milestoneId: number): Promise<void> {
+  await request(`/topics/${topicId}/milestones/${milestoneId}/seen`, {
+    method: 'POST'
+  });
+}
+
+export async function dismissTopicReminder(topicId: number | string, reminderId: number): Promise<void> {
+  await request(`/topics/${topicId}/reminders/${reminderId}/dismiss`, {
+    method: 'POST'
+  });
 }
 
 export async function generateQuiz(

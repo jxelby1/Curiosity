@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -129,6 +130,7 @@ function ProgressChecklistItem({ label, complete }: { label: string; complete: b
 export default function SkillWorkspacePage({ params }: { params: { topicId: string; skillId: string } }) {
   const topicId = params.topicId;
   const routeSkillId = Number(params.skillId);
+  const searchParams = useSearchParams();
   const cachedTree = readSkillTreeCache(topicId);
   const cachedRecommendations = readRecommendationCache(topicId) || [];
 
@@ -212,8 +214,13 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   }, [loadRecommendations, loadTree]);
 
   useEffect(() => {
+    const requested = (searchParams.get('tab') || 'overview') as LearningTab;
+    if (tabs.some((item) => item.id === requested)) {
+      setActiveTab(requested);
+      return;
+    }
     setActiveTab('overview');
-  }, [routeSkillId]);
+  }, [routeSkillId, searchParams]);
 
   function keyFor(type: string, skillId?: number) {
     const id = skillId || selectedSkill?.id || 0;
@@ -889,8 +896,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     Progress state: <strong>{progressStateLabel(assessmentResult.updated_progress_state)}</strong>
                   </p>
                   <p className="muted text-sm">
-                    Mastery delta: {(assessmentResult.mastery_delta * 100).toFixed(1)}% · Updated mastery:{' '}
-                    {(assessmentResult.updated_mastery * 100).toFixed(0)}%
+                    Progress updated. Current mastery estimate: {(assessmentResult.updated_mastery * 100).toFixed(0)}%
                   </p>
 
                   <div className="grid gap-3 md:grid-cols-2">
@@ -927,7 +933,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     {assessmentResult.feedback.map((item) => (
                       <div key={item.question_id} className="rounded-md border border-black/10 bg-white p-3 text-sm">
                         <p className="font-semibold">
-                          Q{item.question_id} · {questionTypeLabel(item.question_type)} · {(item.score * 100).toFixed(0)}%
+                          Q{item.question_id} · {questionTypeLabel(item.question_type)}
+                          {item.question_type === 'reflection' || item.score === null
+                            ? ' · Reflection recorded'
+                            : ` · ${(item.score * 100).toFixed(0)}%`}
                         </p>
                         <p className="muted mt-1">{item.feedback}</p>
                       </div>

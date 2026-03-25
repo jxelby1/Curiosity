@@ -57,8 +57,14 @@ Implemented auth is JWT-based with backend-issued bearer tokens.
 - `POST /api/auth/login`
 - `GET /api/auth/me`
 - `POST /api/auth/logout`
+- `POST /api/auth/forgot-password`
+- `POST /api/auth/reset-password`
 
 Passwords are hashed with `passlib` (`pbkdf2_sha256`).
+
+Forgot/reset flow uses single-use reset tokens stored in `password_reset_tokens` with expiry.
+Reset emails are sent via Resend when enabled.
+In local development, you can keep email sending disabled and use the optional debug token flow.
 
 ### User profile fields
 
@@ -131,6 +137,7 @@ Assessment moved from simple MCQ quiz to mixed-type evaluation.
 - MCQ: deterministic scoring against answer index
 - Free-text: rubric-based LLM evaluation against expected concepts
 - Mastery updates are based on assessment performance (confidence input is not required in the user flow)
+- Reflection questions are recorded with attempts but excluded from grading and score calculations
 
 ### Feedback returned
 
@@ -167,7 +174,70 @@ Then additional content preparation continues for nearby nodes in priority order
 2. likely-to-unlock nodes
 3. remaining high-priority neighbors (bounded set)
 
+When new nodes unlock during progression, the same starter bundle (lesson/examples/exercises/assessment) is prepared automatically in the background.
+
 Initialization progress is persisted in `topic_initialization_jobs`.
+
+## Retention loop (new)
+
+Topic pages now prioritize guided momentum instead of a large standalone growth card.
+
+Backend now computes a retention payload per topic with:
+
+- daily/weekly learning plan
+- next 3 actions (clickable skill + tab targets)
+- unlock anticipation ("coming next" with required steps)
+- compact progress signals (unlock/verified/completed/mastery)
+- inactivity reminder generation after threshold inactivity
+- milestone celebrations for meaningful events
+
+### Plan generation logic
+
+Plan items are generated from real user state:
+
+- unlocked node status
+- lesson/examples/exercises/assessment completion signals
+- weak assessment performance (review/retry suggestions)
+- recommendation ranking signals
+- upcoming unlock dependencies
+
+Cadence is adaptive:
+
+- `daily` for recently active learners
+- `weekly` for re-entry / less recent activity
+
+### Unlock anticipation logic
+
+The system ranks locked nodes by distance-to-unlock and returns:
+
+- the likely next unlock
+- why it is still locked
+- concrete steps to unlock it
+- a direct next-step target node/tab
+
+### Inactivity reminders
+
+If a learner has been inactive past threshold, a reminder object is created and persisted.
+The reminder includes re-entry context:
+
+- what to do next
+- what is close to unlocking
+- a direct resume target
+
+Reminder delivery is currently in-app (banner on return), with backend persistence ready for email/push extensions.
+
+### Milestone celebrations
+
+Milestones are persisted with dedupe keys to avoid repeat spam.
+Current triggers include:
+
+- first verified node
+- first optional branch unlocked
+- topic growth stage milestones
+- strong assessment pass on an important node
+- topic completion
+
+Users can acknowledge milestones, and acknowledged events are hidden from celebration UI.
 
 ## Key APIs
 
@@ -186,6 +256,10 @@ Initialization progress is persisted in `topic_initialization_jobs`.
 - `GET /api/topics/{topic_id}/recommendations`
 - `POST /api/skills/{skill_id}/progress/update`
 - `POST /api/skills/{skill_id}/deep-dive`
+- `GET /api/users/me/progress-summary` (includes per-topic tree stage for Garden)
+- `GET /api/topics/{topic_id}/retention-loop`
+- `POST /api/topics/{topic_id}/milestones/{milestone_id}/seen`
+- `POST /api/topics/{topic_id}/reminders/{reminder_id}/dismiss`
 
 ### Chat / notes
 
@@ -229,6 +303,19 @@ Required:
 - `DATABASE_URL` (PostgreSQL + psycopg URL)
 - `OPENAI_API_KEY`
 - `JWT_SECRET_KEY`
+- password-reset settings:
+  - `PASSWORD_RESET_TOKEN_TTL_MINUTES`
+  - `PASSWORD_RESET_BASE_URL`
+  - `PASSWORD_RESET_DEBUG_EXPOSE_TOKEN`
+  - `PASSWORD_RESET_ALLOW_USER_DISCOVERY`
+  - `PASSWORD_RESET_SEND_EMAIL`
+  - `PASSWORD_RESET_EMAIL_SUBJECT`
+- email provider settings (Resend):
+  - `EMAIL_PROVIDER` (`resend`)
+  - `RESEND_API_KEY`
+  - `RESEND_FROM_EMAIL`
+  - `RESEND_REPLY_TO` (optional)
+  - `RESEND_BASE_URL`
 
 Required for web resource retrieval:
 
@@ -267,6 +354,24 @@ Open:
 
 - Frontend: `http://localhost:3000`
 - Backend: `http://localhost:8000`
+
+### Password reset email (Resend)
+
+To send real reset emails:
+
+1. Set these values in `.env`:
+   - `PASSWORD_RESET_SEND_EMAIL=true`
+   - `EMAIL_PROVIDER=resend`
+   - `RESEND_API_KEY=<your-resend-api-key>`
+   - `RESEND_FROM_EMAIL=Knowledge Base <no-reply@your-domain.com>`
+   - `PASSWORD_RESET_BASE_URL=http://localhost:3000/reset-password`
+2. Restart backend.
+3. Use `Forgot password` from `/login` and check inbox.
+
+For local-only debug flow without email:
+
+- `PASSWORD_RESET_SEND_EMAIL=false`
+- `PASSWORD_RESET_DEBUG_EXPOSE_TOKEN=true`
 
 ## DB init / migration note
 
@@ -308,7 +413,16 @@ Smoke script validates:
 3. Confirm redirect to `/topics/{id}/initializing`
 4. Wait for progress to reach ready state
 5. Confirm auto-redirect to `/topics/{id}/skills/{firstReadySkillId}`
-6. Open `Lesson`, `Exercises`, and `Assessment` tabs to verify first-node content is already available/stored
+6. Open `Lesson`, `Examples`, `Exercises`, and `Assessment` tabs to verify first-node content is already available/stored
+
+## Garden and tree stages
+
+- `frontend/public/assets/tree-growth/` stores per-stage tree assets.
+- `frontend/lib/tree-growth.ts` defines stage mapping and asset resolution.
+- `frontend/scripts/slice_tree_growth_sheet.py` slices a 6-stage source sheet into stage assets when a sheet is provided.
+- Growth stages are mapped from topic progress signals (mastery, verified-node ratio, unlocked-node ratio) into 6 stages.
+- `/garden` shows all topics as tree cards and links back to each topic.
+- `/topics/{id}` shows the current topic tree stage.
 
 Auth/isolation smoke:
 
@@ -351,6 +465,10 @@ LIVE_API_BASE_URL=http://localhost:8000/api pytest -q -m integration
 - Upgraded skill assessment tab to mixed-type assessment UI:
   - MCQ + free-text inputs
   - detailed results/feedback rendering
+- Added forgot/reset password pages
+- Added Garden tab/page with per-topic tree growth cards
+- Removed confidence sliders from assessment UI
+- Removed user-facing “mastery delta” wording from assessment results
 
 ## Known limitations
 

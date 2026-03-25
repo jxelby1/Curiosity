@@ -332,7 +332,7 @@ class AssessmentSubmitRequest(BaseModel):
 class AssessmentQuestionFeedbackResponse(BaseModel):
     question_id: int
     question_type: AssessmentQuestionType
-    score: float
+    score: float | None = None
     confidence_score: float | None = None
     feedback: str
     missing_concepts: list[str] = Field(default_factory=list)
@@ -388,6 +388,7 @@ class TopicProgressResponse(BaseModel):
     verified_nodes: int
     available_nodes: int
     mastery_average: float
+    tree_stage: int = Field(ge=1, le=6)
     nodes: list[TopicProgressNode]
 
 
@@ -397,6 +398,7 @@ class UserTopicProgressSummary(BaseModel):
     total_nodes: int
     verified_nodes: int
     mastery_average: float
+    tree_stage: int = Field(ge=1, le=6)
 
 
 class UserProgressSummaryResponse(BaseModel):
@@ -407,3 +409,64 @@ class UserProgressSummaryResponse(BaseModel):
     verified_nodes_total: int
     mastery_average: float
     topics: list[UserTopicProgressSummary]
+
+
+class TopicActionItem(BaseModel):
+    skill_node_id: int | None = None
+    skill_name: str
+    action_type: str
+    title: str
+    description: str
+    tab: Literal['overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'] = 'overview'
+
+
+class UnlockAnticipationResponse(BaseModel):
+    skill_node_id: int
+    skill_name: str
+    status_label: str
+    why_locked: str
+    steps: list[str] = Field(default_factory=list)
+    next_step_skill_node_id: int | None = None
+    next_step_tab: Literal['overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'] = 'overview'
+
+
+class TopicReminderResponse(BaseModel):
+    id: int
+    reminder_type: str
+    title: str
+    message: str
+    action_skill_node_id: int | None = None
+    action_tab: Literal['overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'] = 'overview'
+    created_at: datetime
+
+
+class MilestoneEventResponse(BaseModel):
+    id: int
+    milestone_type: str
+    title: str
+    message: str
+    skill_node_id: int | None = None
+    created_at: datetime
+
+
+class TopicRetentionLoopResponse(BaseModel):
+    topic_id: int
+    topic_name: str
+    cadence: Literal['daily', 'weekly']
+    plan_summary: str
+    next_actions: list[TopicActionItem] = Field(default_factory=list)
+    learning_plan: list[TopicActionItem] = Field(default_factory=list)
+    unlock_anticipation: UnlockAnticipationResponse | None = None
+    reminder: TopicReminderResponse | None = None
+    milestones: list[MilestoneEventResponse] = Field(default_factory=list)
+    total_nodes: int
+    available_nodes: int
+    verified_nodes: int
+    completed_nodes: int
+    lessons_completed: int
+    assessments_taken: int
+    mastery_average: float
+    tree_stage: int = Field(ge=1, le=6)
+    streak_days: int = 0
+    activity_days_last_14: int = 0
+    latest_activity_at: datetime | None = None

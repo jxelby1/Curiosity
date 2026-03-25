@@ -28,6 +28,9 @@ export function TopicHeader({
       </div>
 
       <div className="flex flex-wrap gap-2">
+        <Link href="/garden" className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+          Garden
+        </Link>
         <Link href={`/topics/${topicId}`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
           Overview
         </Link>

@@ -21,12 +21,14 @@ from app.db.database import get_db
 from app.db.models import (
     Assessment,
     AssessmentAttempt,
+    AssessmentFeedback,
     AssessmentQuestion,
     AssessmentQuestionType,
     AssessmentResponse,
     Document,
     DocumentChunk,
     LearningResource,
+    MilestoneEvent,
     Note,
     Recommendation,
     ChatMessage,
@@ -36,6 +38,7 @@ from app.db.models import (
     SkillStatus,
     Topic,
     TopicInitializationJob,
+    UserReminder,
     UserSkillState,
 )
 from app.schemas.api import (
@@ -73,13 +76,18 @@ from app.schemas.api import (
     ResourceResponse,
     SkillNodeResponse,
     SkillTreeResponse,
+    TopicActionItem,
     TopicCreateRequest,
     TopicInitializationResponse,
     TopicInitializationStatusResponse,
     TopicListResponse,
+    TopicReminderResponse,
+    TopicRetentionLoopResponse,
     TopicProgressNode,
     TopicProgressResponse,
     TopicResponse,
+    MilestoneEventResponse,
+    UnlockAnticipationResponse,
     UserProgressSummaryResponse,
     UserTopicProgressSummary,
 )
@@ -87,6 +95,7 @@ from app.services.embedding import EmbeddingService
 from app.services.llm import LLMService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
+from app.services.retention import RetentionService
 from app.services.topic_bootstrap import TopicBootstrapService
 from app.utils.text import extract_text_from_upload
 
@@ -105,6 +114,7 @@ tutor_agent = TutorAgent(llm_service, retrieval_service, search_service)
 recommendation_agent = RecommendationAgent(llm_service, retrieval_service)
 resource_agent = ResourceAgent(llm_service, search_service, retrieval_service)
 assessment_agent = AssessmentAgent(llm_service)
+retention_service = RetentionService()
 topic_bootstrap_service = TopicBootstrapService(
     skill_graph_agent=skill_graph_agent,
     profile_agent=profile_agent,
@@ -475,6 +485,122 @@ def _invalidate_recommendations(db: Session, topic_id: int, user_id: int) -> Non
     db.commit()
 
 
+def _collect_unlocked_skill_ids(db: Session, *, topic_id: int, user_id: int) -> set[int]:
+    rows = db.scalars(
+        select(UserSkillState)
+        .join(SkillNode, UserSkillState.skill_node_id == SkillNode.id)
+        .where(UserSkillState.user_id == user_id, SkillNode.topic_id == topic_id)
+    ).all()
+    return {row.skill_node_id for row in rows if row.status != SkillStatus.locked}
+
+
+def _topic_tree_stage(
+    *,
+    total_nodes: int,
+    verified_nodes: int,
+    available_nodes: int,
+    mastery_average: float,
+) -> int:
+    if total_nodes <= 0:
+        return 1
+
+    verified_ratio = verified_nodes / total_nodes
+    unlocked_ratio = available_nodes / total_nodes
+    mastery_ratio = max(0.0, min(1.0, mastery_average))
+
+    growth_score = (0.45 * mastery_ratio) + (0.35 * verified_ratio) + (0.20 * unlocked_ratio)
+    stage = int(growth_score * 5) + 1
+    return max(1, min(6, stage))
+
+
+def _ensure_topic_milestone_events(db: Session, *, topic: Topic, user_id: int) -> None:
+    tree = _build_skill_tree_response(db, topic, user_id)
+    total_nodes = len(tree.nodes)
+    verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
+    available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
+    mastery_average = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+    tree_stage = _topic_tree_stage(
+        total_nodes=total_nodes,
+        verified_nodes=verified_nodes,
+        available_nodes=available_nodes,
+        mastery_average=mastery_average,
+    )
+
+    nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
+    states = db.scalars(
+        select(UserSkillState)
+        .join(SkillNode, UserSkillState.skill_node_id == SkillNode.id)
+        .where(UserSkillState.user_id == user_id, SkillNode.topic_id == topic.id)
+    ).all()
+    retention_service.ensure_topic_milestones(
+        db,
+        topic=topic,
+        user_id=user_id,
+        nodes=nodes,
+        state_map={state.skill_node_id: state for state in states},
+        tree_stage=tree_stage,
+    )
+
+
+def _action_to_response(action: object) -> TopicActionItem:
+    tab_value = str(getattr(action, 'tab', 'overview') or 'overview')
+    if tab_value not in {'overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'}:
+        tab_value = 'overview'
+    return TopicActionItem(
+        skill_node_id=getattr(action, 'skill_node_id', None),
+        skill_name=str(getattr(action, 'skill_name', '')),
+        action_type=str(getattr(action, 'action_type', 'action')),
+        title=str(getattr(action, 'title', 'Continue learning')),
+        description=str(getattr(action, 'description', '')),
+        tab=tab_value,  # type: ignore[arg-type]
+    )
+
+
+def _unlock_to_response(unlock: object | None) -> UnlockAnticipationResponse | None:
+    if unlock is None:
+        return None
+    tab_value = str(getattr(unlock, 'next_step_tab', 'overview') or 'overview')
+    if tab_value not in {'overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'}:
+        tab_value = 'overview'
+    return UnlockAnticipationResponse(
+        skill_node_id=int(getattr(unlock, 'skill_node_id')),
+        skill_name=str(getattr(unlock, 'skill_name', '')),
+        status_label=str(getattr(unlock, 'status_label', 'Coming soon')),
+        why_locked=str(getattr(unlock, 'why_locked', 'Complete prerequisites to unlock this skill.')),
+        steps=[str(item) for item in list(getattr(unlock, 'steps', []) or [])],
+        next_step_skill_node_id=getattr(unlock, 'next_step_skill_node_id', None),
+        next_step_tab=tab_value,  # type: ignore[arg-type]
+    )
+
+
+def _reminder_to_response(reminder: UserReminder | None) -> TopicReminderResponse | None:
+    if reminder is None:
+        return None
+    tab_value = reminder.action_tab or 'overview'
+    if tab_value not in {'overview', 'lesson', 'examples', 'exercises', 'quiz', 'resources'}:
+        tab_value = 'overview'
+    return TopicReminderResponse(
+        id=reminder.id,
+        reminder_type=reminder.reminder_type,
+        title=reminder.title,
+        message=reminder.message,
+        action_skill_node_id=reminder.action_skill_node_id,
+        action_tab=tab_value,  # type: ignore[arg-type]
+        created_at=reminder.created_at,
+    )
+
+
+def _milestone_to_response(event: MilestoneEvent) -> MilestoneEventResponse:
+    return MilestoneEventResponse(
+        id=event.id,
+        milestone_type=event.milestone_type,
+        title=event.title,
+        message=event.message,
+        skill_node_id=event.skill_node_id,
+        created_at=event.created_at,
+    )
+
+
 def _assessment_to_response(
     db: Session,
     *,
@@ -535,7 +661,12 @@ def _attempt_to_response(db: Session, *, attempt: AssessmentAttempt) -> Assessme
             question_type=question_map[row.question_id].question_type
             if row.question_id in question_map
             else AssessmentQuestionType.short_answer,
-            score=round(row.score, 3),
+            score=(
+                None
+                if row.question_id in question_map
+                and question_map[row.question_id].question_type == AssessmentQuestionType.reflection
+                else round(row.score, 3)
+            ),
             confidence_score=round(row.confidence_score, 3) if row.confidence_score is not None else None,
             feedback=row.feedback,
             missing_concepts=[],
@@ -704,13 +835,27 @@ def delete_topic(
     assessment_ids = db.scalars(select(Assessment.id).where(Assessment.topic_id == topic_id)).all()
 
     if assessment_ids:
-        db.execute(delete(AssessmentAttempt).where(AssessmentAttempt.assessment_id.in_(assessment_ids)))
+        attempt_ids = db.scalars(select(AssessmentAttempt.id).where(AssessmentAttempt.assessment_id.in_(assessment_ids))).all()
+        question_ids = db.scalars(
+            select(AssessmentQuestion.id).where(AssessmentQuestion.assessment_id.in_(assessment_ids))
+        ).all()
+
+        if attempt_ids:
+            db.execute(delete(AssessmentFeedback).where(AssessmentFeedback.attempt_id.in_(attempt_ids)))
+            db.execute(delete(AssessmentResponse).where(AssessmentResponse.attempt_id.in_(attempt_ids)))
+            db.execute(delete(AssessmentAttempt).where(AssessmentAttempt.id.in_(attempt_ids)))
+
+        if question_ids:
+            db.execute(delete(AssessmentResponse).where(AssessmentResponse.question_id.in_(question_ids)))
+            db.execute(delete(AssessmentQuestion).where(AssessmentQuestion.id.in_(question_ids)))
 
     db.execute(delete(ChatMessage).where(ChatMessage.topic_id == topic_id))
     db.execute(delete(ChatSession).where(ChatSession.topic_id == topic_id))
     db.execute(
         delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
     )
+    db.execute(delete(UserReminder).where(UserReminder.topic_id == topic_id, UserReminder.user_id == current_user.id))
+    db.execute(delete(MilestoneEvent).where(MilestoneEvent.topic_id == topic_id, MilestoneEvent.user_id == current_user.id))
     db.execute(
         delete(DocumentChunk).where(
             DocumentChunk.document_id.in_(select(Document.id).where(Document.topic_id == topic_id, Document.user_id == current_user.id))
@@ -1439,6 +1584,7 @@ async def submit_assessment(
 
     skill = _get_skill_or_404(db, assessment.skill_node_id)
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
 
     try:
         scored = await assessment_agent.score_assessment(
@@ -1464,6 +1610,14 @@ async def submit_assessment(
 
     tree = _build_skill_tree_response(db, topic, current_user.id)
     unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
+    newly_unlocked_ids = sorted(set(unlocked_skill_ids) - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
 
     return AssessmentSubmitResponse(
         assessment_id=assessment.id,
@@ -1475,7 +1629,7 @@ async def submit_assessment(
             AssessmentQuestionFeedbackResponse(
                 question_id=int(item['question_id']),
                 question_type=AssessmentQuestionType(item['question_type']),
-                score=float(item['score']),
+                score=float(item['score']) if item.get('score') is not None else None,
                 confidence_score=item.get('confidence_score'),
                 feedback=item['feedback'],
                 missing_concepts=item.get('missing_concepts', []),
@@ -1532,7 +1686,6 @@ async def submit_quiz_compat(
                 {
                     'question_id': question.id,
                     'answer_text': '',
-                    'confidence_score': 0.5,
                 }
             )
             continue
@@ -1542,12 +1695,12 @@ async def submit_quiz_compat(
                 'question_id': question.id,
                 'selected_option_index': selected,
                 'answer_text': '',
-                'confidence_score': 0.7,
             }
         )
 
     topic = _get_topic_or_404(db, assessment.topic_id)
     skill = _get_skill_or_404(db, assessment.skill_node_id)
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
     scored = await assessment_agent.score_assessment(
         db,
         assessment=assessment,
@@ -1565,6 +1718,15 @@ async def submit_quiz_compat(
         confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
     )
     _invalidate_recommendations(db, skill.topic_id, current_user.id)
+    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
 
     return QuizSubmitResponse(
         score=round(scored.overall_score, 3),
@@ -1576,7 +1738,7 @@ async def submit_quiz_compat(
 
 
 @router.post('/skills/{skill_id}/progress/update', response_model=MasteryUpdateResponse)
-def update_progress(
+async def update_progress(
     skill_id: int,
     payload: MasteryUpdateRequest,
     current_user: CurrentUser,
@@ -1587,6 +1749,7 @@ def update_progress(
     if topic.user_id != current_user.id:
         raise HTTPException(status_code=404, detail='Skill node not found')
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
 
     try:
         state = profile_agent.apply_progress_event(
@@ -1599,6 +1762,15 @@ def update_progress(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     _invalidate_recommendations(db, skill.topic_id, current_user.id)
+    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
 
     return MasteryUpdateResponse(
         skill_node_id=skill_id,
@@ -1626,6 +1798,12 @@ def get_topic_progress(
     verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
     available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
     mastery_average = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+    tree_stage = _topic_tree_stage(
+        total_nodes=total_nodes,
+        verified_nodes=verified_nodes,
+        available_nodes=available_nodes,
+        mastery_average=mastery_average,
+    )
 
     return TopicProgressResponse(
         topic_id=topic.id,
@@ -1634,6 +1812,7 @@ def get_topic_progress(
         verified_nodes=verified_nodes,
         available_nodes=available_nodes,
         mastery_average=mastery_average,
+        tree_stage=tree_stage,
         nodes=[
             TopicProgressNode(
                 skill_node_id=node.id,
@@ -1647,6 +1826,110 @@ def get_topic_progress(
             for node in tree.nodes
         ],
     )
+
+
+@router.get('/topics/{topic_id}/retention-loop', response_model=TopicRetentionLoopResponse)
+def get_topic_retention_loop(
+    topic_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicRetentionLoopResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic_id)
+    tree = _build_skill_tree_response(db, topic, current_user.id)
+
+    total_nodes = len(tree.nodes)
+    verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
+    available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
+    mastery_average = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+    tree_stage = _topic_tree_stage(
+        total_nodes=total_nodes,
+        verified_nodes=verified_nodes,
+        available_nodes=available_nodes,
+        mastery_average=mastery_average,
+    )
+
+    loop = retention_service.build_topic_loop(
+        db,
+        topic=topic,
+        user_id=current_user.id,
+        tree_stage=tree_stage,
+    )
+    cadence = loop['cadence']
+    plan_summary = (
+        'Today: focus on your top immediate actions and keep momentum.'
+        if cadence == 'daily'
+        else 'This week: complete key actions and target your next unlock.'
+    )
+
+    return TopicRetentionLoopResponse(
+        topic_id=topic.id,
+        topic_name=topic.name,
+        cadence=cadence,  # type: ignore[arg-type]
+        plan_summary=plan_summary,
+        next_actions=[_action_to_response(item) for item in loop['next_actions']],
+        learning_plan=[_action_to_response(item) for item in loop['plan_items']],
+        unlock_anticipation=_unlock_to_response(loop['unlock_anticipation']),
+        reminder=_reminder_to_response(loop['reminder']),
+        milestones=[_milestone_to_response(item) for item in loop['milestones']],
+        total_nodes=total_nodes,
+        available_nodes=loop['available_nodes'],
+        verified_nodes=loop['verified_nodes'],
+        completed_nodes=loop['completed_nodes'],
+        lessons_completed=loop['lessons_completed'],
+        assessments_taken=loop['assessments_taken'],
+        mastery_average=loop['mastery_average'],
+        tree_stage=tree_stage,
+        streak_days=loop['streak_days'],
+        activity_days_last_14=loop['activity_days_last_14'],
+        latest_activity_at=loop['latest_activity_at'],
+    )
+
+
+@router.post('/topics/{topic_id}/milestones/{milestone_id}/seen', response_model=MilestoneEventResponse)
+def mark_milestone_seen(
+    topic_id: int,
+    milestone_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MilestoneEventResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    event = retention_service.mark_milestone_seen(
+        db,
+        milestone_id=milestone_id,
+        topic_id=topic_id,
+        user_id=current_user.id,
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail='Milestone not found')
+    return _milestone_to_response(event)
+
+
+@router.post('/topics/{topic_id}/reminders/{reminder_id}/dismiss', status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
+def dismiss_topic_reminder(
+    topic_id: int,
+    reminder_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> Response:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    reminder = retention_service.dismiss_reminder(
+        db,
+        reminder_id=reminder_id,
+        topic_id=topic_id,
+        user_id=current_user.id,
+    )
+    if reminder is None:
+        raise HTTPException(status_code=404, detail='Reminder not found')
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get('/users/me/progress-summary', response_model=UserProgressSummaryResponse)
@@ -1667,7 +1950,14 @@ def get_user_progress_summary(
         profile_agent.recompute_unlocks(db, current_user.id, topic.id)
         tree = _build_skill_tree_response(db, topic, current_user.id)
         verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
+        available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
         avg_mastery = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+        tree_stage = _topic_tree_stage(
+            total_nodes=len(tree.nodes),
+            verified_nodes=verified_nodes,
+            available_nodes=available_nodes,
+            mastery_average=avg_mastery,
+        )
         verified_total += verified_nodes
         mastery_values.append(avg_mastery)
         topic_summaries.append(
@@ -1677,6 +1967,7 @@ def get_user_progress_summary(
                 total_nodes=len(tree.nodes),
                 verified_nodes=verified_nodes,
                 mastery_average=avg_mastery,
+                tree_stage=tree_stage,
             )
         )
 
@@ -1704,6 +1995,7 @@ async def create_deep_dive_branch(
         raise HTTPException(status_code=404, detail='Topic not found')
 
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=parent_skill)
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
 
     try:
         await skill_graph_agent.create_deep_dive_branch(
@@ -1720,4 +2012,13 @@ async def create_deep_dive_branch(
     profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
     profile_agent.recompute_unlocks(db, current_user.id, topic.id)
     _invalidate_recommendations(db, topic.id, current_user.id)
+    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
     return _build_skill_tree_response(db, topic, current_user.id)

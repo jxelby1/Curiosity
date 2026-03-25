@@ -65,6 +65,10 @@ class User(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     topics: Mapped[list['Topic']] = relationship(back_populates='user', cascade='all,delete')
+    password_reset_tokens: Mapped[list['PasswordResetToken']] = relationship(
+        back_populates='user',
+        cascade='all,delete',
+    )
 
 
 class Topic(Base):
@@ -103,6 +107,19 @@ class TopicInitializationJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (UniqueConstraint('topic_id', 'user_id', name='uq_topic_init_job_topic_user'),)
+
+
+class PasswordResetToken(Base):
+    __tablename__ = 'password_reset_tokens'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    token_hash: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped['User'] = relationship(back_populates='password_reset_tokens')
 
 
 class SkillNode(Base):
@@ -355,3 +372,38 @@ class AssessmentFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     attempt: Mapped['AssessmentAttempt'] = relationship(back_populates='feedback_rows')
+
+
+class UserReminder(Base):
+    __tablename__ = 'user_reminders'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    reminder_key: Mapped[str] = mapped_column(String(200), unique=True, index=True)
+    reminder_type: Mapped[str] = mapped_column(String(60), default='inactivity')
+    title: Mapped[str] = mapped_column(String(255), default='')
+    message: Mapped[str] = mapped_column(Text, default='')
+    action_skill_node_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
+    action_tab: Mapped[str] = mapped_column(String(40), default='overview')
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    last_activity_snapshot_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class MilestoneEvent(Base):
+    __tablename__ = 'milestone_events'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    skill_node_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
+    milestone_key: Mapped[str] = mapped_column(String(220), unique=True, index=True)
+    milestone_type: Mapped[str] = mapped_column(String(80), index=True)
+    title: Mapped[str] = mapped_column(String(255), default='')
+    message: Mapped[str] = mapped_column(Text, default='')
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

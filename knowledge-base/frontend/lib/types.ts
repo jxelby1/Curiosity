@@ -23,6 +23,15 @@ export interface AuthUser {
   updated_at: string;
 }
 
+export interface ForgotPasswordResult {
+  message: string;
+  debug_reset_token?: string | null;
+}
+
+export interface ResetPasswordResult {
+  message: string;
+}
+
 export interface Topic {
   id: number;
   user_id: number;
@@ -239,7 +248,7 @@ export interface AssessmentResponseInput {
 export interface AssessmentQuestionFeedback {
   question_id: number;
   question_type: AssessmentQuestionType;
-  score: number;
+  score: number | null;
   confidence_score?: number | null;
   feedback: string;
   missing_concepts: string[];
@@ -295,7 +304,71 @@ export interface TopicProgress {
   verified_nodes: number;
   available_nodes: number;
   mastery_average: number;
+  tree_stage: number;
   nodes: TopicProgressNode[];
+}
+
+export type LearningTab = 'overview' | 'lesson' | 'examples' | 'exercises' | 'quiz' | 'resources';
+
+export interface TopicActionItem {
+  skill_node_id: number | null;
+  skill_name: string;
+  action_type: string;
+  title: string;
+  description: string;
+  tab: LearningTab;
+}
+
+export interface UnlockAnticipation {
+  skill_node_id: number;
+  skill_name: string;
+  status_label: string;
+  why_locked: string;
+  steps: string[];
+  next_step_skill_node_id: number | null;
+  next_step_tab: LearningTab;
+}
+
+export interface TopicReminder {
+  id: number;
+  reminder_type: string;
+  title: string;
+  message: string;
+  action_skill_node_id: number | null;
+  action_tab: LearningTab;
+  created_at: string;
+}
+
+export interface MilestoneEvent {
+  id: number;
+  milestone_type: string;
+  title: string;
+  message: string;
+  skill_node_id: number | null;
+  created_at: string;
+}
+
+export interface TopicRetentionLoop {
+  topic_id: number;
+  topic_name: string;
+  cadence: 'daily' | 'weekly';
+  plan_summary: string;
+  next_actions: TopicActionItem[];
+  learning_plan: TopicActionItem[];
+  unlock_anticipation: UnlockAnticipation | null;
+  reminder: TopicReminder | null;
+  milestones: MilestoneEvent[];
+  total_nodes: number;
+  available_nodes: number;
+  verified_nodes: number;
+  completed_nodes: number;
+  lessons_completed: number;
+  assessments_taken: number;
+  mastery_average: number;
+  tree_stage: number;
+  streak_days: number;
+  activity_days_last_14: number;
+  latest_activity_at: string | null;
 }
 
 export interface UserTopicProgressSummary {
@@ -304,6 +377,7 @@ export interface UserTopicProgressSummary {
   total_nodes: number;
   verified_nodes: number;
   mastery_average: number;
+  tree_stage: number;
 }
 
 export interface UserProgressSummary {

@@ -71,6 +71,11 @@ export function TopicsDashboard() {
         <p className="muted mt-3 max-w-2xl text-sm md:text-base">
           Build your topic roadmap, track mastery, and learn through focused node-by-node progression.
         </p>
+        <div className="mt-3">
+          <Link href="/garden" className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+            Open Garden
+          </Link>
+        </div>
       </header>
 
       <section className="grid gap-8 lg:grid-cols-[1fr_1.2fr]">
