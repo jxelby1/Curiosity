@@ -7,6 +7,10 @@ import { FormEvent, useEffect, useState } from 'react';
 import { createTopic, listTopics } from '@/lib/api';
 import { Topic } from '@/lib/types';
 
+const TOPIC_NAME_MAX = 120;
+const TOPIC_DESC_MAX = 500;
+const TOPIC_GOAL_MAX = 500;
+
 export function TopicsDashboard() {
   const router = useRouter();
   const [topics, setTopics] = useState<Topic[]>([]);
@@ -37,12 +41,16 @@ export function TopicsDashboard() {
 
   async function onCreateTopic(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!name.trim()) return;
+    const trimmedName = name.trim();
+    if (trimmedName.length < 2) {
+      setError('Topic name must be at least 2 characters.');
+      return;
+    }
 
     setCreating(true);
     setError('');
     try {
-      const topic = await createTopic({ name, description, goal });
+      const topic = await createTopic({ name: trimmedName, description: description.trim(), goal: goal.trim() });
       router.push(`/topics/${topic.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create topic');
@@ -70,20 +78,26 @@ export function TopicsDashboard() {
               onChange={(event) => setName(event.target.value)}
               className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
               placeholder="Topic (e.g. Python debugging)"
+              maxLength={TOPIC_NAME_MAX}
               required
             />
+            <p className="text-right text-xs text-black/60">{name.length}/{TOPIC_NAME_MAX}</p>
             <textarea
               value={description}
               onChange={(event) => setDescription(event.target.value)}
               className="min-h-24 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
               placeholder="Short topic description"
+              maxLength={TOPIC_DESC_MAX}
             />
+            <p className="text-right text-xs text-black/60">{description.length}/{TOPIC_DESC_MAX}</p>
             <textarea
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
               className="min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
               placeholder="Outcome goal (optional)"
+              maxLength={TOPIC_GOAL_MAX}
             />
+            <p className="text-right text-xs text-black/60">{goal.length}/{TOPIC_GOAL_MAX}</p>
             <button
               type="submit"
               disabled={creating}
@@ -102,7 +116,13 @@ export function TopicsDashboard() {
             </button>
           </div>
 
-          {loading && <p className="muted text-sm">Loading topics...</p>}
+          {loading && (
+            <div className="space-y-3">
+              <div className="skeleton h-16 w-full" />
+              <div className="skeleton h-16 w-full" />
+              <div className="skeleton h-16 w-full" />
+            </div>
+          )}
           {!loading && topics.length === 0 && (
             <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
               No topics yet. Create your first topic to start your skill tree.

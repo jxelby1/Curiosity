@@ -7,7 +7,7 @@ from typing import Any, Literal
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.db.models import LearningResource, ResourceType, SkillNode, Topic
+from app.db.models import LearningResource, ResourceType, SkillEdge, SkillNode, Topic, UserSkillState
 from app.schemas.llm import (
     ExamplesPlan,
     ExercisesPlan,
@@ -33,6 +33,130 @@ class ResourceAgent:
         self.llm_service = llm_service
         self.search_service = search_service
         self.retrieval_service = retrieval_service
+
+    def _difficulty_band(self, difficulty: int) -> str:
+        if difficulty <= 2:
+            return 'foundation'
+        if difficulty == 3:
+            return 'intermediate'
+        return 'advanced'
+
+    def _learner_level(self, state: UserSkillState | None) -> str:
+        if not state:
+            return 'beginner'
+        if state.progress_state == 'verified' or state.mastery >= 0.75:
+            return 'advanced'
+        if state.progress_state in ('learning', 'completed') or state.mastery >= 0.35:
+            return 'intermediate'
+        return 'beginner'
+
+    def _alignment_rules(self, difficulty: int, learner_level: str, kind: str) -> str:
+        base = (
+            '- Stay strictly scoped to this node title and description.\n'
+            '- Assume only prerequisite knowledge, not downstream skills.\n'
+            '- Do not include capstone or multi-skill project tasks unless node difficulty is advanced.\n'
+        )
+
+        if difficulty <= 2 or learner_level == 'beginner':
+            beginner = (
+                '- Treat learner as beginner/foundation for this node.\n'
+                '- Use plain language, short steps, and foundational concepts.\n'
+                '- Exercises must be short micro-practice tasks (5-15 minutes each).\n'
+                '- Do NOT ask for full sets, long performances, or complex end-to-end production workflows.\n'
+            )
+            return base + beginner
+
+        if kind == 'exercises':
+            return (
+                base
+                + '- Use applied tasks that are realistic for node scope.\n'
+                '- Prefer progressive tasks from easier to harder.\n'
+            )
+        return base
+
+    def _field_length_rules(self, kind: str) -> str:
+        if kind == 'lesson':
+            return (
+                '- Keep summary under 280 characters.\n'
+                '- Keep section content concise (2-5 short paragraphs each).\n'
+            )
+        if kind == 'examples':
+            return (
+                '- Keep intro under 260 characters.\n'
+                '- Keep each explanation concise and practical.\n'
+            )
+        if kind == 'exercises':
+            return (
+                '- Keep intro under 260 characters.\n'
+                '- Keep each task scoped to one focused activity.\n'
+            )
+        return ''
+
+    def _contains_advanced_pattern(self, text: str) -> bool:
+        lowered = text.lower()
+        patterns = (
+            '5-minute set',
+            '5 minute set',
+            'full set',
+            'live set',
+            'perform a set',
+            'end-to-end',
+            'end to end',
+            'full production workflow',
+            'release-ready',
+            'mastering chain',
+        )
+        return any(pattern in lowered for pattern in patterns)
+
+    def _enforce_foundation_scope(
+        self,
+        *,
+        kind: str,
+        structured_content: dict[str, Any],
+        skill_name: str,
+    ) -> dict[str, Any]:
+        if kind != 'exercises':
+            return structured_content
+
+        exercises = structured_content.get('exercises')
+        if not isinstance(exercises, list):
+            return structured_content
+
+        normalized_exercises: list[dict[str, Any]] = []
+        for exercise in exercises:
+            if not isinstance(exercise, dict):
+                continue
+
+            text = ' '.join(
+                [
+                    str(exercise.get('title', '')),
+                    str(exercise.get('task', '')),
+                    str(exercise.get('expected_outcome', '')),
+                ]
+            )
+            if self._contains_advanced_pattern(text):
+                exercise['task'] = (
+                    f'In a short 10-minute practice, focus on one core "{skill_name}" technique only. '
+                    'Repeat the same simple pattern until timing and control are stable.'
+                )
+                exercise['expected_outcome'] = (
+                    'You can demonstrate one foundational pattern cleanly for 30-60 seconds and explain what improved.'
+                )
+                hints = exercise.get('hints')
+                if isinstance(hints, list):
+                    exercise['hints'] = (hints[:2] + ['Keep the scope small: one pattern, one technique.'])[:4]
+                else:
+                    exercise['hints'] = [
+                        'Start with one simple pattern.',
+                        'Keep the drill short and repeatable.',
+                    ]
+                exercise['difficulty'] = 'easy'
+
+            normalized_exercises.append(exercise)
+
+        if normalized_exercises:
+            structured_content['exercises'] = normalized_exercises
+        return structured_content
 
     def _resource_type_for_kind(self, kind: str) -> ResourceType:
         mapping = {
@@ -110,18 +234,30 @@ class ResourceAgent:
         prompts = {
             'lesson': (
                 LessonPlan,
-                'Create a practical lesson for this single skill node. Keep it concise and clear for self-study.',
+                (
+                    'Create a practical lesson for this skill node. Keep it concise and clear for self-study. '
+                    'Keep summary concise and avoid unnecessary verbosity.'
+                ),
+                1400,
             ),
             'examples': (
                 ExamplesPlan,
-                'Create concrete examples that build from simple to challenging and explain the reasoning.',
+                (
+                    'Create concrete examples that build from simple to challenging and explain the reasoning. '
+                    'Keep intro concise (roughly 2-3 sentences).'
+                ),
+                1000,
             ),
             'exercises': (
                 ExercisesPlan,
-                'Create exercises that can be completed in short practice sessions with clear expected outcomes.',
+                (
+                    'Create exercises for short practice sessions with clear expected outcomes. '
+                    'Keep intro concise (roughly 2-3 sentences).'
+                ),
+                1100,
             ),
         }
-        schema_model, instruction = prompts[kind]
+        schema_model, instruction, max_tokens = prompts[kind]
 
         retrieved = await self.retrieval_service.retrieve_chunks(
             db,
@@ -130,6 +266,27 @@ class ResourceAgent:
             top_k=3,
         )
         notes_context = '\n\n'.join(f'- {item.text[:320]}' for item in retrieved)
+        user_state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == user_id,
+                UserSkillState.skill_node_id == skill_node.id,
+            )
+        )
+        prerequisite_ids = db.scalars(
+            select(SkillEdge.parent_skill_id).where(
+                SkillEdge.topic_id == topic.id,
+                SkillEdge.child_skill_id == skill_node.id,
+            )
+        ).all()
+        prerequisite_names: list[str] = []
+        if prerequisite_ids:
+            prerequisite_nodes = db.scalars(select(SkillNode).where(SkillNode.id.in_(prerequisite_ids))).all()
+            prerequisite_names = [node.name for node in prerequisite_nodes]
+
+        difficulty_band = self._difficulty_band(skill_node.difficulty)
+        learner_level = self._learner_level(user_state)
+        alignment_rules = self._alignment_rules(skill_node.difficulty, learner_level, kind)
+        field_length_rules = self._field_length_rules(kind)
 
         system_prompt = (
             'You are ResourceAgent. Produce high-quality learning material that is technically correct and '
@@ -140,7 +297,13 @@ class ResourceAgent:
             f'Goal: {topic.goal or "No explicit goal"}\n'
             f'Skill: {skill_node.name}\n'
             f'Skill description: {skill_node.description}\n\n'
+            f'Skill difficulty (1-5): {skill_node.difficulty} ({difficulty_band})\n'
+            f'Learner level for this node: {learner_level}\n'
+            f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\n'
+            f'Prerequisites for this node: {", ".join(prerequisite_names) if prerequisite_names else "None"}\n\n'
             f'Retrieved learner notes:\n{notes_context or "No notes available"}\n\n'
+            f'Alignment rules:\n{alignment_rules}\n'
+            f'Formatting constraints:\n{field_length_rules}\n'
             f'Instruction: {instruction}'
         )
 
@@ -149,10 +312,16 @@ class ResourceAgent:
             user_prompt=user_prompt,
             schema_model=schema_model,
             temperature=0.3,
-            max_tokens=1700,
+            max_tokens=max_tokens,
         )
 
         structured_content = structured_model.model_dump()
+        if skill_node.difficulty <= 2 or learner_level == 'beginner':
+            structured_content = self._enforce_foundation_scope(
+                kind=kind,
+                structured_content=structured_content,
+                skill_name=skill_node.name,
+            )
         content = json.dumps(structured_content, indent=2)
         summary = structured_content.get('summary') or structured_content.get('intro') or content[:240]
 

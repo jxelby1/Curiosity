@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
+  createDeepDiveBranch,
   generateQuiz,
   generateResource,
   getExternalResources,
@@ -12,6 +13,7 @@ import {
   submitQuiz,
   updateProgress
 } from '@/lib/api';
+import { readRecommendationCache, readSkillTreeCache, writeRecommendationCache, writeSkillTreeCache } from '@/lib/cache';
 import {
   ExternalResource,
   Quiz,
@@ -30,6 +32,7 @@ import {
   parseLessonContent
 } from '@/components/learning-content';
 import { TopicHeader } from '@/components/topic-header';
+import { SkillWorkspaceSkeleton } from '@/components/page-skeletons';
 
 type LearningTab = 'overview' | 'lesson' | 'examples' | 'exercises' | 'quiz' | 'resources';
 type ResourceKind = 'lesson' | 'examples' | 'exercises';
@@ -61,6 +64,11 @@ function progressStateClasses(state: ProgressState): string {
   if (state === 'completed') return 'bg-sky-100 text-sky-900 border-sky-300';
   if (state === 'learning') return 'bg-amber-100 text-amber-900 border-amber-300';
   return 'bg-zinc-100 text-zinc-700 border-zinc-300';
+}
+
+function nodeKindClasses(nodeKind: SkillNode['node_kind']): string {
+  if (nodeKind === 'optional_branch') return 'bg-violet-100 text-violet-800 border-violet-300';
+  return 'bg-white text-black/70 border-black/20';
 }
 
 function sourceCopy(source: 'stored' | 'generated' | 'regenerated'): string {
@@ -102,9 +110,11 @@ function ProgressChecklistItem({ label, complete }: { label: string; complete: b
 export default function SkillWorkspacePage({ params }: { params: { topicId: string; skillId: string } }) {
   const topicId = params.topicId;
   const routeSkillId = Number(params.skillId);
+  const cachedTree = readSkillTreeCache(topicId);
+  const cachedRecommendations = readRecommendationCache(topicId) || [];
 
-  const [tree, setTree] = useState<SkillTree | null>(null);
-  const [recommendations, setRecommendations] = useState<RecommendationItem[]>([]);
+  const [tree, setTree] = useState<SkillTree | null>(cachedTree);
+  const [recommendations, setRecommendations] = useState<RecommendationItem[]>(cachedRecommendations);
   const [activeTab, setActiveTab] = useState<LearningTab>('overview');
 
   const [contentCache, setContentCache] = useState<Record<number, NodeCache>>({});
@@ -112,7 +122,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [loadingByKey, setLoadingByKey] = useState<Record<string, boolean>>({});
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
-  const [loading, setLoading] = useState(true);
+  const [loadingTree, setLoadingTree] = useState(!cachedTree);
+  const [loadingRecommendations, setLoadingRecommendations] = useState(cachedRecommendations.length === 0);
+  const [deepDiveFocus, setDeepDiveFocus] = useState('');
   const [pageError, setPageError] = useState('');
 
   const selectedSkill = useMemo(() => {
@@ -130,23 +142,53 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     return quizAnswersByNode[selectedSkill.id] || {};
   }, [quizAnswersByNode, selectedSkill]);
 
-  const refreshTopicData = useCallback(async () => {
-    setLoading(true);
-    setPageError('');
-    try {
-      const [nextTree, recs] = await Promise.all([getSkillTree(topicId), getRecommendations(topicId)]);
-      setTree(nextTree);
-      setRecommendations(recs);
-    } catch (err) {
-      setPageError(err instanceof Error ? err.message : 'Failed to load skill workspace');
-    } finally {
-      setLoading(false);
-    }
-  }, [topicId]);
+  const loadTree = useCallback(
+    async (showLoader = false) => {
+      if (showLoader) setLoadingTree(true);
+      try {
+        const nextTree = await getSkillTree(topicId);
+        setTree(nextTree);
+        writeSkillTreeCache(topicId, nextTree);
+      } catch (err) {
+        setPageError(err instanceof Error ? err.message : 'Failed to load skill workspace');
+      } finally {
+        setLoadingTree(false);
+      }
+    },
+    [topicId]
+  );
+
+  const loadRecommendations = useCallback(
+    async (refresh = false) => {
+      setLoadingRecommendations(true);
+      try {
+        const recs = await getRecommendations(topicId, 1, refresh);
+        setRecommendations(recs);
+        writeRecommendationCache(topicId, recs);
+      } catch (err) {
+        setPageError(err instanceof Error ? err.message : 'Failed to load recommendations');
+      } finally {
+        setLoadingRecommendations(false);
+      }
+    },
+    [topicId]
+  );
+
+  const refreshTopicData = useCallback(
+    async (refreshRecommendations = false) => {
+      setPageError('');
+      await loadTree(false);
+      if (refreshRecommendations) {
+        await loadRecommendations(true);
+      }
+    },
+    [loadRecommendations, loadTree]
+  );
 
   useEffect(() => {
-    refreshTopicData();
-  }, [refreshTopicData]);
+    loadTree();
+    loadRecommendations();
+  }, [loadRecommendations, loadTree]);
 
   useEffect(() => {
     setActiveTab('overview');
@@ -170,6 +212,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   async function ensureResource(kind: ResourceKind, forceRegenerate = false) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState(kind, selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
     const existing = contentCache[nodeId]?.resources?.[kind];
     if (existing && !forceRegenerate) return;
 
@@ -194,7 +240,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           }
         };
       });
-      await refreshTopicData();
+      await loadTree(false);
     } catch (err) {
       setErrorState(kind, err instanceof Error ? err.message : `Failed to load ${kind}`, nodeId);
     } finally {
@@ -205,6 +251,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   async function ensureExternalResources(force = false) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('resources', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
     const existing = contentCache[nodeId]?.externalResources;
     if (existing && existing.length > 0 && !force) return;
 
@@ -232,6 +282,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   async function ensureQuiz(forceRegenerate = false) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('quiz', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
     const existing = contentCache[nodeId]?.quiz;
     if (existing && !forceRegenerate) return;
 
@@ -261,6 +315,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   async function handleSubmitQuiz() {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('quiz', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
     const quiz = contentCache[nodeId]?.quiz;
     if (!quiz) return;
 
@@ -280,7 +338,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           }
         };
       });
-      await refreshTopicData();
+      await refreshTopicData(true);
     } catch (err) {
       setErrorState('quiz', err instanceof Error ? err.message : 'Failed to submit quiz', nodeId);
     } finally {
@@ -291,6 +349,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   async function handleProgressUpdate(action: 'complete_lesson' | 'complete_exercises') {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('progress', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
 
     setLoadingState('progress', true, nodeId);
     setErrorState('progress', '', nodeId);
@@ -299,7 +361,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         skillId: nodeId,
         action
       });
-      await refreshTopicData();
+      await refreshTopicData(true);
     } catch (err) {
       setErrorState('progress', err instanceof Error ? err.message : 'Failed to update progress', nodeId);
     } finally {
@@ -307,7 +369,37 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  async function handleDeepDive() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('deep-dive', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
+
+    setLoadingState('deep-dive', true, nodeId);
+    setErrorState('deep-dive', '', nodeId);
+    try {
+      const nextTree = await createDeepDiveBranch({
+        skillId: nodeId,
+        focus: deepDiveFocus.trim() || undefined,
+        branch_size: 3
+      });
+      setTree(nextTree);
+      writeSkillTreeCache(topicId, nextTree);
+      setDeepDiveFocus('');
+      await loadRecommendations(true);
+    } catch (err) {
+      setErrorState('deep-dive', err instanceof Error ? err.message : 'Failed to create deep-dive branch', nodeId);
+    } finally {
+      setLoadingState('deep-dive', false, nodeId);
+    }
+  }
+
   async function onTabChange(tab: LearningTab) {
+    if (selectedSkill?.status === 'locked' && tab !== 'overview') {
+      return;
+    }
     setActiveTab(tab);
     if (tab === 'lesson') await ensureResource('lesson');
     if (tab === 'examples') await ensureResource('examples');
@@ -316,13 +408,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     if (tab === 'quiz') await ensureQuiz();
   }
 
-  if (loading) {
-    return (
-      <main className="mx-auto max-w-7xl p-6 md:p-10">
-        <p className="panel p-4 text-sm">Loading skill workspace...</p>
-      </main>
-    );
-  }
+  if (!tree && loadingTree) return <SkillWorkspaceSkeleton />;
 
   if (!tree || !selectedSkill) {
     return (
@@ -343,6 +429,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const quizLoading = !!loadingByKey[keyFor('quiz', activeNodeId)];
   const quizSubmitLoading = !!loadingByKey[keyFor('quiz-submit', activeNodeId)];
   const resourcesLoading = !!loadingByKey[keyFor('resources', activeNodeId)];
+  const deepDiveLoading = !!loadingByKey[keyFor('deep-dive', activeNodeId)];
+  const deepDiveError = errorByKey[keyFor('deep-dive', activeNodeId)] || '';
 
   const lessonResource = currentNodeCache?.resources?.lesson;
   const examplesResource = currentNodeCache?.resources?.examples;
@@ -359,6 +447,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const exercisesComplete = selectedSkill.exercises_completed;
   const quizTaken = selectedSkill.quiz_taken;
   const isVerified = selectedSkill.progress_state === 'verified';
+  const isLocked = selectedSkill.status === 'locked';
   const bestQuizScorePct =
     typeof selectedSkill.best_quiz_score === 'number' ? Math.round(selectedSkill.best_quiz_score * 100) : null;
 
@@ -369,7 +458,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         topicName={tree.topic.name}
         subtitle={`Focused node workspace for ${selectedSkill.name}`}
         rightSlot={
-          <button className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm" onClick={refreshTopicData}>
+          <button
+            className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+            onClick={() => refreshTopicData(true)}
+          >
             Refresh
           </button>
         }
@@ -390,7 +482,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 >
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold leading-snug">{node.name}</p>
-                    <span className={`badge border ${statusClasses(node.status)}`}>{node.status.replace('_', ' ')}</span>
+                    <div className="flex flex-wrap items-center gap-1">
+                      {node.node_kind === 'optional_branch' && (
+                        <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional</span>
+                      )}
+                      <span className={`badge border ${statusClasses(node.status)}`}>{node.status.replace('_', ' ')}</span>
+                    </div>
                   </div>
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <span className={`badge border ${progressStateClasses(node.progress_state)}`}>
@@ -398,6 +495,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     </span>
                     <span className="text-xs text-black/65">Difficulty {node.difficulty}</span>
                   </div>
+                  {node.status === 'locked' && node.lock_reason && (
+                    <p className="mt-2 text-xs text-red-700">{node.lock_reason}</p>
+                  )}
                 </Link>
               ))}
             </div>
@@ -405,6 +505,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
           <article className="panel p-4">
             <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended next nodes</h3>
+            {loadingRecommendations && <p className="mt-2 text-xs text-black/60">Updating recommendations...</p>}
             <div className="mt-3 space-y-2">
               {recommendations.map((rec) => (
                 <Link
@@ -427,8 +528,14 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
               <div>
                 <h2 className="text-2xl font-semibold leading-tight">{selectedSkill.name}</h2>
                 <p className="muted mt-2 max-w-3xl text-sm leading-relaxed">{selectedSkill.description}</p>
+                {selectedSkill.status === 'locked' && selectedSkill.lock_reason && (
+                  <p className="mt-2 text-sm text-red-700">{selectedSkill.lock_reason}</p>
+                )}
               </div>
               <div className="flex items-center gap-2">
+                {selectedSkill.node_kind === 'optional_branch' && (
+                  <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional branch</span>
+                )}
                 <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
                   {progressStateLabel(selectedSkill.progress_state)}
                 </span>
@@ -443,9 +550,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   className={`rounded-md border px-3 py-1.5 text-sm transition ${
                     activeTab === tab.id
                       ? 'border-ink bg-ink text-white'
-                      : 'border-black/15 bg-white text-black hover:border-black/35'
+                      : isLocked && tab.id !== 'overview'
+                        ? 'cursor-not-allowed border-black/10 bg-black/5 text-black/40'
+                        : 'border-black/15 bg-white text-black hover:border-black/35'
                   }`}
                   onClick={() => onTabChange(tab.id)}
+                  disabled={isLocked && tab.id !== 'overview'}
                   type="button"
                 >
                   {tab.label}
@@ -455,6 +565,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           </header>
 
           {tabError && <p className="mb-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{tabError}</p>}
+
+          {isLocked && activeTab !== 'overview' && (
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              This node is locked. Learning content becomes available after you verify prerequisites.
+            </div>
+          )}
 
           {activeTab === 'overview' && (
             <div className="space-y-5">
@@ -501,15 +617,46 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     {exercisesComplete ? 'Exercises completed' : 'Mark exercises complete'}
                   </button>
                   <button
-                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
+                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-50"
                     onClick={() => onTabChange('quiz')}
+                    disabled={selectedSkill.status === 'locked'}
                     type="button"
                   >
                     Open quiz
                   </button>
                 </div>
                 {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then complete exercises, then pass the quiz.</p>}
+                {isLocked && (
+                  <p className="mt-3 text-xs text-red-700">
+                    This node is locked. Verify prerequisite nodes to unlock learning content.
+                  </p>
+                )}
                 {progressError && <p className="mt-3 text-sm text-red-700">{progressError}</p>}
+              </section>
+
+              <section className="rounded-xl border border-black/10 bg-white p-4">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Explore Further (Optional)</h3>
+                <p className="muted mt-2 text-sm">
+                  Create a side branch with optional modules if you want to go deeper on this node.
+                </p>
+                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <input
+                    value={deepDiveFocus}
+                    onChange={(event) => setDeepDiveFocus(event.target.value)}
+                    className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm sm:max-w-md"
+                    placeholder="Optional focus (e.g. groove timing, edge cases, troubleshooting)"
+                    maxLength={180}
+                  />
+                  <button
+                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                    onClick={handleDeepDive}
+                    disabled={deepDiveLoading || isLocked}
+                    type="button"
+                  >
+                    {deepDiveLoading ? 'Creating branch...' : 'Create optional branch'}
+                  </button>
+                </div>
+                {deepDiveError && <p className="mt-2 text-sm text-red-700">{deepDiveError}</p>}
               </section>
 
               <section className="rounded-xl border border-black/10 bg-white p-4">
@@ -519,7 +666,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
-          {activeTab === 'lesson' && (
+          {activeTab === 'lesson' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
                 {lessonResource && <ContentMeta source={lessonResource.source} version={lessonResource.version} />}
@@ -542,7 +689,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
-          {activeTab === 'examples' && (
+          {activeTab === 'examples' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
                 {examplesResource && <ContentMeta source={examplesResource.source} version={examplesResource.version} />}
@@ -565,7 +712,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
-          {activeTab === 'exercises' && (
+          {activeTab === 'exercises' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
                 {exercisesResource && <ContentMeta source={exercisesResource.source} version={exercisesResource.version} />}
@@ -588,7 +735,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
-          {activeTab === 'quiz' && (
+          {activeTab === 'quiz' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
                 {quiz && <ContentMeta source={quiz.source} version={quiz.version} />}
@@ -676,7 +823,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
-          {activeTab === 'resources' && (
+          {activeTab === 'resources' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap gap-2">
                 <button

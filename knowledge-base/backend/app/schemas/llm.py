@@ -22,6 +22,25 @@ class SkillGraphPlan(BaseModel):
     nodes: list[SkillPlanNode] = Field(min_length=5, max_length=20)
 
 
+class DeepDivePlanNode(BaseModel):
+    key: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=180)
+    description: str = Field(min_length=10, max_length=600)
+    difficulty: int = Field(ge=1, le=5)
+    prerequisites: list[str] = Field(default_factory=list)
+
+    @field_validator('key')
+    @classmethod
+    def normalize_key(cls, value: str) -> str:
+        return value.strip().lower().replace(' ', '_').replace('-', '_')
+
+
+class DeepDiveBranchPlan(BaseModel):
+    branch_title: str = Field(min_length=4, max_length=180)
+    rationale: str = Field(min_length=20, max_length=400)
+    nodes: list[DeepDivePlanNode] = Field(min_length=2, max_length=6)
+
+
 class RecommendationChoice(BaseModel):
     skill_node_id: int
     action_type: Literal['study_generated', 'study_external', 'practice_quiz']
@@ -83,7 +102,7 @@ class ExamplePlanItem(BaseModel):
 
 class ExamplesPlan(BaseModel):
     title: str = Field(min_length=4, max_length=180)
-    intro: str = Field(min_length=20, max_length=280)
+    intro: str = Field(min_length=20, max_length=420)
     examples: list[ExamplePlanItem] = Field(min_length=2, max_length=6)
 
 
@@ -97,5 +116,13 @@ class ExercisePlanItem(BaseModel):
 
 class ExercisesPlan(BaseModel):
     title: str = Field(min_length=4, max_length=180)
-    intro: str = Field(min_length=20, max_length=280)
+    intro: str = Field(min_length=20, max_length=420)
     exercises: list[ExercisePlanItem] = Field(min_length=2, max_length=8)
+
+
+class TutorReplyPlan(BaseModel):
+    overview: str = Field(min_length=20, max_length=500)
+    key_points: list[str] = Field(min_length=2, max_length=6)
+    practical_steps: list[str] = Field(min_length=2, max_length=6)
+    pitfalls: list[str] = Field(default_factory=list, max_length=4)
+    next_step: str = Field(min_length=10, max_length=240)

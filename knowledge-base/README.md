@@ -20,6 +20,7 @@ This version is a **live MVP**, not a mock PoC:
 - generates lessons/examples/exercises for selected skills
 - generates quizzes and updates mastery from quiz attempts
 - fetches external resources (article/docs/video) for selected skills
+- supports first-class personal notes (separate from uploaded source documents)
 
 ## Tech stack
 
@@ -95,6 +96,16 @@ knowledge-base/
 
 API routes orchestrate these agents directly for clear flow and testability.
 
+## Performance and loading strategy
+
+Recent UX/performance refactor highlights:
+
+- recommendation endpoint now reuses recently generated recommendations (3-minute freshness window) by default to avoid unnecessary LLM calls on every page load
+- topic/skill pages use progressive loading: primary skill-tree content renders first, secondary panels load in the background
+- client-side short-lived cache for topic tree and recommendations reduces repeated requests across route transitions
+- route-level `loading.tsx` skeletons for topics, topic overview, skill workspace, chat, and notes prevent blank/full-page blocking loaders
+- generation endpoints still stay live, but content reuse (`source=stored`) keeps revisits fast and consistent
+
 ## Progression model (status-first)
 
 Each node exposes learner-facing progression states:
@@ -135,9 +146,11 @@ This behavior is implemented for:
 - `/topics/[topicId]/skills/[skillId]`
   - Focused node workspace with tabbed learning views (`Overview`, `Lesson`, `Examples`, `Exercises`, `Quiz`, `Resources`).
 - `/topics/[topicId]/chat`
-  - Tutor conversation workspace.
+  - Tutor conversation workspace with structured assistant rendering and optional personal-note inclusion.
 - `/topics/[topicId]/notes`
-  - Notes upload and ingestion workspace.
+  - Dedicated notes workspace:
+  - Personal notes CRUD (title/body/type/optional skill link)
+  - Separate source document upload/list for retrieval
 
 ## Generated Content Contract
 
@@ -155,6 +168,33 @@ Both resource and quiz generation responses include:
 
 - `source`: `stored | generated | regenerated`
 - `version`: persisted content version number
+
+## Tutor chat contract
+
+`POST /api/topics/{topic_id}/chat` now supports:
+
+- `include_personal_notes` (boolean, default `false`)
+
+Response includes:
+
+- `answer` (plain rendered text for transcript/history)
+- `structured_answer` (`overview`, `key_points[]`, `practical_steps[]`, `pitfalls[]`, `next_step`)
+- `context_usage` (`document_chunks`, `personal_notes`)
+
+Personal notes are not silently injected by default; they are opt-in per message from the chat UI.
+
+## Notes and documents model
+
+Two separate concepts:
+
+1. Personal notes (`notes` table):
+- `id`, `user_id`, `topic_id`, optional `skill_node_id`
+- `note_type` (`personal`, `lesson`, `summary`, `reflection`, `reminder`)
+- `title`, `body`, `created_at`, `updated_at`
+
+2. Source documents (`documents` + `document_chunks`):
+- uploaded materials used for embedding + retrieval
+- separate from user-authored notes
 
 ## Environment variables
 
@@ -228,7 +268,7 @@ python -m scripts.seed_demo
 
 1. Create topic (for example, `Python debugging`) from dashboard.
 2. Open topic page and confirm generated skill tree nodes.
-3. Upload note text or file.
+3. Upload source material files in **Notes** (documents) and optionally create personal notes.
 4. Ask tutor a question with a selected skill.
 5. Request recommendations.
 6. Generate lesson/examples/exercises.
@@ -276,7 +316,13 @@ The smoke script verifies:
 - `POST /api/topics/{topic_id}/skill-tree/generate`
 - `GET /api/topics/{topic_id}/skill-tree`
 - `POST /api/topics/{topic_id}/notes/upload`
+- `POST /api/topics/{topic_id}/documents/upload`
+- `GET /api/topics/{topic_id}/documents`
 - `GET /api/topics/{topic_id}/notes`
+- `POST /api/topics/{topic_id}/notes`
+- `GET /api/notes/{note_id}`
+- `PUT /api/notes/{note_id}`
+- `DELETE /api/notes/{note_id}`
 - `POST /api/topics/{topic_id}/chat`
 - `GET /api/topics/{topic_id}/recommendations`
 - `POST /api/skills/{skill_id}/resources/generate`
@@ -284,6 +330,10 @@ The smoke script verifies:
 - `POST /api/skills/{skill_id}/quiz/generate`
 - `POST /api/assessments/{assessment_id}/submit`
 - `POST /api/skills/{skill_id}/progress/update`
+
+Legacy compatibility alias:
+
+- `POST /api/topics/{topic_id}/notes/upload` (maps to document upload)
 
 ## Database schema entities
 
@@ -294,6 +344,7 @@ The smoke script verifies:
 - `UserSkillState`
 - `Document`
 - `DocumentChunk` (pgvector embedding)
+- `Note`
 - `ChatSession`
 - `ChatMessage`
 - `Recommendation`
@@ -319,6 +370,7 @@ The backend logs:
 - Internal mastery remains heuristic (practical for MVP, not psychometrically calibrated).
 - No authentication/authorization yet (single demo user flow by default).
 - No background queue yet; all heavy operations run inline in request paths.
+- No full-text index yet for notes search (currently simple `ILIKE` filtering).
 
 ## Suggested next steps
 

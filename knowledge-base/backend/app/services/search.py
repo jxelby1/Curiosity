@@ -24,7 +24,14 @@ class ExternalSearchService:
     def __init__(self) -> None:
         self.settings = get_settings()
 
-    async def search(self, topic: str, skill: str, limit: int = 5) -> list[SearchResult]:
+    async def search(
+        self,
+        topic: str,
+        skill: str,
+        *,
+        query: str | None = None,
+        limit: int = 5,
+    ) -> list[SearchResult]:
         if self.settings.search_provider != 'serper':
             raise ConfigurationError('Only search provider "serper" is currently supported.')
         if not self.settings.search_api_key:
@@ -33,26 +40,26 @@ class ExternalSearchService:
                 'Set SEARCH_API_KEY in your backend environment.'
             )
 
-        query = f'{topic} {skill} tutorial documentation guide'
+        final_query = (query or '').strip() or f'{topic} {skill} tutorial documentation guide'
         headers = {
             'X-API-KEY': self.settings.search_api_key,
             'Content-Type': 'application/json',
         }
         payload = {
-            'q': query,
+            'q': final_query,
             'num': max(8, limit * 3),
             'gl': 'us',
             'hl': 'en',
         }
 
-        logger.info('external_search.start provider=%s query=%s', self.settings.search_provider, query)
+        logger.info('external_search.start provider=%s query=%s', self.settings.search_provider, final_query)
 
         async with httpx.AsyncClient(timeout=20) as client:
             try:
                 response = await client.post(self.settings.search_base_url, headers=headers, json=payload)
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                logger.exception('external_search.error query=%s', query)
+                logger.exception('external_search.error query=%s', final_query)
                 raise ProviderError(f'External search failed: {exc}') from exc
 
         data = response.json()
@@ -113,5 +120,5 @@ class ExternalSearchService:
             if len(results) >= limit:
                 break
 
-        logger.info('external_search.complete query=%s results=%s', query, len(results))
+        logger.info('external_search.complete query=%s results=%s', final_query, len(results))
         return results

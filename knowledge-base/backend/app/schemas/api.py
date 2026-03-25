@@ -6,14 +6,14 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from app.db.models import ResourceType, SkillStatus
+from app.db.models import NoteType, ResourceType, SkillStatus
 
 
 class TopicCreateRequest(BaseModel):
     user_id: int = 1
-    name: str
-    description: str = ''
-    goal: str = ''
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default='', max_length=500)
+    goal: str = Field(default='', max_length=500)
 
 
 class TopicResponse(BaseModel):
@@ -35,8 +35,11 @@ class SkillNodeResponse(BaseModel):
     name: str
     description: str
     difficulty: int
+    node_kind: Literal['core', 'optional_branch'] = 'core'
+    branch_parent_skill_id: int | None = None
     mastery_estimate: float
     status: SkillStatus
+    lock_reason: str | None = None
     progress_state: Literal['not_started', 'learning', 'completed', 'verified'] = 'not_started'
     lesson_completed: bool = False
     exercises_completed: bool = False
@@ -52,34 +55,133 @@ class SkillTreeResponse(BaseModel):
     nodes: list[SkillNodeResponse]
 
 
-class NoteUploadResponse(BaseModel):
+class DeepDiveBranchRequest(BaseModel):
+    user_id: int = 1
+    focus: str = Field(default='', max_length=240)
+    branch_size: int = Field(default=3, ge=2, le=5)
+
+
+class DocumentUploadResponse(BaseModel):
     document_id: int
     filename: str
     chunks_created: int
 
 
-class NoteItemResponse(BaseModel):
+class DocumentItemResponse(BaseModel):
     id: int
     filename: str
     content_type: str
     created_at: datetime
 
 
+class DocumentListResponse(BaseModel):
+    documents: list[DocumentItemResponse]
+
+
+class NoteCreateRequest(BaseModel):
+    title: str = Field(default='', max_length=120)
+    body: str = Field(min_length=1, max_length=8000)
+    note_type: NoteType = NoteType.personal
+    skill_node_id: int | None = None
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class NoteUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=120)
+    body: str | None = Field(default=None, max_length=8000)
+    note_type: NoteType | None = None
+    skill_node_id: int | None = None
+    tags: list[str] | None = Field(default=None, max_length=12)
+
+
+class NoteResponse(BaseModel):
+    id: int
+    user_id: int
+    topic_id: int
+    skill_node_id: int | None = None
+    note_type: NoteType
+    tags: list[str] = Field(default_factory=list)
+    source_type: Literal['user_authored', 'tutor_generated', 'external_resource'] = 'user_authored'
+    source_chat_session_id: int | None = None
+    source_message_id: int | None = None
+    created_from_skill_node_id: int | None = None
+    created_from_topic_id: int | None = None
+    title: str
+    body: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class NoteListResponse(BaseModel):
-    documents: list[NoteItemResponse]
+    notes: list[NoteResponse]
 
 
 class ChatRequest(BaseModel):
     user_id: int = 1
     session_id: int | None = None
     skill_node_id: int | None = None
-    message: str
+    include_personal_notes: bool = False
+    include_web_resources: bool = False
+    message: str = Field(min_length=1, max_length=600)
+
+
+class TutorStructuredResponse(BaseModel):
+    overview: str
+    key_points: list[str] = Field(default_factory=list)
+    practical_steps: list[str] = Field(default_factory=list)
+    pitfalls: list[str] = Field(default_factory=list)
+    next_step: str
+
+
+class ChatContextUsage(BaseModel):
+    document_chunks: int = 0
+    personal_notes: int = 0
+    external_resources: int = 0
+
+
+class ChatCitation(BaseModel):
+    title: str
+    url: str
+    snippet: str = ''
 
 
 class ChatResponse(BaseModel):
     session_id: int
+    assistant_message_id: int
     answer: str
     used_chunks: list[str]
+    citations: list[ChatCitation] = Field(default_factory=list)
+    structured_answer: TutorStructuredResponse | None = None
+    context_usage: ChatContextUsage
+
+
+class TutorSaveMode(BaseModel):
+    mode: Literal['full', 'excerpt', 'summary'] = 'full'
+
+
+class SaveTutorResponseToNoteRequest(BaseModel):
+    user_id: int = 1
+    mode: Literal['full', 'excerpt', 'summary'] = 'full'
+    title: str = Field(default='', max_length=120)
+    body: str = Field(default='', max_length=8000)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+    note_type: NoteType = NoteType.summary
+    skill_node_id: int | None = None
+
+
+class AppendTutorResponseToNoteRequest(BaseModel):
+    user_id: int = 1
+    session_id: int
+    message_id: int
+    mode: Literal['full', 'excerpt', 'summary'] = 'excerpt'
+    body: str = Field(default='', max_length=8000)
+    tags: list[str] = Field(default_factory=list, max_length=12)
+
+
+class TutorNoteSaveResponse(BaseModel):
+    note: NoteResponse
+    duplicate_warning: str | None = None
+    appended: bool = False
 
 
 class RecommendationItem(BaseModel):

@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import TypeVar
+from types import UnionType
+from typing import Any, TypeVar, Union, get_args, get_origin
+
+from annotated_types import MaxLen
 
 from openai import APIError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel, ValidationError
@@ -39,6 +42,61 @@ def _extract_json_object(text: str) -> dict:
             raise ProviderError(f'Could not parse structured LLM JSON response: {exc}') from exc
 
     raise ProviderError('Could not locate a valid JSON object in LLM response.')
+
+
+def _unwrap_optional(annotation: Any) -> Any:
+    origin = get_origin(annotation)
+    if origin in (Union, UnionType):
+        args = [arg for arg in get_args(annotation) if arg is not type(None)]  # noqa: E721
+        if len(args) == 1:
+            return args[0]
+    return annotation
+
+
+def _max_len_from_metadata(metadata: list[Any]) -> int | None:
+    for item in metadata:
+        if isinstance(item, MaxLen):
+            return int(item.max_length)
+        max_length = getattr(item, 'max_length', None)
+        if isinstance(max_length, int):
+            return max_length
+    return None
+
+
+def _sanitize_payload_for_model(payload: dict[str, Any], model: type[BaseModel]) -> dict[str, Any]:
+    sanitized = dict(payload)
+
+    for field_name, field in model.model_fields.items():
+        if field_name not in sanitized:
+            continue
+
+        value = sanitized[field_name]
+        annotation = _unwrap_optional(field.annotation)
+
+        if isinstance(value, str):
+            max_len = _max_len_from_metadata(list(field.metadata))
+            if max_len is not None and len(value) > max_len:
+                sanitized[field_name] = value[:max_len].rstrip()
+            continue
+
+        if value is None:
+            continue
+
+        origin = get_origin(annotation)
+        if origin in (list, tuple) and isinstance(value, list):
+            args = get_args(annotation)
+            item_annotation = _unwrap_optional(args[0]) if args else Any
+            if isinstance(item_annotation, type) and issubclass(item_annotation, BaseModel):
+                sanitized[field_name] = [
+                    _sanitize_payload_for_model(item, item_annotation) if isinstance(item, dict) else item
+                    for item in value
+                ]
+            continue
+
+        if isinstance(annotation, type) and issubclass(annotation, BaseModel) and isinstance(value, dict):
+            sanitized[field_name] = _sanitize_payload_for_model(value, annotation)
+
+    return sanitized
 
 
 class LLMService:
@@ -128,8 +186,31 @@ class LLMService:
             )
             try:
                 payload = _extract_json_object(raw)
+            except ProviderError as exc:
+                logger.warning('openai.structured.retry attempt=%s error=%s', attempt + 1, exc)
+                if attempt == retries:
+                    raise ProviderError(
+                        f'Unable to parse structured output for schema {schema_model.__name__}: {exc}'
+                    ) from exc
+                attempt += 1
+                continue
+
+            try:
                 return schema_model.model_validate(payload)
-            except (ProviderError, ValidationError) as exc:
+            except ValidationError as exc:
+                repaired_payload = _sanitize_payload_for_model(payload, schema_model)
+                if repaired_payload != payload:
+                    try:
+                        repaired_model = schema_model.model_validate(repaired_payload)
+                        logger.info(
+                            'openai.structured.repaired schema=%s attempt=%s',
+                            schema_model.__name__,
+                            attempt + 1,
+                        )
+                        return repaired_model
+                    except ValidationError:
+                        pass
+
                 logger.warning('openai.structured.retry attempt=%s error=%s', attempt + 1, exc)
                 if attempt == retries:
                     raise ProviderError(

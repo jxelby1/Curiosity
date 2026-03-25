@@ -6,7 +6,7 @@ from typing import Literal
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.db.models import Assessment, AssessmentAttempt, SkillNode, Topic
+from app.db.models import Assessment, AssessmentAttempt, SkillEdge, SkillNode, Topic, UserSkillState
 from app.schemas.llm import QuizPlan
 from app.services.llm import LLMService
 
@@ -30,6 +30,22 @@ class AssessmentAgent:
             .order_by(Assessment.version.desc(), Assessment.created_at.desc())
         )
 
+    def _difficulty_band(self, difficulty: int) -> str:
+        if difficulty <= 2:
+            return 'foundation'
+        if difficulty == 3:
+            return 'intermediate'
+        return 'advanced'
+
+    def _learner_level(self, state: UserSkillState | None) -> str:
+        if not state:
+            return 'beginner'
+        if state.progress_state == 'verified' or state.mastery >= 0.75:
+            return 'advanced'
+        if state.progress_state in ('learning', 'completed') or state.mastery >= 0.35:
+            return 'intermediate'
+        return 'beginner'
+
     async def generate_quiz(
         self,
         db: Session,
@@ -51,6 +67,26 @@ class AssessmentAgent:
             )
             return existing, 'stored'
 
+        user_state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == user_id,
+                UserSkillState.skill_node_id == skill_node.id,
+            )
+        )
+        prerequisite_ids = db.scalars(
+            select(SkillEdge.parent_skill_id).where(
+                SkillEdge.topic_id == topic.id,
+                SkillEdge.child_skill_id == skill_node.id,
+            )
+        ).all()
+        prerequisite_names: list[str] = []
+        if prerequisite_ids:
+            prerequisite_nodes = db.scalars(select(SkillNode).where(SkillNode.id.in_(prerequisite_ids))).all()
+            prerequisite_names = [node.name for node in prerequisite_nodes]
+
+        difficulty_band = self._difficulty_band(skill_node.difficulty)
+        learner_level = self._learner_level(user_state)
+
         system_prompt = (
             'You are AssessmentAgent. Generate reliable multiple-choice assessments for a single skill node. '
             'Questions must test understanding, not trivia.'
@@ -59,8 +95,15 @@ class AssessmentAgent:
             f'Topic: {topic.name}\n'
             f'Skill: {skill_node.name}\n'
             f'Skill description: {skill_node.description}\n'
+            f'Skill difficulty (1-5): {skill_node.difficulty} ({difficulty_band})\n'
+            f'Learner level for this node: {learner_level}\n'
+            f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\n'
+            f'Prerequisite skills: {", ".join(prerequisite_names) if prerequisite_names else "None"}\n'
             f'Number of questions: {num_questions}\n'
-            'Each question must have exactly 4 choices and exactly one correct answer.'
+            'Each question must have exactly 4 choices and exactly one correct answer.\n'
+            'Keep quiz scope tightly aligned to this node only.\n'
+            'For difficulty <=2 or beginner learners, use foundational checks and avoid advanced scenario design.\n'
+            'Do not ask about full performance sets, multi-stage production workflows, or downstream advanced techniques.'
         )
 
         quiz_plan = await self.llm_service.generate_structured(

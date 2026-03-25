@@ -45,3 +45,24 @@ body {
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.75);
 }
+
+.skeleton {
+  border-radius: 0.6rem;
+  background: linear-gradient(
+    90deg,
+    rgba(16, 19, 33, 0.08) 0%,
+    rgba(16, 19, 33, 0.14) 45%,
+    rgba(16, 19, 33, 0.08) 100%
+  );
+  background-size: 220% 100%;
+  animation: skeleton-shimmer 1.2s ease-in-out infinite;
+}
+
+@keyframes skeleton-shimmer {
+  0% {
+    background-position: 130% 0;
+  }
+  100% {
+    background-position: -40% 0;
+  }
+}

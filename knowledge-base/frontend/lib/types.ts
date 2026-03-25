@@ -15,8 +15,11 @@ export interface SkillNode {
   name: string;
   description: string;
   difficulty: number;
+  node_kind: 'core' | 'optional_branch';
+  branch_parent_skill_id: number | null;
   mastery_estimate: number;
   status: SkillStatus;
+  lock_reason?: string | null;
   progress_state: 'not_started' | 'learning' | 'completed' | 'verified';
   lesson_completed: boolean;
   exercises_completed: boolean;
@@ -32,17 +35,63 @@ export interface SkillTree {
   nodes: SkillNode[];
 }
 
-export interface NoteItem {
+export type NoteType = 'personal' | 'lesson' | 'summary' | 'reflection' | 'reminder';
+
+export interface DocumentItem {
   id: number;
   filename: string;
   content_type: string;
   created_at: string;
 }
 
+export interface PersonalNote {
+  id: number;
+  user_id: number;
+  topic_id: number;
+  skill_node_id: number | null;
+  note_type: NoteType;
+  tags: string[];
+  source_type: 'user_authored' | 'tutor_generated' | 'external_resource';
+  source_chat_session_id: number | null;
+  source_message_id: number | null;
+  created_from_skill_node_id: number | null;
+  created_from_topic_id: number | null;
+  title: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TutorStructuredAnswer {
+  overview: string;
+  key_points: string[];
+  practical_steps: string[];
+  pitfalls: string[];
+  next_step: string;
+}
+
 export interface ChatReply {
   session_id: number;
+  assistant_message_id: number;
   answer: string;
   used_chunks: string[];
+  citations: Array<{
+    title: string;
+    url: string;
+    snippet: string;
+  }>;
+  structured_answer?: TutorStructuredAnswer | null;
+  context_usage: {
+    document_chunks: number;
+    personal_notes: number;
+    external_resources: number;
+  };
+}
+
+export interface TutorNoteSaveResult {
+  note: PersonalNote;
+  duplicate_warning?: string | null;
+  appended: boolean;
 }
 
 export interface RecommendationItem {

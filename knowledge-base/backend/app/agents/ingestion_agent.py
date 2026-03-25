@@ -27,6 +27,7 @@ class IngestionAgent:
         filename: str,
         content_type: str,
         text: str,
+        note_id: int | None = None,
     ) -> tuple[Document, int]:
         cleaned = text.strip()
         if not cleaned:
@@ -35,6 +36,7 @@ class IngestionAgent:
         document = Document(
             topic_id=topic_id,
             user_id=user_id,
+            note_id=note_id,
             filename=filename,
             content_type=content_type,
             raw_text=cleaned,

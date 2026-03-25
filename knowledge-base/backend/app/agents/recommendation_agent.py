@@ -48,12 +48,14 @@ class RecommendationAgent:
                 continue
 
             bottleneck = child_count.get(node.id, 0)
-            base_score = (1.0 - mastery) * 0.7 + min(0.3, bottleneck * 0.1)
+            optional_penalty = 0.12 if node.node_kind == 'optional_branch' else 0.0
+            base_score = (1.0 - mastery) * 0.7 + min(0.3, bottleneck * 0.1) - optional_penalty
 
             candidates.append(
                 {
                     'skill_node_id': node.id,
                     'name': node.name,
+                    'node_kind': node.node_kind,
                     'status': node_status.value,
                     'mastery': round(float(mastery), 3),
                     'difficulty': node.difficulty,
@@ -88,7 +90,8 @@ class RecommendationAgent:
 
         system_prompt = (
             'You are RecommendationAgent. Rank next best skills to study in a dependency graph. '
-            'Consider mastery gaps, bottlenecks, difficulty progression, and explicit user goal.'
+            'Consider mastery gaps, bottlenecks, difficulty progression, and explicit user goal. '
+            'Prefer core-path nodes by default. Recommend optional branches when clearly valuable.'
         )
         user_prompt = (
             f'Topic: {topic.name}\n'

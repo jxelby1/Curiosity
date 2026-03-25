@@ -112,6 +112,8 @@ class ProfileAgent:
 
         prereq_map: dict[int, list[int]] = {}
         for edge in edges:
+            if edge.edge_type != 'prerequisite':
+                continue
             prereq_map.setdefault(edge.child_skill_id, []).append(edge.parent_skill_id)
 
         state_map: dict[int, UserSkillState] = {}
@@ -136,8 +138,14 @@ class ProfileAgent:
                 state_map.get(parent_id) and state_map[parent_id].progress_state == 'verified'
                 for parent_id in prereqs
             )
+            branch_parent_ready = True
+            if node.branch_parent_skill_id is not None:
+                branch_parent_state = state_map.get(node.branch_parent_skill_id)
+                branch_parent_ready = bool(
+                    branch_parent_state and branch_parent_state.status != SkillStatus.locked
+                )
 
-            if prereqs and not prereq_ready:
+            if (prereqs and not prereq_ready) or not branch_parent_ready:
                 state.status = SkillStatus.locked
                 continue
 

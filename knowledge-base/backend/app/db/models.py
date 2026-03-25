@@ -31,6 +31,14 @@ class ResourceType(str, Enum):
     external_documentation = 'external_documentation'
 
 
+class NoteType(str, Enum):
+    personal = 'personal'
+    lesson = 'lesson'
+    summary = 'summary'
+    reflection = 'reflection'
+    reminder = 'reminder'
+
+
 class User(Base):
     __tablename__ = 'users'
 
@@ -62,6 +70,8 @@ class SkillNode(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    node_kind: Mapped[str] = mapped_column(String(40), default='core')
+    branch_parent_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
     description: Mapped[str] = mapped_column(Text)
     difficulty: Mapped[int] = mapped_column(Integer, default=1)
@@ -117,12 +127,33 @@ class Document(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    note_id: Mapped[int | None] = mapped_column(ForeignKey('notes.id'), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(255))
     content_type: Mapped[str] = mapped_column(String(120), default='text/plain')
     raw_text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     chunks: Mapped[list['DocumentChunk']] = relationship(back_populates='document', cascade='all,delete')
+
+
+class Note(Base):
+    __tablename__ = 'notes'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    skill_node_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
+    note_type: Mapped[NoteType] = mapped_column(SAEnum(NoteType), default=NoteType.personal)
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source_type: Mapped[str] = mapped_column(String(60), default='user_authored')
+    source_chat_session_id: Mapped[int | None] = mapped_column(ForeignKey('chat_sessions.id'), nullable=True, index=True)
+    source_message_id: Mapped[int | None] = mapped_column(ForeignKey('chat_messages.id'), nullable=True, index=True)
+    created_from_skill_node_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
+    created_from_topic_id: Mapped[int | None] = mapped_column(ForeignKey('topics.id'), nullable=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class DocumentChunk(Base):
