@@ -5,19 +5,20 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   createDeepDiveBranch,
-  generateQuiz,
+  generateAssessment,
   generateResource,
   getExternalResources,
   getRecommendations,
   getSkillTree,
-  submitQuiz,
+  submitAssessment,
   updateProgress
 } from '@/lib/api';
 import { readRecommendationCache, readSkillTreeCache, writeRecommendationCache, writeSkillTreeCache } from '@/lib/cache';
 import {
+  Assessment,
+  AssessmentResponseInput,
+  AssessmentSubmissionResult,
   ExternalResource,
-  Quiz,
-  QuizSubmissionResult,
   RecommendationItem,
   Resource,
   SkillNode,
@@ -31,8 +32,8 @@ import {
   parseExercisesContent,
   parseLessonContent
 } from '@/components/learning-content';
-import { TopicHeader } from '@/components/topic-header';
 import { SkillWorkspaceSkeleton } from '@/components/page-skeletons';
+import { TopicHeader } from '@/components/topic-header';
 
 type LearningTab = 'overview' | 'lesson' | 'examples' | 'exercises' | 'quiz' | 'resources';
 type ResourceKind = 'lesson' | 'examples' | 'exercises';
@@ -40,9 +41,14 @@ type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 
 type NodeCache = {
   resources: Partial<Record<ResourceKind, Resource>>;
-  quiz?: Quiz;
-  quizResult?: QuizSubmissionResult;
+  assessment?: Assessment;
+  assessmentResult?: AssessmentSubmissionResult;
   externalResources?: ExternalResource[];
+};
+
+type AssessmentDraft = {
+  selected_option_index?: number;
+  answer_text?: string;
 };
 
 function statusClasses(status: SkillNode['status']): string {
@@ -77,12 +83,21 @@ function sourceCopy(source: 'stored' | 'generated' | 'regenerated'): string {
   return 'Regenerated and saved';
 }
 
+function questionTypeLabel(questionType: Assessment['questions'][number]['question_type']): string {
+  if (questionType === 'multiple_choice') return 'Multiple choice';
+  if (questionType === 'short_answer') return 'Short answer';
+  if (questionType === 'explain') return 'Explain';
+  if (questionType === 'scenario') return 'Applied scenario';
+  if (questionType === 'error_spotting') return 'Error spotting';
+  return 'Reflection';
+}
+
 const tabs: Array<{ id: LearningTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'lesson', label: 'Lesson' },
   { id: 'examples', label: 'Examples' },
   { id: 'exercises', label: 'Exercises' },
-  { id: 'quiz', label: 'Quiz' },
+  { id: 'quiz', label: 'Assessment' },
   { id: 'resources', label: 'Resources' }
 ];
 
@@ -99,7 +114,11 @@ function ContentMeta({ source, version }: { source: 'stored' | 'generated' | 're
 function ProgressChecklistItem({ label, complete }: { label: string; complete: boolean }) {
   return (
     <li className="flex items-center gap-2 text-sm">
-      <span className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-xs ${complete ? 'bg-emerald-500 text-white' : 'bg-zinc-200 text-zinc-700'}`}>
+      <span
+        className={`inline-flex h-5 w-5 items-center justify-center rounded-full text-xs ${
+          complete ? 'bg-emerald-500 text-white' : 'bg-zinc-200 text-zinc-700'
+        }`}
+      >
         {complete ? 'OK' : '--'}
       </span>
       <span>{label}</span>
@@ -118,7 +137,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [activeTab, setActiveTab] = useState<LearningTab>('overview');
 
   const [contentCache, setContentCache] = useState<Record<number, NodeCache>>({});
-  const [quizAnswersByNode, setQuizAnswersByNode] = useState<Record<number, Record<number, number>>>({});
+  const [assessmentDraftsByNode, setAssessmentDraftsByNode] = useState<
+    Record<number, Record<number, AssessmentDraft>>
+  >({});
   const [loadingByKey, setLoadingByKey] = useState<Record<string, boolean>>({});
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
@@ -137,10 +158,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     return contentCache[selectedSkill.id] || { resources: {} };
   }, [contentCache, selectedSkill]);
 
-  const quizAnswers = useMemo(() => {
+  const assessmentDrafts = useMemo(() => {
     if (!selectedSkill) return {};
-    return quizAnswersByNode[selectedSkill.id] || {};
-  }, [quizAnswersByNode, selectedSkill]);
+    return assessmentDraftsByNode[selectedSkill.id] || {};
+  }, [assessmentDraftsByNode, selectedSkill]);
 
   const loadTree = useCallback(
     async (showLoader = false) => {
@@ -162,7 +183,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     async (refresh = false) => {
       setLoadingRecommendations(true);
       try {
-        const recs = await getRecommendations(topicId, 1, refresh);
+        const recs = await getRecommendations(topicId, refresh);
         setRecommendations(recs);
         writeRecommendationCache(topicId, recs);
       } catch (err) {
@@ -279,68 +300,97 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
-  async function ensureQuiz(forceRegenerate = false) {
+  async function ensureAssessment(forceRegenerate = false) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
     if (selectedSkill.status === 'locked') {
       setErrorState('quiz', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
       return;
     }
-    const existing = contentCache[nodeId]?.quiz;
+
+    const existing = contentCache[nodeId]?.assessment;
     if (existing && !forceRegenerate) return;
 
     setLoadingState('quiz', true, nodeId);
     setErrorState('quiz', '', nodeId);
     try {
-      const quiz = await generateQuiz(nodeId, 1, 3, forceRegenerate);
+      const assessment = await generateAssessment({
+        topic_id: Number(topicId),
+        skill_node_id: nodeId,
+        question_count: 6,
+        regenerate: forceRegenerate
+      });
       setContentCache((prev) => {
         const nodeCache = prev[nodeId] || { resources: {} };
         return {
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            quiz,
-            quizResult: forceRegenerate ? undefined : nodeCache.quizResult
+            assessment,
+            assessmentResult: forceRegenerate ? undefined : nodeCache.assessmentResult
           }
         };
       });
-      setQuizAnswersByNode((prev) => ({ ...prev, [nodeId]: {} }));
+      setAssessmentDraftsByNode((prev) => ({ ...prev, [nodeId]: {} }));
     } catch (err) {
-      setErrorState('quiz', err instanceof Error ? err.message : 'Failed to generate quiz', nodeId);
+      setErrorState('quiz', err instanceof Error ? err.message : 'Failed to generate assessment', nodeId);
     } finally {
       setLoadingState('quiz', false, nodeId);
     }
   }
 
-  async function handleSubmitQuiz() {
+  async function handleSubmitAssessment() {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
     if (selectedSkill.status === 'locked') {
       setErrorState('quiz', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
       return;
     }
-    const quiz = contentCache[nodeId]?.quiz;
-    if (!quiz) return;
+    const assessment = contentCache[nodeId]?.assessment;
+    if (!assessment) return;
 
-    const answers = quiz.questions.map((_, index) => quizAnswersByNode[nodeId]?.[index] ?? -1);
+    const responses: AssessmentResponseInput[] = [];
+    for (const question of assessment.questions) {
+      const draft = assessmentDraftsByNode[nodeId]?.[question.id] || {};
+      if (question.question_type === 'multiple_choice') {
+        if (typeof draft.selected_option_index !== 'number') {
+          setErrorState('quiz', 'Please answer all multiple-choice questions before submitting.', nodeId);
+          return;
+        }
+        responses.push({
+          question_id: question.id,
+          selected_option_index: draft.selected_option_index
+        });
+        continue;
+      }
+      const answer = (draft.answer_text || '').trim();
+      if (!answer) {
+        setErrorState('quiz', 'Please answer all open questions before submitting.', nodeId);
+        return;
+      }
+      responses.push({
+        question_id: question.id,
+        answer_text: answer
+      });
+    }
 
     setLoadingState('quiz-submit', true, nodeId);
     setErrorState('quiz', '', nodeId);
     try {
-      const result = await submitQuiz(quiz.assessment_id, answers);
+      const result = await submitAssessment(assessment.id, responses);
       setContentCache((prev) => {
         const nodeCache = prev[nodeId] || { resources: {} };
         return {
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            quizResult: result
+            assessmentResult: result
           }
         };
       });
       await refreshTopicData(true);
     } catch (err) {
-      setErrorState('quiz', err instanceof Error ? err.message : 'Failed to submit quiz', nodeId);
+      setErrorState('quiz', err instanceof Error ? err.message : 'Failed to submit assessment', nodeId);
     } finally {
       setLoadingState('quiz-submit', false, nodeId);
     }
@@ -405,7 +455,22 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     if (tab === 'examples') await ensureResource('examples');
     if (tab === 'exercises') await ensureResource('exercises');
     if (tab === 'resources') await ensureExternalResources();
-    if (tab === 'quiz') await ensureQuiz();
+    if (tab === 'quiz') await ensureAssessment();
+  }
+
+  function updateAssessmentDraft(questionId: number, patch: AssessmentDraft) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setAssessmentDraftsByNode((prev) => ({
+      ...prev,
+      [nodeId]: {
+        ...(prev[nodeId] || {}),
+        [questionId]: {
+          ...(prev[nodeId]?.[questionId] || {}),
+          ...patch
+        }
+      }
+    }));
   }
 
   if (!tree && loadingTree) return <SkillWorkspaceSkeleton />;
@@ -426,8 +491,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const lessonLoading = !!loadingByKey[keyFor('lesson', activeNodeId)];
   const examplesLoading = !!loadingByKey[keyFor('examples', activeNodeId)];
   const exercisesLoading = !!loadingByKey[keyFor('exercises', activeNodeId)];
-  const quizLoading = !!loadingByKey[keyFor('quiz', activeNodeId)];
-  const quizSubmitLoading = !!loadingByKey[keyFor('quiz-submit', activeNodeId)];
+  const assessmentLoading = !!loadingByKey[keyFor('quiz', activeNodeId)];
+  const assessmentSubmitLoading = !!loadingByKey[keyFor('quiz-submit', activeNodeId)];
   const resourcesLoading = !!loadingByKey[keyFor('resources', activeNodeId)];
   const deepDiveLoading = !!loadingByKey[keyFor('deep-dive', activeNodeId)];
   const deepDiveError = errorByKey[keyFor('deep-dive', activeNodeId)] || '';
@@ -436,8 +501,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const examplesResource = currentNodeCache?.resources?.examples;
   const exercisesResource = currentNodeCache?.resources?.exercises;
   const externalResources = currentNodeCache?.externalResources || [];
-  const quiz = currentNodeCache?.quiz;
-  const quizResult = currentNodeCache?.quizResult;
+  const assessment = currentNodeCache?.assessment;
+  const assessmentResult = currentNodeCache?.assessmentResult;
 
   const lesson = parseLessonContent(lessonResource?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
@@ -580,7 +645,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   <p className="mt-2 text-xl font-semibold">{progressStateLabel(selectedSkill.progress_state)}</p>
                 </div>
                 <div className="rounded-lg border border-black/10 bg-white p-3 text-sm">
-                  <p className="text-xs uppercase tracking-[0.14em] text-black/60">Best Quiz Score</p>
+                  <p className="text-xs uppercase tracking-[0.14em] text-black/60">Best Assessment Score</p>
                   <p className="mt-2 text-xl font-semibold">{bestQuizScorePct !== null ? `${bestQuizScorePct}%` : 'Not taken'}</p>
                 </div>
                 <div className="rounded-lg border border-black/10 bg-white p-3 text-sm">
@@ -594,8 +659,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <ul className="mt-3 space-y-2">
                   <ProgressChecklistItem label="Lesson completed" complete={lessonComplete} />
                   <ProgressChecklistItem label="Exercises completed" complete={exercisesComplete} />
-                  <ProgressChecklistItem label="Quiz taken" complete={quizTaken} />
-                  <ProgressChecklistItem label="Node verified (quiz score at least 70%)" complete={isVerified} />
+                  <ProgressChecklistItem label="Assessment taken" complete={quizTaken} />
+                  <ProgressChecklistItem label="Node verified (score at least 70%)" complete={isVerified} />
                 </ul>
               </section>
 
@@ -622,10 +687,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     disabled={selectedSkill.status === 'locked'}
                     type="button"
                   >
-                    Open quiz
+                    Open assessment
                   </button>
                 </div>
-                {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then complete exercises, then pass the quiz.</p>}
+                {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then complete exercises, then pass the assessment.</p>}
                 {isLocked && (
                   <p className="mt-3 text-xs text-red-700">
                     This node is locked. Verify prerequisite nodes to unlock learning content.
@@ -738,83 +803,133 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           {activeTab === 'quiz' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
-                {quiz && <ContentMeta source={quiz.source} version={quiz.version} />}
+                {assessment && <ContentMeta source={assessment.source} version={assessment.version} />}
                 <button
                   className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
-                  onClick={() => ensureQuiz(!!quiz)}
-                  disabled={quizLoading}
+                  onClick={() => ensureAssessment(!!assessment)}
+                  disabled={assessmentLoading}
                 >
-                  {quizLoading ? 'Loading...' : quiz ? 'Regenerate quiz' : 'Generate quiz'}
+                  {assessmentLoading ? 'Loading...' : assessment ? 'Regenerate assessment' : 'Generate assessment'}
                 </button>
               </div>
 
-              {quizLoading && <p className="rounded-md border border-black/10 bg-white p-3 text-sm">Loading quiz...</p>}
+              {assessmentLoading && <p className="rounded-md border border-black/10 bg-white p-3 text-sm">Loading assessment...</p>}
 
-              {quiz && (
+              {assessment && (
                 <div className="space-y-4">
                   <div className="rounded-lg border border-black/10 bg-white p-3 text-xs text-black/70">
-                    Score at least <span className="font-semibold">70%</span> to verify this node.
+                    <p>
+                      Score at least <span className="font-semibold">70%</span> to verify this node.
+                    </p>
+                    <p className="mt-1">Difficulty: {assessment.difficulty} · Target level: {assessment.target_level}</p>
                   </div>
-                  <h3 className="text-xl font-semibold">{quiz.title}</h3>
-                  {quiz.questions.map((question, questionIndex) => (
-                    <article key={question.id} className="rounded-xl border border-black/10 bg-white p-4">
-                      <p className="text-sm font-semibold">
-                        {questionIndex + 1}. {question.prompt}
-                      </p>
-                      <div className="mt-3 space-y-2">
-                        {question.choices.map((choice, choiceIndex) => (
-                          <label
-                            key={`${question.id}-${choiceIndex}`}
-                            className="flex cursor-pointer items-center gap-2 rounded-md border border-black/10 px-3 py-2 text-sm"
-                          >
-                            <input
-                              type="radio"
-                              name={`q-${activeNodeId}-${questionIndex}`}
-                              checked={quizAnswers[questionIndex] === choiceIndex}
-                              onChange={() =>
-                                setQuizAnswersByNode((prev) => ({
-                                  ...prev,
-                                  [activeNodeId]: {
-                                    ...(prev[activeNodeId] || {}),
-                                    [questionIndex]: choiceIndex
-                                  }
-                                }))
-                              }
-                            />
-                            <span>{choice}</span>
-                          </label>
-                        ))}
-                      </div>
-                    </article>
-                  ))}
+
+                  <h3 className="text-xl font-semibold">{assessment.title}</h3>
+
+                  {assessment.questions.map((question, questionIndex) => {
+                    const draft = assessmentDrafts[question.id] || {};
+                    const isMCQ = question.question_type === 'multiple_choice';
+
+                    return (
+                      <article key={question.id} className="rounded-xl border border-black/10 bg-white p-4">
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-sm font-semibold">
+                            {questionIndex + 1}. {question.prompt}
+                          </p>
+                          <span className="badge">{questionTypeLabel(question.question_type)}</span>
+                        </div>
+
+                        {isMCQ ? (
+                          <div className="mt-3 space-y-2">
+                            {question.choices.map((choice, choiceIndex) => (
+                              <label
+                                key={`${question.id}-${choiceIndex}`}
+                                className="flex cursor-pointer items-center gap-2 rounded-md border border-black/10 px-3 py-2 text-sm"
+                              >
+                                <input
+                                  type="radio"
+                                  name={`q-${activeNodeId}-${question.id}`}
+                                  checked={draft.selected_option_index === choiceIndex}
+                                  onChange={() => updateAssessmentDraft(question.id, { selected_option_index: choiceIndex })}
+                                />
+                                <span>{choice}</span>
+                              </label>
+                            ))}
+                          </div>
+                        ) : (
+                          <textarea
+                            value={draft.answer_text || ''}
+                            onChange={(event) => updateAssessmentDraft(question.id, { answer_text: event.target.value })}
+                            className="mt-3 min-h-[120px] w-full rounded-md border border-black/10 bg-white p-3 text-sm"
+                            placeholder="Write your response..."
+                            maxLength={4000}
+                          />
+                        )}
+
+                      </article>
+                    );
+                  })}
 
                   <button
                     className="rounded-md bg-ink px-4 py-2 text-sm text-white disabled:opacity-60"
-                    onClick={handleSubmitQuiz}
-                    disabled={quizSubmitLoading}
+                    onClick={handleSubmitAssessment}
+                    disabled={assessmentSubmitLoading}
                   >
-                    {quizSubmitLoading ? 'Submitting...' : 'Submit quiz'}
+                    {assessmentSubmitLoading ? 'Submitting...' : 'Submit assessment'}
                   </button>
                 </div>
               )}
 
-              {quizResult && (
-                <section className="rounded-xl border border-black/10 bg-white p-4">
+              {assessmentResult && (
+                <section className="space-y-3 rounded-xl border border-black/10 bg-white p-4">
                   <p className="text-sm">
-                    Score: <strong>{(quizResult.score * 100).toFixed(0)}%</strong>
+                    Score: <strong>{(assessmentResult.score * 100).toFixed(0)}%</strong>
                   </p>
-                  <p className="muted mt-1 text-sm">
-                    State after submission: <strong>{progressStateLabel(quizResult.updated_progress_state)}</strong>
+                  <p className="muted text-sm">
+                    Progress state: <strong>{progressStateLabel(assessmentResult.updated_progress_state)}</strong>
                   </p>
-                  <p className="muted text-sm">Internal mastery signal: {(quizResult.updated_mastery * 100).toFixed(0)}%</p>
+                  <p className="muted text-sm">
+                    Mastery delta: {(assessmentResult.mastery_delta * 100).toFixed(1)}% · Updated mastery:{' '}
+                    {(assessmentResult.updated_mastery * 100).toFixed(0)}%
+                  </p>
 
-                  <div className="mt-3 space-y-2 text-sm">
-                    {quizResult.feedback.map((item) => (
-                      <div key={item.question_id} className="rounded-md border border-black/10 bg-white p-3">
-                        <p className={item.correct ? 'text-emerald-700' : 'text-red-700'}>
-                          {item.correct ? 'Correct' : 'Needs review'}
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="rounded-lg border border-black/10 bg-paper/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.12em] text-black/65">Strengths</p>
+                      <ul className="mt-2 space-y-1 text-sm">
+                        {assessmentResult.strengths.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                        {assessmentResult.strengths.length === 0 && <li className="text-black/60">No clear strengths captured.</li>}
+                      </ul>
+                    </div>
+                    <div className="rounded-lg border border-black/10 bg-paper/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.12em] text-black/65">Weaknesses</p>
+                      <ul className="mt-2 space-y-1 text-sm">
+                        {assessmentResult.weaknesses.map((item) => (
+                          <li key={item}>• {item}</li>
+                        ))}
+                        {assessmentResult.weaknesses.length === 0 && <li className="text-black/60">No major weaknesses captured.</li>}
+                      </ul>
+                    </div>
+                  </div>
+
+                  <div className="rounded-lg border border-black/10 bg-paper/50 p-3 text-sm">
+                    <p>
+                      <span className="font-semibold">Review next:</span> {assessmentResult.review_next}
+                    </p>
+                    <p className="mt-2">
+                      <span className="font-semibold">Follow-up:</span> {assessmentResult.recommended_follow_up}
+                    </p>
+                  </div>
+
+                  <div className="space-y-2">
+                    {assessmentResult.feedback.map((item) => (
+                      <div key={item.question_id} className="rounded-md border border-black/10 bg-white p-3 text-sm">
+                        <p className="font-semibold">
+                          Q{item.question_id} · {questionTypeLabel(item.question_type)} · {(item.score * 100).toFixed(0)}%
                         </p>
-                        <p className="muted mt-1">{item.explanation}</p>
+                        <p className="muted mt-1">{item.feedback}</p>
                       </div>
                     ))}
                   </div>

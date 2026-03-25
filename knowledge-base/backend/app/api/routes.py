@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from statistics import mean
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import delete, select
@@ -14,12 +15,15 @@ from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.agents.tutor_agent import TutorAgent
-from app.core.config import get_settings
+from app.api.auth import CurrentUser
 from app.core.exceptions import ConfigurationError, ProviderError
 from app.db.database import get_db
 from app.db.models import (
     Assessment,
     AssessmentAttempt,
+    AssessmentQuestion,
+    AssessmentQuestionType,
+    AssessmentResponse,
     Document,
     DocumentChunk,
     LearningResource,
@@ -31,10 +35,17 @@ from app.db.models import (
     SkillNode,
     SkillStatus,
     Topic,
-    User,
+    TopicInitializationJob,
     UserSkillState,
 )
 from app.schemas.api import (
+    AssessmentAttemptResponse,
+    AssessmentDetailResponse,
+    AssessmentGenerateRequest,
+    AssessmentQuestionFeedbackResponse,
+    AssessmentQuestionResponse,
+    AssessmentSubmitRequest,
+    AssessmentSubmitResponse,
     ChatRequest,
     ChatResponse,
     AppendTutorResponseToNoteRequest,
@@ -63,18 +74,24 @@ from app.schemas.api import (
     SkillNodeResponse,
     SkillTreeResponse,
     TopicCreateRequest,
+    TopicInitializationResponse,
+    TopicInitializationStatusResponse,
     TopicListResponse,
+    TopicProgressNode,
+    TopicProgressResponse,
     TopicResponse,
+    UserProgressSummaryResponse,
+    UserTopicProgressSummary,
 )
 from app.services.embedding import EmbeddingService
 from app.services.llm import LLMService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
+from app.services.topic_bootstrap import TopicBootstrapService
 from app.utils.text import extract_text_from_upload
 
 
 router = APIRouter()
-settings = get_settings()
 
 embedding_service = EmbeddingService()
 retrieval_service = RetrievalService(embedding_service)
@@ -88,6 +105,13 @@ tutor_agent = TutorAgent(llm_service, retrieval_service, search_service)
 recommendation_agent = RecommendationAgent(llm_service, retrieval_service)
 resource_agent = ResourceAgent(llm_service, search_service, retrieval_service)
 assessment_agent = AssessmentAgent(llm_service)
+topic_bootstrap_service = TopicBootstrapService(
+    skill_graph_agent=skill_graph_agent,
+    profile_agent=profile_agent,
+    recommendation_agent=recommendation_agent,
+    resource_agent=resource_agent,
+    assessment_agent=assessment_agent,
+)
 
 
 def _raise_service_error(exc: Exception) -> None:
@@ -96,21 +120,6 @@ def _raise_service_error(exc: Exception) -> None:
     if isinstance(exc, ProviderError):
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-def _get_or_create_user(db: Session, user_id: int) -> User:
-    user = db.scalar(select(User).where(User.id == user_id))
-    if user:
-        return user
-
-    if user_id != 1:
-        raise HTTPException(status_code=404, detail='User not found')
-
-    user = User(id=1, email=settings.default_user_email, display_name='Demo User')
-    db.add(user)
-    db.commit()
-    db.refresh(user)
-    return user
 
 
 def _topic_to_response(topic: Topic) -> TopicResponse:
@@ -130,6 +139,25 @@ def _document_to_response(document: Document) -> DocumentItemResponse:
         filename=document.filename,
         content_type=document.content_type,
         created_at=document.created_at,
+    )
+
+
+def _topic_init_to_response(job: TopicInitializationJob) -> TopicInitializationStatusResponse:
+    status_value = job.status if job.status in {'queued', 'running', 'ready', 'preloading', 'completed', 'failed'} else 'running'
+    return TopicInitializationStatusResponse(
+        topic_id=job.topic_id,
+        status=status_value,  # type: ignore[arg-type]
+        current_step=job.current_step or 'Initializing topic',
+        progress=round(max(0.0, min(1.0, float(job.progress or 0.0))), 3),
+        ready_for_entry=bool(job.ready_for_entry),
+        background_complete=bool(job.background_complete),
+        first_ready_skill_id=job.first_ready_skill_id,
+        status_messages=list(job.status_messages or []),
+        error_text=job.error_text or '',
+        started_at=job.started_at,
+        ready_at=job.ready_at,
+        completed_at=job.completed_at,
+        updated_at=job.updated_at,
     )
 
 
@@ -447,24 +475,112 @@ def _invalidate_recommendations(db: Session, topic_id: int, user_id: int) -> Non
     db.commit()
 
 
+def _assessment_to_response(
+    db: Session,
+    *,
+    assessment: Assessment,
+    source: str = 'stored',
+) -> AssessmentDetailResponse:
+    rows = db.scalars(
+        select(AssessmentQuestion)
+        .where(AssessmentQuestion.assessment_id == assessment.id)
+        .order_by(AssessmentQuestion.order_index.asc())
+    ).all()
+    questions = [
+        AssessmentQuestionResponse(
+            id=row.id,
+            question_type=row.question_type,
+            prompt=row.prompt,
+            choices=row.choices or [],
+            expected_concepts=row.expected_concepts or [],
+            rubric=row.rubric or {},
+            difficulty=row.difficulty,
+            order_index=row.order_index,
+        )
+        for row in rows
+    ]
+    return AssessmentDetailResponse(
+        id=assessment.id,
+        topic_id=assessment.topic_id,
+        skill_node_id=assessment.skill_node_id,
+        title=assessment.title,
+        difficulty=assessment.difficulty,
+        target_level=assessment.target_level,
+        question_mix=assessment.question_mix or {},
+        version=assessment.version,
+        source=source,  # type: ignore[arg-type]
+        questions=questions,
+        created_at=assessment.created_at,
+    )
+
+
+def _attempt_to_response(db: Session, *, attempt: AssessmentAttempt) -> AssessmentAttemptResponse:
+    rows = db.scalars(
+        select(AssessmentResponse)
+        .where(AssessmentResponse.attempt_id == attempt.id)
+        .order_by(AssessmentResponse.id.asc())
+    ).all()
+    question_map = {
+        row.id: row
+        for row in db.scalars(
+            select(AssessmentQuestion).where(
+                AssessmentQuestion.id.in_([item.question_id for item in rows])  # type: ignore[arg-type]
+            )
+        ).all()
+    }
+
+    feedback_items = [
+        AssessmentQuestionFeedbackResponse(
+            question_id=row.question_id,
+            question_type=question_map[row.question_id].question_type
+            if row.question_id in question_map
+            else AssessmentQuestionType.short_answer,
+            score=round(row.score, 3),
+            confidence_score=round(row.confidence_score, 3) if row.confidence_score is not None else None,
+            feedback=row.feedback,
+            missing_concepts=[],
+        )
+        for row in rows
+    ]
+
+    return AssessmentAttemptResponse(
+        id=attempt.id,
+        assessment_id=attempt.assessment_id,
+        user_id=attempt.user_id,
+        score=round(attempt.score, 3),
+        confidence_avg=round(attempt.confidence_avg, 3),
+        mastery_delta=round(attempt.mastery_delta, 3),
+        strengths=attempt.strengths or [],
+        weaknesses=attempt.weaknesses or [],
+        review_next=attempt.review_next,
+        recommended_follow_up=attempt.recommended_follow_up,
+        feedback=feedback_items,
+        created_at=attempt.created_at,
+    )
+
+
 @router.get('/health')
 def health() -> dict[str, str]:
     return {'status': 'ok'}
 
 
 @router.get('/topics', response_model=TopicListResponse)
-def list_topics(user_id: int = Query(default=1), db: Session = Depends(get_db)) -> TopicListResponse:
-    _get_or_create_user(db, user_id)
-    topics = db.scalars(select(Topic).where(Topic.user_id == user_id).order_by(Topic.created_at.desc())).all()
+def list_topics(current_user: CurrentUser, db: Session = Depends(get_db)) -> TopicListResponse:
+    topics = db.scalars(
+        select(Topic).where(Topic.user_id == current_user.id).order_by(Topic.created_at.desc())
+    ).all()
     return TopicListResponse(topics=[_topic_to_response(topic) for topic in topics])
 
 
 @router.post('/topics', response_model=TopicResponse, status_code=status.HTTP_201_CREATED)
-async def create_topic(payload: TopicCreateRequest, db: Session = Depends(get_db)) -> TopicResponse:
-    _get_or_create_user(db, payload.user_id)
+async def create_topic(
+    payload: TopicCreateRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicResponse:
 
     topic = Topic(
-        user_id=payload.user_id,
+        user_id=current_user.id,
         name=payload.name.strip(),
         description=payload.description.strip(),
         goal=payload.goal.strip(),
@@ -480,21 +596,106 @@ async def create_topic(payload: TopicCreateRequest, db: Session = Depends(get_db
         db.commit()
         _raise_service_error(exc)
 
-    profile_agent.ensure_states_for_topic(db, payload.user_id, topic.id)
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
     return _topic_to_response(topic)
+
+
+@router.post(
+    '/topics/create-and-initialize',
+    response_model=TopicInitializationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_topic_and_initialize(
+    payload: TopicCreateRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicInitializationResponse:
+    topic = Topic(
+        user_id=current_user.id,
+        name=payload.name.strip(),
+        description=payload.description.strip(),
+        goal=payload.goal.strip(),
+    )
+    db.add(topic)
+    db.commit()
+    db.refresh(topic)
+
+    try:
+        job = await topic_bootstrap_service.start_initialization(
+            db,
+            topic=topic,
+            user_id=current_user.id,
+            force=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        db.delete(topic)
+        db.commit()
+        _raise_service_error(exc)
+
+    return TopicInitializationResponse(
+        topic=_topic_to_response(topic),
+        initialization=_topic_init_to_response(job),
+    )
+
+
+@router.post('/topics/{topic_id}/initialize', response_model=TopicInitializationStatusResponse)
+async def initialize_topic(
+    topic_id: int,
+    current_user: CurrentUser,
+    force: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> TopicInitializationStatusResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    try:
+        job = await topic_bootstrap_service.start_initialization(
+            db,
+            topic=topic,
+            user_id=current_user.id,
+            force=force,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
+    return _topic_init_to_response(job)
+
+
+@router.get('/topics/{topic_id}/initialization-status', response_model=TopicInitializationStatusResponse)
+def get_topic_initialization_status(
+    topic_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicInitializationStatusResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    job = db.scalar(
+        select(TopicInitializationJob).where(
+            TopicInitializationJob.topic_id == topic_id,
+            TopicInitializationJob.user_id == current_user.id,
+        )
+    )
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail='No initialization job found for this topic. Start initialization first.',
+        )
+    return _topic_init_to_response(job)
 
 
 @router.delete('/topics/{topic_id}', status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
 def delete_topic(
     topic_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     confirm: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> Response:
-    _get_or_create_user(db, user_id)
     topic = _get_topic_or_404(db, topic_id)
 
-    if topic.user_id != user_id:
+    if topic.user_id != current_user.id:
         raise HTTPException(status_code=404, detail='Topic not found')
     if not confirm:
         raise HTTPException(status_code=400, detail='Set confirm=true to delete this topic.')
@@ -507,15 +708,31 @@ def delete_topic(
 
     db.execute(delete(ChatMessage).where(ChatMessage.topic_id == topic_id))
     db.execute(delete(ChatSession).where(ChatSession.topic_id == topic_id))
-    db.execute(delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == user_id))
-    db.execute(delete(DocumentChunk).where(DocumentChunk.topic_id == topic_id))
-    db.execute(delete(Document).where(Document.topic_id == topic_id, Document.user_id == user_id))
-    db.execute(delete(Note).where(Note.topic_id == topic_id, Note.user_id == user_id))
+    db.execute(
+        delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
+    )
+    db.execute(
+        delete(DocumentChunk).where(
+            DocumentChunk.document_id.in_(select(Document.id).where(Document.topic_id == topic_id, Document.user_id == current_user.id))
+        )
+    )
+    db.execute(delete(Document).where(Document.topic_id == topic_id, Document.user_id == current_user.id))
+    db.execute(delete(Note).where(Note.topic_id == topic_id, Note.user_id == current_user.id))
     db.execute(delete(LearningResource).where(LearningResource.topic_id == topic_id))
-    db.execute(delete(Assessment).where(Assessment.topic_id == topic_id, Assessment.user_id == user_id))
+    db.execute(delete(Assessment).where(Assessment.topic_id == topic_id, Assessment.user_id == current_user.id))
+    db.execute(
+        delete(TopicInitializationJob).where(
+            TopicInitializationJob.topic_id == topic_id,
+            TopicInitializationJob.user_id == current_user.id,
+        )
+    )
     db.execute(delete(SkillEdge).where(SkillEdge.topic_id == topic_id))
     if skill_ids:
-        db.execute(delete(UserSkillState).where(UserSkillState.user_id == user_id, UserSkillState.skill_node_id.in_(skill_ids)))
+        db.execute(
+            delete(UserSkillState).where(
+                UserSkillState.user_id == current_user.id, UserSkillState.skill_node_id.in_(skill_ids)
+            )
+        )
     db.execute(delete(SkillNode).where(SkillNode.topic_id == topic_id))
     db.delete(topic)
     db.commit()
@@ -526,18 +743,19 @@ def delete_topic(
 @router.post('/topics/{topic_id}/skill-tree/generate', response_model=SkillTreeResponse)
 async def generate_skill_tree(
     topic_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     regenerate: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> SkillTreeResponse:
-    _get_or_create_user(db, user_id)
     topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
     existing = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
     if existing and not regenerate:
-        profile_agent.ensure_states_for_topic(db, user_id, topic.id)
-        profile_agent.recompute_unlocks(db, user_id, topic.id)
-        return _build_skill_tree_response(db, topic, user_id)
+        profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+        profile_agent.recompute_unlocks(db, current_user.id, topic.id)
+        return _build_skill_tree_response(db, topic, current_user.id)
 
     if existing and regenerate:
         db.execute(delete(SkillEdge).where(SkillEdge.topic_id == topic.id))
@@ -549,31 +767,33 @@ async def generate_skill_tree(
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    profile_agent.ensure_states_for_topic(db, user_id, topic.id)
-    profile_agent.recompute_unlocks(db, user_id, topic.id)
-    return _build_skill_tree_response(db, topic, user_id)
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic.id)
+    return _build_skill_tree_response(db, topic, current_user.id)
 
 
 @router.get('/topics/{topic_id}/skill-tree', response_model=SkillTreeResponse)
-def get_skill_tree(topic_id: int, user_id: int = Query(default=1), db: Session = Depends(get_db)) -> SkillTreeResponse:
-    _get_or_create_user(db, user_id)
+def get_skill_tree(topic_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> SkillTreeResponse:
     topic = _get_topic_or_404(db, topic_id)
-    profile_agent.ensure_states_for_topic(db, user_id, topic_id)
-    profile_agent.recompute_unlocks(db, user_id, topic_id)
-    return _build_skill_tree_response(db, topic, user_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic_id)
+    return _build_skill_tree_response(db, topic, current_user.id)
 
 
 @router.post('/topics/{topic_id}/documents/upload', response_model=DocumentUploadResponse)
 @router.post('/topics/{topic_id}/notes/upload', response_model=DocumentUploadResponse)
 async def upload_document(
     topic_id: int,
-    user_id: int = Form(default=1),
+    current_user: CurrentUser,
     raw_text: str | None = Form(default=None),
     file: UploadFile | None = File(default=None),
     db: Session = Depends(get_db),
 ) -> DocumentUploadResponse:
-    _get_or_create_user(db, user_id)
-    _get_topic_or_404(db, topic_id)
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
     text = (raw_text or '').strip()
     filename = f'pasted-source-{datetime.utcnow().strftime("%Y%m%d-%H%M%S")}.txt'
@@ -597,7 +817,7 @@ async def upload_document(
         doc, chunks = await ingestion_agent.ingest_text(
             db,
             topic_id=topic_id,
-            user_id=user_id,
+            user_id=current_user.id,
             filename=filename,
             content_type=content_type,
             text=text,
@@ -605,20 +825,21 @@ async def upload_document(
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    profile_agent.infer_mastery_from_notes(db, user_id, topic_id)
-    _invalidate_recommendations(db, topic_id, user_id)
+    profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
+    _invalidate_recommendations(db, topic_id, current_user.id)
 
     return DocumentUploadResponse(document_id=doc.id, filename=doc.filename, chunks_created=chunks)
 
 
 @router.get('/topics/{topic_id}/documents', response_model=DocumentListResponse)
-def list_documents(topic_id: int, user_id: int = Query(default=1), db: Session = Depends(get_db)) -> DocumentListResponse:
-    _get_or_create_user(db, user_id)
-    _get_topic_or_404(db, topic_id)
+def list_documents(topic_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> DocumentListResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
     docs = db.scalars(
         select(Document)
-        .where(Document.topic_id == topic_id, Document.user_id == user_id, Document.note_id.is_(None))
+        .where(Document.topic_id == topic_id, Document.user_id == current_user.id, Document.note_id.is_(None))
         .order_by(Document.created_at.desc())
     ).all()
 
@@ -633,34 +854,36 @@ def list_documents(topic_id: int, user_id: int = Query(default=1), db: Session =
 def delete_document(
     topic_id: int,
     document_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> Response:
-    _get_or_create_user(db, user_id)
-    _get_topic_or_404(db, topic_id)
-    document = _get_document_or_404(db, topic_id, document_id, user_id)
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    document = _get_document_or_404(db, topic_id, document_id, current_user.id)
     if document.note_id is not None:
         raise HTTPException(status_code=400, detail='This document is linked to a note and cannot be deleted here.')
 
     db.delete(document)
     db.commit()
-    profile_agent.infer_mastery_from_notes(db, user_id, topic_id)
-    _invalidate_recommendations(db, topic_id, user_id)
+    profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
+    _invalidate_recommendations(db, topic_id, current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get('/topics/{topic_id}/notes', response_model=NoteListResponse)
 def list_notes(
     topic_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     skill_node_id: int | None = Query(default=None),
     query: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ) -> NoteListResponse:
-    _get_or_create_user(db, user_id)
-    _get_topic_or_404(db, topic_id)
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
-    stmt = select(Note).where(Note.topic_id == topic_id, Note.user_id == user_id)
+    stmt = select(Note).where(Note.topic_id == topic_id, Note.user_id == current_user.id)
     if skill_node_id is not None:
         stmt = stmt.where(Note.skill_node_id == skill_node_id)
     if query:
@@ -676,11 +899,12 @@ def list_notes(
 def create_note(
     topic_id: int,
     payload: NoteCreateRequest,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> NoteResponse:
-    _get_or_create_user(db, user_id)
-    _get_topic_or_404(db, topic_id)
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
     body = payload.body.strip()
     if not body:
@@ -693,7 +917,7 @@ def create_note(
 
     title = payload.title.strip() or _generate_note_title(body)
     note = Note(
-        user_id=user_id,
+        user_id=current_user.id,
         topic_id=topic_id,
         skill_node_id=payload.skill_node_id,
         note_type=payload.note_type,
@@ -713,9 +937,8 @@ def create_note(
 
 
 @router.get('/notes/{note_id}', response_model=NoteResponse)
-def get_note(note_id: int, user_id: int = Query(default=1), db: Session = Depends(get_db)) -> NoteResponse:
-    _get_or_create_user(db, user_id)
-    note = _get_note_or_404(db, note_id, user_id)
+def get_note(note_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> NoteResponse:
+    note = _get_note_or_404(db, note_id, current_user.id)
     return _note_to_response(note)
 
 
@@ -723,11 +946,10 @@ def get_note(note_id: int, user_id: int = Query(default=1), db: Session = Depend
 async def update_note(
     note_id: int,
     payload: NoteUpdateRequest,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> NoteResponse:
-    _get_or_create_user(db, user_id)
-    note = _get_note_or_404(db, note_id, user_id)
+    note = _get_note_or_404(db, note_id, current_user.id)
 
     if 'skill_node_id' in payload.model_fields_set and payload.skill_node_id is not None:
         skill = _get_skill_or_404(db, payload.skill_node_id)
@@ -766,9 +988,8 @@ async def update_note(
 
 
 @router.delete('/notes/{note_id}', status_code=status.HTTP_204_NO_CONTENT, response_class=Response)
-def delete_note(note_id: int, user_id: int = Query(default=1), db: Session = Depends(get_db)) -> Response:
-    _get_or_create_user(db, user_id)
-    note = _get_note_or_404(db, note_id, user_id)
+def delete_note(note_id: int, current_user: CurrentUser, db: Session = Depends(get_db)) -> Response:
+    note = _get_note_or_404(db, note_id, current_user.id)
     db.execute(delete(DocumentChunk).where(DocumentChunk.document_id.in_(select(Document.id).where(Document.note_id == note.id))))
     db.execute(delete(Document).where(Document.note_id == note.id))
     db.delete(note)
@@ -777,15 +998,21 @@ def delete_note(note_id: int, user_id: int = Query(default=1), db: Session = Dep
 
 
 @router.post('/topics/{topic_id}/chat', response_model=ChatResponse)
-async def chat(topic_id: int, payload: ChatRequest, db: Session = Depends(get_db)) -> ChatResponse:
-    _get_or_create_user(db, payload.user_id)
+async def chat(
+    topic_id: int,
+    payload: ChatRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ChatResponse:
     topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
     try:
         session_id, assistant_message_id, answer, used_chunks, structured_answer, context_usage, citations = await tutor_agent.respond(
             db,
             topic=topic,
-            user_id=payload.user_id,
+            user_id=current_user.id,
             message=payload.message,
             session_id=payload.session_id,
             skill_node_id=payload.skill_node_id,
@@ -816,11 +1043,11 @@ async def save_tutor_response_to_note(
     session_id: int,
     message_id: int,
     payload: SaveTutorResponseToNoteRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> TutorNoteSaveResponse:
-    _get_or_create_user(db, payload.user_id)
     topic = _get_topic_or_404(db, topic_id)
-    if topic.user_id != payload.user_id:
+    if topic.user_id != current_user.id:
         raise HTTPException(status_code=404, detail='Topic not found')
 
     session, message = _get_assistant_message_or_404(
@@ -828,12 +1055,12 @@ async def save_tutor_response_to_note(
         topic_id=topic_id,
         session_id=session_id,
         message_id=message_id,
-        user_id=payload.user_id,
+        user_id=current_user.id,
     )
 
     existing = db.scalar(
         select(Note).where(
-            Note.user_id == payload.user_id,
+            Note.user_id == current_user.id,
             Note.topic_id == topic_id,
             Note.source_type == 'tutor_generated',
             Note.source_message_id == message.id,
@@ -856,7 +1083,7 @@ async def save_tutor_response_to_note(
 
     duplicate_warning = _find_duplicate_warning(
         db,
-        user_id=payload.user_id,
+        user_id=current_user.id,
         topic_id=topic_id,
         body=resolved_body,
     )
@@ -867,7 +1094,7 @@ async def save_tutor_response_to_note(
             raise HTTPException(status_code=400, detail='skill_node_id does not belong to this topic')
 
     note = Note(
-        user_id=payload.user_id,
+        user_id=current_user.id,
         topic_id=topic_id,
         skill_node_id=target_skill_id,
         note_type=payload.note_type,
@@ -885,8 +1112,8 @@ async def save_tutor_response_to_note(
     db.refresh(note)
 
     await _reindex_note_document(db, note=note)
-    profile_agent.infer_mastery_from_notes(db, payload.user_id, topic_id)
-    _invalidate_recommendations(db, topic_id, payload.user_id)
+    profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
+    _invalidate_recommendations(db, topic_id, current_user.id)
 
     return TutorNoteSaveResponse(
         note=_note_to_response(note),
@@ -899,10 +1126,10 @@ async def save_tutor_response_to_note(
 async def append_tutor_response_to_existing_note(
     note_id: int,
     payload: AppendTutorResponseToNoteRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> TutorNoteSaveResponse:
-    _get_or_create_user(db, payload.user_id)
-    note = _get_note_or_404(db, note_id, payload.user_id)
+    note = _get_note_or_404(db, note_id, current_user.id)
     topic = _get_topic_or_404(db, note.topic_id)
 
     _session, message = _get_assistant_message_or_404(
@@ -910,7 +1137,7 @@ async def append_tutor_response_to_existing_note(
         topic_id=note.topic_id,
         session_id=payload.session_id,
         message_id=payload.message_id,
-        user_id=payload.user_id,
+        user_id=current_user.id,
     )
 
     try:
@@ -948,7 +1175,7 @@ async def append_tutor_response_to_existing_note(
 
     duplicate_warning = _find_duplicate_warning(
         db,
-        user_id=payload.user_id,
+        user_id=current_user.id,
         topic_id=note.topic_id,
         body=append_clean,
     )
@@ -956,8 +1183,8 @@ async def append_tutor_response_to_existing_note(
     db.commit()
     db.refresh(note)
     await _reindex_note_document(db, note=note)
-    profile_agent.infer_mastery_from_notes(db, payload.user_id, note.topic_id)
-    _invalidate_recommendations(db, note.topic_id, payload.user_id)
+    profile_agent.infer_mastery_from_notes(db, current_user.id, note.topic_id)
+    _invalidate_recommendations(db, note.topic_id, current_user.id)
 
     return TutorNoteSaveResponse(
         note=_note_to_response(note),
@@ -969,34 +1196,35 @@ async def append_tutor_response_to_existing_note(
 @router.get('/topics/{topic_id}/recommendations', response_model=RecommendationResponse)
 async def get_recommendations(
     topic_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     refresh: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> RecommendationResponse:
-    _get_or_create_user(db, user_id)
     topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
 
-    profile_agent.ensure_states_for_topic(db, user_id, topic_id)
-    profile_agent.recompute_unlocks(db, user_id, topic_id)
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic_id)
 
     records: list[Recommendation]
     if not refresh:
         freshness_cutoff = datetime.utcnow() - timedelta(minutes=3)
         cached = db.scalars(
             select(Recommendation)
-            .where(Recommendation.topic_id == topic_id, Recommendation.user_id == user_id)
+            .where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
             .order_by(Recommendation.created_at.desc())
         ).all()
         if cached and cached[0].created_at >= freshness_cutoff:
             records = cached
         else:
             try:
-                records = await recommendation_agent.generate_recommendations(db, topic, user_id)
+                records = await recommendation_agent.generate_recommendations(db, topic, current_user.id)
             except Exception as exc:  # noqa: BLE001
                 _raise_service_error(exc)
     else:
         try:
-            records = await recommendation_agent.generate_recommendations(db, topic, user_id)
+            records = await recommendation_agent.generate_recommendations(db, topic, current_user.id)
         except Exception as exc:  # noqa: BLE001
             _raise_service_error(exc)
 
@@ -1023,24 +1251,26 @@ async def get_recommendations(
 async def generate_resource(
     skill_id: int,
     payload: GenerateResourceRequest,
+    current_user: CurrentUser,
     regenerate: bool = Query(default=False),
     db: Session = Depends(get_db),
 ) -> ResourceResponse:
-    _get_or_create_user(db, payload.user_id)
     skill = _get_skill_or_404(db, skill_id)
     topic = _get_topic_or_404(db, skill.topic_id)
-    _assert_skill_unlocked_for_learning(db, user_id=payload.user_id, skill=skill)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
 
     try:
         resource, structured_content, source = await resource_agent.generate_material(
             db,
-            user_id=payload.user_id,
+            user_id=current_user.id,
             topic=topic,
             skill_node=skill,
             kind=payload.kind,
             regenerate=regenerate,
         )
-        profile_agent.record_generated_content(db, payload.user_id, skill, payload.kind)
+        profile_agent.record_generated_content(db, current_user.id, skill, payload.kind)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -1064,14 +1294,15 @@ async def generate_resource(
 @router.get('/skills/{skill_id}/resources/external', response_model=ExternalResourceResponse)
 async def external_resources(
     skill_id: int,
-    user_id: int = Query(default=1),
+    current_user: CurrentUser,
     limit: int = Query(default=3, ge=1, le=10),
     db: Session = Depends(get_db),
 ) -> ExternalResourceResponse:
-    _get_or_create_user(db, user_id)
     skill = _get_skill_or_404(db, skill_id)
     topic = _get_topic_or_404(db, skill.topic_id)
-    _assert_skill_unlocked_for_learning(db, user_id=user_id, skill=skill)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
 
     try:
         resources = await resource_agent.fetch_external_resources(db, topic=topic, skill_node=skill, limit=limit)
@@ -1093,73 +1324,251 @@ async def external_resources(
     )
 
 
-@router.post('/skills/{skill_id}/quiz/generate', response_model=QuizResponse)
-async def generate_quiz(
-    skill_id: int,
-    payload: QuizGenerateRequest,
-    regenerate: bool = Query(default=False),
+@router.post('/assessments/generate', response_model=AssessmentDetailResponse)
+async def generate_assessment(
+    payload: AssessmentGenerateRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
-) -> QuizResponse:
-    _get_or_create_user(db, payload.user_id)
-    skill = _get_skill_or_404(db, skill_id)
-    topic = _get_topic_or_404(db, skill.topic_id)
-    _assert_skill_unlocked_for_learning(db, user_id=payload.user_id, skill=skill)
+) -> AssessmentDetailResponse:
+    topic = _get_topic_or_404(db, payload.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    skill = _get_skill_or_404(db, payload.skill_node_id)
+    if skill.topic_id != topic.id:
+        raise HTTPException(status_code=400, detail='skill_node_id does not belong to this topic')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
 
     try:
-        assessment, source = await assessment_agent.generate_quiz(
+        assessment, source = await assessment_agent.generate_assessment(
             db,
             topic=topic,
             skill_node=skill,
-            user_id=payload.user_id,
-            num_questions=payload.num_questions,
+            user_id=current_user.id,
+            question_count=payload.question_count,
+            regenerate=payload.regenerate,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
+    return _assessment_to_response(db, assessment=assessment, source=source)
+
+
+@router.get('/assessments/{assessment_id}', response_model=AssessmentDetailResponse)
+def get_assessment_detail(
+    assessment_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> AssessmentDetailResponse:
+    assessment = assessment_agent.get_assessment(db, assessment_id=assessment_id, user_id=current_user.id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail='Assessment not found')
+    return _assessment_to_response(db, assessment=assessment, source='stored')
+
+
+@router.post('/skills/{skill_id}/quiz/generate', response_model=QuizResponse)
+async def generate_quiz_compat(
+    skill_id: int,
+    payload: QuizGenerateRequest,
+    current_user: CurrentUser,
+    regenerate: bool = Query(default=False),
+    db: Session = Depends(get_db),
+) -> QuizResponse:
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+
+    try:
+        assessment, source = await assessment_agent.generate_assessment(
+            db,
+            topic=topic,
+            skill_node=skill,
+            user_id=current_user.id,
+            question_count=payload.num_questions,
             regenerate=regenerate,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
+
+    questions = db.scalars(
+        select(AssessmentQuestion)
+        .where(
+            AssessmentQuestion.assessment_id == assessment.id,
+            AssessmentQuestion.question_type == AssessmentQuestionType.multiple_choice,
+        )
+        .order_by(AssessmentQuestion.order_index.asc())
+    ).all()
+    if not questions:
+        raise HTTPException(
+            status_code=400,
+            detail='Assessment was generated without multiple-choice questions. Use /assessments/* endpoints.',
+        )
 
     return QuizResponse(
         assessment_id=assessment.id,
         title=assessment.title,
         questions=[
             {
-                'id': question.get('id', f'q{idx+1}'),
-                'prompt': question.get('prompt', ''),
-                'choices': question.get('choices', []),
+                'id': f'q{question.id}',
+                'prompt': question.prompt,
+                'choices': question.choices or [],
             }
-            for idx, question in enumerate(assessment.questions)
+            for question in questions
         ],
         source=source,
         version=assessment.version,
     )
 
 
-@router.post('/assessments/{assessment_id}/submit', response_model=QuizSubmitResponse)
-def submit_quiz(assessment_id: int, payload: QuizSubmitRequest, db: Session = Depends(get_db)) -> QuizSubmitResponse:
-    _get_or_create_user(db, payload.user_id)
-
-    assessment: Assessment | None = assessment_agent.get_assessment(db, assessment_id)
+@router.post('/assessments/{assessment_id}/submit', response_model=AssessmentSubmitResponse)
+async def submit_assessment(
+    assessment_id: int,
+    payload: AssessmentSubmitRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> AssessmentSubmitResponse:
+    assessment = assessment_agent.get_assessment(db, assessment_id=assessment_id, user_id=current_user.id)
     if not assessment:
         raise HTTPException(status_code=404, detail='Assessment not found')
 
+    topic = _get_topic_or_404(db, assessment.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Assessment not found')
+
     skill = _get_skill_or_404(db, assessment.skill_node_id)
-    _assert_skill_unlocked_for_learning(db, user_id=payload.user_id, skill=skill)
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
 
     try:
-        score, feedback, _attempt = assessment_agent.grade_assessment(
+        scored = await assessment_agent.score_assessment(
             db,
             assessment=assessment,
-            user_id=payload.user_id,
-            answers=payload.answers,
+            topic=topic,
+            skill_node=skill,
+            user_id=current_user.id,
+            responses=[item.model_dump() for item in payload.responses],
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    updated_state = profile_agent.apply_quiz_score(db, payload.user_id, skill, score)
-    _invalidate_recommendations(db, skill.topic_id, payload.user_id)
+    updated_state = profile_agent.apply_assessment_result(
+        db,
+        user_id=current_user.id,
+        skill_node=skill,
+        score=scored.overall_score,
+        mastery_delta=scored.mastery_delta,
+        confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
+    )
+    _invalidate_recommendations(db, skill.topic_id, current_user.id)
+
+    tree = _build_skill_tree_response(db, topic, current_user.id)
+    unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
+
+    return AssessmentSubmitResponse(
+        assessment_id=assessment.id,
+        attempt_id=scored.attempt.id,
+        score=round(scored.overall_score, 3),
+        confidence_avg=round(scored.confidence_avg, 3),
+        mastery_delta=round(scored.mastery_delta, 3),
+        feedback=[
+            AssessmentQuestionFeedbackResponse(
+                question_id=int(item['question_id']),
+                question_type=AssessmentQuestionType(item['question_type']),
+                score=float(item['score']),
+                confidence_score=item.get('confidence_score'),
+                feedback=item['feedback'],
+                missing_concepts=item.get('missing_concepts', []),
+            )
+            for item in scored.feedback
+        ],
+        strengths=scored.strengths,
+        weaknesses=scored.weaknesses,
+        review_next=scored.review_next,
+        recommended_follow_up=scored.recommended_follow_up,
+        summary=scored.summary,
+        updated_mastery=round(updated_state.mastery, 3),
+        updated_status=updated_state.status,
+        updated_progress_state=updated_state.progress_state,  # type: ignore[arg-type]
+        unlocked_skill_ids=unlocked_skill_ids,
+    )
+
+
+@router.get('/assessment-attempts/{attempt_id}', response_model=AssessmentAttemptResponse)
+def get_assessment_attempt(
+    attempt_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> AssessmentAttemptResponse:
+    attempt = assessment_agent.get_attempt(db, attempt_id=attempt_id, user_id=current_user.id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail='Assessment attempt not found')
+    return _attempt_to_response(db, attempt=attempt)
+
+
+@router.post('/assessments/{assessment_id}/submit-quiz', response_model=QuizSubmitResponse)
+async def submit_quiz_compat(
+    assessment_id: int,
+    payload: QuizSubmitRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> QuizSubmitResponse:
+    assessment = assessment_agent.get_assessment(db, assessment_id=assessment_id, user_id=current_user.id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail='Assessment not found')
+
+    questions = db.scalars(
+        select(AssessmentQuestion)
+        .where(AssessmentQuestion.assessment_id == assessment.id)
+        .order_by(AssessmentQuestion.order_index.asc())
+    ).all()
+    if not questions:
+        raise HTTPException(status_code=400, detail='Assessment has no questions')
+
+    responses = []
+    for idx, question in enumerate(questions):
+        if question.question_type != AssessmentQuestionType.multiple_choice:
+            responses.append(
+                {
+                    'question_id': question.id,
+                    'answer_text': '',
+                    'confidence_score': 0.5,
+                }
+            )
+            continue
+        selected = payload.answers[idx] if idx < len(payload.answers) else -1
+        responses.append(
+            {
+                'question_id': question.id,
+                'selected_option_index': selected,
+                'answer_text': '',
+                'confidence_score': 0.7,
+            }
+        )
+
+    topic = _get_topic_or_404(db, assessment.topic_id)
+    skill = _get_skill_or_404(db, assessment.skill_node_id)
+    scored = await assessment_agent.score_assessment(
+        db,
+        assessment=assessment,
+        topic=topic,
+        skill_node=skill,
+        user_id=current_user.id,
+        responses=responses,
+    )
+    updated_state = profile_agent.apply_assessment_result(
+        db,
+        user_id=current_user.id,
+        skill_node=skill,
+        score=scored.overall_score,
+        mastery_delta=scored.mastery_delta,
+        confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
+    )
+    _invalidate_recommendations(db, skill.topic_id, current_user.id)
 
     return QuizSubmitResponse(
-        score=round(score, 3),
-        feedback=feedback,
+        score=round(scored.overall_score, 3),
+        feedback=scored.feedback,
         updated_mastery=round(updated_state.mastery, 3),
         updated_status=updated_state.status,
         updated_progress_state=updated_state.progress_state,  # type: ignore[arg-type]
@@ -1167,22 +1576,29 @@ def submit_quiz(assessment_id: int, payload: QuizSubmitRequest, db: Session = De
 
 
 @router.post('/skills/{skill_id}/progress/update', response_model=MasteryUpdateResponse)
-def update_progress(skill_id: int, payload: MasteryUpdateRequest, db: Session = Depends(get_db)) -> MasteryUpdateResponse:
-    _get_or_create_user(db, payload.user_id)
+def update_progress(
+    skill_id: int,
+    payload: MasteryUpdateRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MasteryUpdateResponse:
     skill = _get_skill_or_404(db, skill_id)
-    _assert_skill_unlocked_for_learning(db, user_id=payload.user_id, skill=skill)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Skill node not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
 
     try:
         state = profile_agent.apply_progress_event(
             db,
-            user_id=payload.user_id,
+            user_id=current_user.id,
             skill_node=skill,
             action=payload.action,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _invalidate_recommendations(db, skill.topic_id, payload.user_id)
+    _invalidate_recommendations(db, skill.topic_id, current_user.id)
 
     return MasteryUpdateResponse(
         skill_node_id=skill_id,
@@ -1192,33 +1608,116 @@ def update_progress(skill_id: int, payload: MasteryUpdateRequest, db: Session = 
     )
 
 
+@router.get('/topics/{topic_id}/progress', response_model=TopicProgressResponse)
+def get_topic_progress(
+    topic_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicProgressResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic_id)
+    tree = _build_skill_tree_response(db, topic, current_user.id)
+
+    total_nodes = len(tree.nodes)
+    verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
+    available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
+    mastery_average = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+
+    return TopicProgressResponse(
+        topic_id=topic.id,
+        topic_name=topic.name,
+        total_nodes=total_nodes,
+        verified_nodes=verified_nodes,
+        available_nodes=available_nodes,
+        mastery_average=mastery_average,
+        nodes=[
+            TopicProgressNode(
+                skill_node_id=node.id,
+                name=node.name,
+                status=node.status,
+                progress_state=node.progress_state,  # type: ignore[arg-type]
+                mastery=node.mastery_estimate,
+                best_quiz_score=node.best_quiz_score or 0.0,
+                recommended_next_action=node.recommended_next_action,
+            )
+            for node in tree.nodes
+        ],
+    )
+
+
+@router.get('/users/me/progress-summary', response_model=UserProgressSummaryResponse)
+def get_user_progress_summary(
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> UserProgressSummaryResponse:
+    topics = db.scalars(
+        select(Topic).where(Topic.user_id == current_user.id).order_by(Topic.created_at.desc())
+    ).all()
+
+    topic_summaries: list[UserTopicProgressSummary] = []
+    verified_total = 0
+    mastery_values: list[float] = []
+
+    for topic in topics:
+        profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+        profile_agent.recompute_unlocks(db, current_user.id, topic.id)
+        tree = _build_skill_tree_response(db, topic, current_user.id)
+        verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
+        avg_mastery = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
+        verified_total += verified_nodes
+        mastery_values.append(avg_mastery)
+        topic_summaries.append(
+            UserTopicProgressSummary(
+                topic_id=topic.id,
+                topic_name=topic.name,
+                total_nodes=len(tree.nodes),
+                verified_nodes=verified_nodes,
+                mastery_average=avg_mastery,
+            )
+        )
+
+    return UserProgressSummaryResponse(
+        user_id=current_user.id,
+        xp=current_user.xp,
+        level=current_user.level,
+        topics_total=len(topics),
+        verified_nodes_total=verified_total,
+        mastery_average=round(mean(mastery_values), 3) if mastery_values else 0.0,
+        topics=topic_summaries,
+    )
+
+
 @router.post('/skills/{skill_id}/deep-dive', response_model=SkillTreeResponse)
 async def create_deep_dive_branch(
     skill_id: int,
     payload: DeepDiveBranchRequest,
+    current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> SkillTreeResponse:
-    _get_or_create_user(db, payload.user_id)
     parent_skill = _get_skill_or_404(db, skill_id)
     topic = _get_topic_or_404(db, parent_skill.topic_id)
-    if topic.user_id != payload.user_id:
+    if topic.user_id != current_user.id:
         raise HTTPException(status_code=404, detail='Topic not found')
 
-    _assert_skill_unlocked_for_learning(db, user_id=payload.user_id, skill=parent_skill)
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=parent_skill)
 
     try:
         await skill_graph_agent.create_deep_dive_branch(
             db,
             topic=topic,
             parent_node=parent_skill,
-            user_id=payload.user_id,
+            user_id=current_user.id,
             focus=payload.focus.strip() or None,
             branch_size=payload.branch_size,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    profile_agent.ensure_states_for_topic(db, payload.user_id, topic.id)
-    profile_agent.recompute_unlocks(db, payload.user_id, topic.id)
-    _invalidate_recommendations(db, topic.id, payload.user_id)
-    return _build_skill_tree_response(db, topic, payload.user_id)
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic.id)
+    _invalidate_recommendations(db, topic.id, current_user.id)
+    return _build_skill_tree_response(db, topic, current_user.id)

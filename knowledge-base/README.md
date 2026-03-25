@@ -1,39 +1,26 @@
-# Knowledge Base (Live MVP)
+# Knowledge Base (Authenticated MVP)
 
-`knowledge-base` is a locally runnable multi-agent learning system that helps a learner progress through any topic as a skill tree.
+`knowledge-base` is a locally runnable multi-agent learning platform:
 
-This version is a **live MVP**, not a mock PoC:
+- create topics and LLM-generated skill trees
+- ingest source documents + personal notes
+- chat with a tutor using retrieval context
+- generate lessons/examples/exercises/resources
+- run mixed-type assessments (not only MCQ)
+- update progression and unlock nodes over time
+- persist everything per authenticated user
 
-- live OpenAI calls for skill graph generation, tutoring, lesson generation, quiz generation
-- live OpenAI embeddings for note chunks
-- live retrieval from PostgreSQL + pgvector
-- real persistence for progression, chat, assessments, and recommendations
-- live external resource search via Serper API
-
-## What the system does
-
-- creates a learning topic and generates a dependency-based skill graph
-- ingests learner notes (text/markdown/pdf)
-- embeds and retrieves note chunks during tutoring and planning
-- tracks per-node progression state and lock/unlock progression
-- recommends the next best skill to study and why
-- generates lessons/examples/exercises for selected skills
-- generates quizzes and updates mastery from quiz attempts
-- fetches external resources (article/docs/video) for selected skills
-- supports first-class personal notes (separate from uploaded source documents)
-
-## Tech stack
+## Stack
 
 - Frontend: Next.js + React + TypeScript + Tailwind
 - Backend: FastAPI + Python
-- Database: PostgreSQL
-- Vector storage: pgvector
+- DB: PostgreSQL
+- Vector: pgvector
 - ORM: SQLAlchemy
-- Provider integrations:
-  - OpenAI Chat + Embeddings
-  - Serper Search API
+- LLM/Embeddings: OpenAI API
+- External search: Serper API
 
-## Repository structure
+## Repo structure
 
 ```text
 knowledge-base/
@@ -45,192 +32,218 @@ knowledge-base/
       db/
       schemas/
       services/
-      utils/
-      main.py
     scripts/
+      init_db.py
       seed_demo.py
+      smoke_auth_isolation.py
       smoke_live_flow.py
-    requirements.txt
   frontend/
     app/
-      page.tsx
-      topics/page.tsx
-      topics/[topicId]/page.tsx
-      topics/[topicId]/skills/[skillId]/page.tsx
-      topics/[topicId]/chat/page.tsx
-      topics/[topicId]/notes/page.tsx
+      login/page.tsx
+      signup/page.tsx
+      topics/...
     components/
-      learning-content.tsx
-      topic-header.tsx
-      topics-dashboard.tsx
     lib/
-      api.ts
-      types.ts
-    package.json
   docker/
-    postgres/
-      init/01-enable-pgvector.sql
-  docs/
-    architecture.md
   .env.example
   docker-compose.yml
-  README.md
 ```
 
-## Agent orchestration
+## Authentication model
 
-- `SkillGraphAgent`
-  - Uses structured LLM output to generate graph nodes and prerequisites.
-- `ProfileAgent`
-  - Maintains `UserSkillState` and unlock logic.
-- `IngestionAgent`
-  - Stores documents, chunks text, calls OpenAI embeddings, stores vectors.
-- `TutorAgent`
-  - Retrieves top note chunks and generates adaptive tutor responses.
-- `RecommendationAgent`
-  - Combines state heuristics and LLM reasoning for next-step recommendations.
-- `ResourceAgent`
-  - Generates learning material or fetches/ranks external resources.
-- `AssessmentAgent`
-  - Generates quizzes with structured output and grades attempts.
+Implemented auth is JWT-based with backend-issued bearer tokens.
 
-API routes orchestrate these agents directly for clear flow and testability.
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
+- `POST /api/auth/logout`
 
-## Performance and loading strategy
+Passwords are hashed with `passlib` (`pbkdf2_sha256`).
 
-Recent UX/performance refactor highlights:
+### User profile fields
 
-- recommendation endpoint now reuses recently generated recommendations (3-minute freshness window) by default to avoid unnecessary LLM calls on every page load
-- topic/skill pages use progressive loading: primary skill-tree content renders first, secondary panels load in the background
-- client-side short-lived cache for topic tree and recommendations reduces repeated requests across route transitions
-- route-level `loading.tsx` skeletons for topics, topic overview, skill workspace, chat, and notes prevent blank/full-page blocking loaders
-- generation endpoints still stay live, but content reuse (`source=stored`) keeps revisits fast and consistent
+`User` includes:
 
-## Progression model (status-first)
+- `id`, `email`, `hashed_password`, `display_name`
+- `onboarding_state`, `subscription_tier`
+- `xp`, `level`
+- `preferences`, `current_goal_summary`
+- `created_at`, `updated_at`
 
-Each node exposes learner-facing progression states:
+### User-scoped data
 
-- `not_started`
-- `learning`
-- `completed`
-- `verified`
+All core entities are user-scoped in runtime access:
 
-Progression rules:
+- topics/skill trees
+- user skill states
+- documents/notes/chunks
+- chat sessions/messages
+- recommendations
+- generated resources
+- assessments + attempts + responses + feedback
 
-- lesson completion is a one-time, idempotent state transition
-- exercise completion is a one-time, idempotent state transition
-- quiz score is the verification gate (>= 70% marks node as `verified`)
-- child nodes unlock only when all prerequisite nodes are `verified`
+Frontend protected routing is handled by an auth provider + auth gate.
+Unauthenticated users are redirected to `/login`.
 
-The backend still maintains an internal numeric `mastery` signal for ranking/recommendation, but the primary UX uses node states and checklist evidence (`lesson_completed`, `exercises_completed`, `quiz_taken`, `best_quiz_score`).
+## Assessment architecture
 
-## Generated content persistence
+Assessment moved from simple MCQ quiz to mixed-type evaluation.
 
-Generated lesson/examples/exercises/quiz payloads are persisted and versioned.
+### Supported question types
 
-- First request: generate via LLM, save, return `source=generated`.
-- Subsequent requests: load saved active version, return `source=stored`.
-- Explicit regenerate: call same endpoint with `?regenerate=true`, create a new active version and return `source=regenerated`.
+- `multiple_choice`
+- `short_answer`
+- `explain`
+- `scenario`
+- `error_spotting`
+- `reflection`
 
-This behavior is implemented for:
+### Data model
 
+- `Assessment`
+- `AssessmentQuestion`
+- `AssessmentAttempt`
+- `AssessmentResponse`
+- `AssessmentFeedback`
+
+### Generation
+
+`AssessmentAgent` generates structured assessments using OpenAI:
+
+- node-scoped
+- learner-level aware
+- mixed question types
+- rubric/expected-concept aware
+- persisted and versioned per user + skill node
+
+### Reliability safeguards
+
+- type-specific validation for MCQ/open-response/reflection fields
+- schema-aware payload normalization before final validation
+- automatic repair for missing `expected_concepts`/rubric gaps
+- fallback path when structured output still fails:
+1. narrower constrained regeneration
+2. deterministic valid assessment fallback
+- observability logs for validation failures, repaired fields, fallback usage, and final question composition
+
+### Scoring
+
+- MCQ: deterministic scoring against answer index
+- Free-text: rubric-based LLM evaluation against expected concepts
+- Mastery updates are based on assessment performance (confidence input is not required in the user flow)
+
+### Feedback returned
+
+- overall score
+- per-question scores and feedback
+- strengths
+- weaknesses
+- review focus
+- suggested follow-up
+- mastery delta
+- updated node state
+
+## Topic initialization flow
+
+Topic creation now supports a dedicated initialization flow with a progress screen.
+
+Blocking stage before entry:
+
+1. create topic record
+2. build/reuse skill tree
+3. compute unlock states
+4. prepare first unlocked node content:
+   - lesson
+   - examples
+   - exercises
+   - assessment draft
+5. generate recommendations
+
+After that, user is routed directly to the first ready skill node.
+Readiness only completes once all required starter content above exists for the first node.
+Then additional content preparation continues for nearby nodes in priority order:
+
+1. unlocked nodes
+2. likely-to-unlock nodes
+3. remaining high-priority neighbors (bounded set)
+
+Initialization progress is persisted in `topic_initialization_jobs`.
+
+## Key APIs
+
+### Topics / learning flow
+
+- `GET /api/topics`
+- `POST /api/topics`
+- `POST /api/topics/create-and-initialize`
+- `POST /api/topics/{topic_id}/initialize`
+- `GET /api/topics/{topic_id}/initialization-status`
+- `DELETE /api/topics/{topic_id}?confirm=true`
+- `GET /api/topics/{topic_id}/skill-tree`
+- `POST /api/topics/{topic_id}/skill-tree/generate`
 - `POST /api/skills/{skill_id}/resources/generate`
+- `GET /api/skills/{skill_id}/resources/external`
+- `GET /api/topics/{topic_id}/recommendations`
+- `POST /api/skills/{skill_id}/progress/update`
+- `POST /api/skills/{skill_id}/deep-dive`
+
+### Chat / notes
+
+- `POST /api/topics/{topic_id}/chat`
+- `GET /api/topics/{topic_id}/notes`
+- `POST /api/topics/{topic_id}/notes`
+- `PUT /api/notes/{note_id}`
+- `DELETE /api/notes/{note_id}`
+- `POST /api/topics/{topic_id}/documents/upload`
+- `GET /api/topics/{topic_id}/documents`
+- `DELETE /api/topics/{topic_id}/documents/{document_id}`
+
+Tutor chat includes topic-relevance guardrails:
+- relevant/related questions are answered normally
+- clearly unrelated questions are gently redirected back to the selected topic
+
+### Assessments
+
+- `POST /api/assessments/generate`
+- `GET /api/assessments/{assessment_id}`
+- `POST /api/assessments/{assessment_id}/submit`
+- `GET /api/assessment-attempts/{attempt_id}`
+- `GET /api/topics/{topic_id}/progress`
+- `GET /api/users/me/progress-summary`
+
+Compatibility endpoints still exist for legacy UI flows:
+
 - `POST /api/skills/{skill_id}/quiz/generate`
+- `POST /api/assessments/{assessment_id}/submit-quiz`
 
-## Frontend IA
+## Environment
 
-- `/topics`
-  - Topic dashboard and creation.
-- `/topics/[topicId]`
-  - Topic overview: progress summary, skill tree, recommendations.
-- `/topics/[topicId]/skills/[skillId]`
-  - Focused node workspace with tabbed learning views (`Overview`, `Lesson`, `Examples`, `Exercises`, `Quiz`, `Resources`).
-- `/topics/[topicId]/chat`
-  - Tutor conversation workspace with structured assistant rendering and optional personal-note inclusion.
-- `/topics/[topicId]/notes`
-  - Dedicated notes workspace:
-  - Personal notes CRUD (title/body/type/optional skill link)
-  - Separate source document upload/list for retrieval
-
-## Generated Content Contract
-
-`POST /api/skills/{skill_id}/resources/generate` returns both persisted text and structured JSON:
-
-- `title`, `summary`, `content`, `relevance_reason`
-- `structured_content`:
-  - lesson: `title`, `summary`, `learning_objectives[]`, `key_concepts[]`, `sections[]`, `takeaways[]`, `next_steps[]`
-  - examples: `title`, `intro`, `examples[]`
-  - exercises: `title`, `intro`, `exercises[]`
-
-The frontend renders `structured_content` with dedicated components and only falls back to raw text if the payload is invalid.
-
-Both resource and quiz generation responses include:
-
-- `source`: `stored | generated | regenerated`
-- `version`: persisted content version number
-
-## Tutor chat contract
-
-`POST /api/topics/{topic_id}/chat` now supports:
-
-- `include_personal_notes` (boolean, default `false`)
-
-Response includes:
-
-- `answer` (plain rendered text for transcript/history)
-- `structured_answer` (`overview`, `key_points[]`, `practical_steps[]`, `pitfalls[]`, `next_step`)
-- `context_usage` (`document_chunks`, `personal_notes`)
-
-Personal notes are not silently injected by default; they are opt-in per message from the chat UI.
-
-## Notes and documents model
-
-Two separate concepts:
-
-1. Personal notes (`notes` table):
-- `id`, `user_id`, `topic_id`, optional `skill_node_id`
-- `note_type` (`personal`, `lesson`, `summary`, `reflection`, `reminder`)
-- `title`, `body`, `created_at`, `updated_at`
-
-2. Source documents (`documents` + `document_chunks`):
-- uploaded materials used for embedding + retrieval
-- separate from user-authored notes
-
-## Environment variables
-
-Copy and fill `.env` from `.env.example`:
+Copy env file:
 
 ```bash
 cp .env.example .env
 ```
 
-Required for backend startup:
+Required:
 
-- `DATABASE_URL` (must be PostgreSQL, `postgresql+psycopg://...`)
+- `DATABASE_URL` (PostgreSQL + psycopg URL)
 - `OPENAI_API_KEY`
+- `JWT_SECRET_KEY`
 
-Required for external resource endpoint:
+Required for web resource retrieval:
 
-- `SEARCH_API_KEY` (Serper)
-
-Recommended defaults are already present in `.env.example`:
-
-- `OPENAI_MODEL`
-- `OPENAI_EMBEDDING_MODEL`
-- `EMBEDDING_DIMENSIONS`
-- `NEXT_PUBLIC_API_BASE_URL`
-- `CORS_ORIGINS`
+- `SEARCH_API_KEY`
 
 ## Local setup
 
-## 1) Start PostgreSQL + pgvector
+### 1) Start PostgreSQL + pgvector
 
 ```bash
 cd /Users/jack/Knowledge_Base/knowledge-base
 docker compose up -d postgres
 ```
 
-## 2) Run backend
+### 2) Run backend
 
 ```bash
 cd /Users/jack/Knowledge_Base/knowledge-base/backend
@@ -241,9 +254,7 @@ set -a; source ../.env; set +a
 uvicorn app.main:app --reload --port 8000
 ```
 
-Backend startup validates runtime config. If required variables are missing, it fails with explicit errors.
-
-## 3) Run frontend
+### 3) Run frontend
 
 ```bash
 cd /Users/jack/Knowledge_Base/knowledge-base/frontend
@@ -252,130 +263,98 @@ set -a; source ../.env; set +a
 npm run dev
 ```
 
-Frontend URL: `http://localhost:3000`  
-Backend URL: `http://localhost:8000`
+Open:
 
-## Optional: seed demo data
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:8000`
 
-```bash
-cd /Users/jack/Knowledge_Base/knowledge-base/backend
-source .venv/bin/activate
-set -a; source ../.env; set +a
-python -m scripts.seed_demo
-```
+## DB init / migration note
 
-## Live end-to-end flow (manual)
+Startup runs `init_db()`:
 
-1. Create topic (for example, `Python debugging`) from dashboard.
-2. Open topic page and confirm generated skill tree nodes.
-3. Upload source material files in **Notes** (documents) and optionally create personal notes.
-4. Ask tutor a question with a selected skill.
-5. Request recommendations.
-6. Generate lesson/examples/exercises.
-7. Fetch external resources.
-8. Generate quiz.
-9. Submit quiz answers.
-10. Mark lesson complete and exercises complete (each action is idempotent).
-11. Refresh skill tree and confirm mastery/status changes.
+- creates missing tables from SQLAlchemy models
+- applies lightweight `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...` migrations
 
-## Smoke test script
+For production, replace this with full Alembic migration workflow.
 
-Run against a live backend server:
+## Auth + assessment smoke flow
+
+Run:
 
 ```bash
 cd /Users/jack/Knowledge_Base/knowledge-base/backend
 source .venv/bin/activate
-python -m scripts.smoke_live_flow
+python -m scripts.smoke_live_flow --skip-external
 ```
 
-Options:
+Smoke script validates:
 
-- `--api-base http://localhost:8000/api`
-- `--user-id 1`
-- `--skip-external` (if `SEARCH_API_KEY` is not set)
+1. register + `auth/me`
+2. topic creation
+3. skill tree load
+4. note ingestion
+5. chat response
+6. recommendations
+7. lesson generation
+8. mixed assessment generation
+9. mixed assessment submission (including free-text)
+10. attempt retrieval
+11. topic/user progress summary endpoints
 
-The smoke script verifies:
+## Topic initialization UX test
 
-- topic creation
-- skill tree retrieval
-- note ingestion
-- retrieval-backed chat
-- recommendations
-- lesson generation
-- lesson persistence + regenerate
-- quiz generation + submission
-- quiz persistence + regenerate
-- idempotent progression updates
-- updated tree retrieval
+1. Sign in and open `/topics`
+2. Create a new topic
+3. Confirm redirect to `/topics/{id}/initializing`
+4. Wait for progress to reach ready state
+5. Confirm auto-redirect to `/topics/{id}/skills/{firstReadySkillId}`
+6. Open `Lesson`, `Exercises`, and `Assessment` tabs to verify first-node content is already available/stored
 
-## API endpoints
+Auth/isolation smoke:
 
-- `GET /api/health`
-- `GET /api/topics`
-- `POST /api/topics`
-- `POST /api/topics/{topic_id}/skill-tree/generate`
-- `GET /api/topics/{topic_id}/skill-tree`
-- `POST /api/topics/{topic_id}/notes/upload`
-- `POST /api/topics/{topic_id}/documents/upload`
-- `GET /api/topics/{topic_id}/documents`
-- `GET /api/topics/{topic_id}/notes`
-- `POST /api/topics/{topic_id}/notes`
-- `GET /api/notes/{note_id}`
-- `PUT /api/notes/{note_id}`
-- `DELETE /api/notes/{note_id}`
-- `POST /api/topics/{topic_id}/chat`
-- `GET /api/topics/{topic_id}/recommendations`
-- `POST /api/skills/{skill_id}/resources/generate`
-- `GET /api/skills/{skill_id}/resources/external`
-- `POST /api/skills/{skill_id}/quiz/generate`
-- `POST /api/assessments/{assessment_id}/submit`
-- `POST /api/skills/{skill_id}/progress/update`
+```bash
+cd /Users/jack/Knowledge_Base/knowledge-base/backend
+source .venv/bin/activate
+python -m scripts.smoke_auth_isolation
+```
 
-Legacy compatibility alias:
+Validates:
 
-- `POST /api/topics/{topic_id}/notes/upload` (maps to document upload)
+1. unauthenticated protected-route rejection
+2. registration for two users
+3. per-user topic visibility
+4. cross-user access denial for topic detail endpoints
 
-## Database schema entities
+## Tests
 
-- `User`
-- `Topic`
-- `SkillNode`
-- `SkillEdge`
-- `UserSkillState`
-- `Document`
-- `DocumentChunk` (pgvector embedding)
-- `Note`
-- `ChatSession`
-- `ChatMessage`
-- `Recommendation`
-- `LearningResource`
-- `Assessment`
-- `AssessmentAttempt`
+Backend quick tests:
 
-## Logging and observability
+```bash
+cd /Users/jack/Knowledge_Base/knowledge-base/backend
+source .venv/bin/activate
+pytest -q
+```
 
-The backend logs:
+Live integration tests (against a running backend):
 
-- OpenAI chat call start/completion and latency
-- OpenAI embedding call start/completion and latency
-- retrieval hit counts
-- recommendation generation counts
-- resource generation/search events
-- assessment grading and mastery updates
-- provider/configuration errors
+```bash
+cd /Users/jack/Knowledge_Base/knowledge-base/backend
+source .venv/bin/activate
+LIVE_API_BASE_URL=http://localhost:8000/api pytest -q -m integration
+```
+
+## Frontend UX changes in this refactor
+
+- Added `/login` and `/signup`
+- Added auth provider + protected app shell + logout
+- Removed default `user_id` hacks in frontend API calls
+- Upgraded skill assessment tab to mixed-type assessment UI:
+  - MCQ + free-text inputs
+  - detailed results/feedback rendering
 
 ## Known limitations
 
-- External search currently uses one provider (`serper`) and requires API key.
-- Internal mastery remains heuristic (practical for MVP, not psychometrically calibrated).
-- No authentication/authorization yet (single demo user flow by default).
-- No background queue yet; all heavy operations run inline in request paths.
-- No full-text index yet for notes search (currently simple `ILIKE` filtering).
-
-## Suggested next steps
-
-1. Add auth and multi-user tenant isolation.
-2. Add Alembic migration workflow and CI checks.
-3. Add async job queue for ingestion/long generations.
-4. Add richer recommendation policy with learning history/spacing.
-5. Add evaluation harness for prompt and output quality.
+- No refresh-token/session rotation yet (access token only).
+- No email verification/password reset yet.
+- LLM-based free-text scoring quality depends on model behavior.
+- Lightweight migration bootstrap is practical for MVP but not enough for production release management.

@@ -73,7 +73,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     async (refresh = false) => {
       setLoadingRecommendations(true);
       try {
-        const recData = await getRecommendations(topicId, 1, refresh);
+        const recData = await getRecommendations(topicId, refresh);
         setRecommendations(recData);
         writeRecommendationCache(topicId, recData);
       } catch (err) {

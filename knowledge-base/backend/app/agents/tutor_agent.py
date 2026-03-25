@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.models import ChatMessage, ChatSession, LearningResource, Note, SkillEdge, SkillNode, Topic, UserSkillState
+from app.schemas.llm import TopicRelevancePlan
 from app.services.llm import LLMService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService, SearchResult
@@ -24,6 +26,90 @@ class TutorAgent:
         self.llm_service = llm_service
         self.retrieval_service = retrieval_service
         self.search_service = search_service
+
+    def _extract_terms(self, text: str) -> set[str]:
+        if not text:
+            return set()
+        stop_words = {
+            'what', 'when', 'where', 'why', 'how', 'which', 'with', 'from', 'into', 'about', 'that', 'this',
+            'then', 'than', 'your', 'have', 'will', 'would', 'could', 'should', 'need', 'help', 'please',
+            'topic', 'skill', 'learn', 'learning', 'question', 'answer',
+        }
+        terms = {
+            token
+            for token in re.findall(r'[a-zA-Z][a-zA-Z0-9_-]{2,}', text.lower())
+            if token not in stop_words
+        }
+        return terms
+
+    def _lexical_relevance_score(self, *, message: str, topic: Topic, skill_node: SkillNode | None) -> float:
+        message_terms = self._extract_terms(message)
+        if not message_terms:
+            return 0.0
+
+        topic_context = f'{topic.name} {topic.description} {topic.goal}'
+        if skill_node is not None:
+            topic_context = f'{topic_context} {skill_node.name} {skill_node.description}'
+        topic_terms = self._extract_terms(topic_context)
+        if not topic_terms:
+            return 0.0
+
+        overlap = message_terms.intersection(topic_terms)
+        return len(overlap) / max(1, min(len(message_terms), len(topic_terms)))
+
+    async def _classify_topic_relevance(
+        self,
+        *,
+        topic: Topic,
+        skill_node: SkillNode | None,
+        message: str,
+    ) -> str:
+        normalized = message.strip().lower()
+        if normalized in {'hi', 'hello', 'hey', 'thanks', 'thank you'}:
+            return 'related'
+
+        lexical_score = self._lexical_relevance_score(message=message, topic=topic, skill_node=skill_node)
+        if lexical_score >= 0.12:
+            return 'relevant'
+
+        skill_context = (
+            f'Selected skill: {skill_node.name}\\nSkill description: {skill_node.description}'
+            if skill_node
+            else 'No specific skill selected.'
+        )
+        system_prompt = (
+            'You are a strict but practical topic relevance classifier for a learning tutor.\n'
+            'Classify whether a user message is relevant to the active learning topic.\n'
+            'Use labels: relevant, related, unrelated.\n'
+            'related means adjacent/supportive to the topic. unrelated means off-topic.'
+        )
+        user_prompt = (
+            f'Active topic: {topic.name}\\n'
+            f'Topic description: {topic.description or "No description"}\\n'
+            f'Topic goal: {topic.goal or "No explicit goal"}\\n'
+            f'{skill_context}\\n\\n'
+            f'User message: {message}\\n\\n'
+            'Return JSON with relevance and rationale.'
+        )
+        try:
+            plan = await self.llm_service.generate_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_model=TopicRelevancePlan,
+                temperature=0.0,
+                max_tokens=220,
+                retries=1,
+            )
+            return plan.relevance
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('tutor.relevance_fallback topic_id=%s error=%s', topic.id, exc)
+            return 'unrelated'
+
+    def _off_topic_redirect(self, *, topic: Topic) -> str:
+        return (
+            f"I'm here to help you learn {topic.name}. "
+            f"If you'd like, ask a question about {topic.name.lower()} and I'll guide you step by step."
+        )
 
     def _detect_response_mode(self, message: str) -> str:
         normalized = message.lower()
@@ -119,7 +205,13 @@ class TutorAgent:
     ) -> tuple[int, int, str, list[str], dict | None, dict[str, int], list[dict]]:
         session: ChatSession | None = None
         if session_id is not None:
-            session = db.scalar(select(ChatSession).where(ChatSession.id == session_id, ChatSession.topic_id == topic.id))
+            session = db.scalar(
+                select(ChatSession).where(
+                    ChatSession.id == session_id,
+                    ChatSession.topic_id == topic.id,
+                    ChatSession.user_id == user_id,
+                )
+            )
 
         if session is None:
             session = ChatSession(topic_id=topic.id, user_id=user_id, title=f'{topic.name} chat')
@@ -155,6 +247,39 @@ class TutorAgent:
                     mastery_context = 'intermediate'
         else:
             state = None
+
+        relevance = await self._classify_topic_relevance(topic=topic, skill_node=node, message=message)
+        if relevance == 'unrelated':
+            answer = self._off_topic_redirect(topic=topic)
+            assistant_message = ChatMessage(
+                session_id=session.id,
+                topic_id=topic.id,
+                skill_node_id=skill_node_id,
+                role='assistant',
+                content=answer,
+            )
+            db.add(assistant_message)
+            db.flush()
+            db.commit()
+            logger.info(
+                'tutor.response_redirected topic_id=%s session_id=%s relevance=%s',
+                topic.id,
+                session.id,
+                relevance,
+            )
+            return (
+                session.id,
+                assistant_message.id,
+                answer,
+                [],
+                None,
+                {
+                    'document_chunks': 0,
+                    'personal_notes': 0,
+                    'external_resources': 0,
+                },
+                [],
+            )
 
         retrieved = await self.retrieval_service.retrieve_chunks(
             db,
@@ -332,10 +457,11 @@ class TutorAgent:
         ]
 
         logger.info(
-            'tutor.response topic_id=%s session_id=%s mode=%s retrieval_hits=%s personal_notes=%s web_results=%s include_personal_notes=%s include_web_resources=%s',
+            'tutor.response topic_id=%s session_id=%s mode=%s relevance=%s retrieval_hits=%s personal_notes=%s web_results=%s include_personal_notes=%s include_web_resources=%s',
             topic.id,
             session.id,
             response_mode,
+            relevance,
             len(retrieved),
             len(personal_notes),
             len(web_results),

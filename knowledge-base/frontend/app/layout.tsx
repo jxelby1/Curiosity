@@ -1,5 +1,7 @@
 import type { Metadata } from 'next';
 
+import { AuthGate, AuthProvider } from '@/components/auth-provider';
+
 import './globals.css';
 
 export const metadata: Metadata = {
@@ -14,7 +16,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         className="font-sans"
         style={{ fontFamily: '"Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif' }}
       >
-        {children}
+        <AuthProvider>
+          <AuthGate>{children}</AuthGate>
+        </AuthProvider>
       </body>
     </html>
   );

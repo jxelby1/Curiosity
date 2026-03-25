@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -39,13 +39,30 @@ class NoteType(str, Enum):
     reminder = 'reminder'
 
 
+class AssessmentQuestionType(str, Enum):
+    multiple_choice = 'multiple_choice'
+    short_answer = 'short_answer'
+    explain = 'explain'
+    scenario = 'scenario'
+    error_spotting = 'error_spotting'
+    reflection = 'reflection'
+
+
 class User(Base):
     __tablename__ = 'users'
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), default='')
     display_name: Mapped[str] = mapped_column(String(120), default='Demo User')
+    onboarding_state: Mapped[str] = mapped_column(String(80), default='new')
+    subscription_tier: Mapped[str] = mapped_column(String(80), default='free')
+    xp: Mapped[int] = mapped_column(Integer, default=0)
+    level: Mapped[int] = mapped_column(Integer, default=1)
+    preferences: Mapped[dict] = mapped_column(JSON, default=dict)
+    current_goal_summary: Mapped[str] = mapped_column(Text, default='')
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     topics: Mapped[list['Topic']] = relationship(back_populates='user', cascade='all,delete')
 
@@ -63,6 +80,29 @@ class Topic(Base):
     user: Mapped['User'] = relationship(back_populates='topics')
     skills: Mapped[list['SkillNode']] = relationship(back_populates='topic', cascade='all,delete')
     edges: Mapped[list['SkillEdge']] = relationship(back_populates='topic', cascade='all,delete')
+
+
+class TopicInitializationJob(Base):
+    __tablename__ = 'topic_initialization_jobs'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    status: Mapped[str] = mapped_column(String(40), default='queued')
+    current_step: Mapped[str] = mapped_column(String(120), default='queued')
+    progress: Mapped[float] = mapped_column(Float, default=0.0)
+    ready_for_entry: Mapped[bool] = mapped_column(Boolean, default=False)
+    background_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+    first_ready_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
+    status_messages: Mapped[list[str]] = mapped_column(JSON, default=list)
+    error_text: Mapped[str] = mapped_column(Text, default='')
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (UniqueConstraint('topic_id', 'user_id', name='uq_topic_init_job_topic_user'),)
 
 
 class SkillNode(Base):
@@ -237,8 +277,31 @@ class Assessment(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     is_active: Mapped[bool] = mapped_column(default=True)
     title: Mapped[str] = mapped_column(String(255), default='Skill Check')
+    difficulty: Mapped[int] = mapped_column(Integer, default=1)
+    target_level: Mapped[str] = mapped_column(String(40), default='beginner')
+    question_mix: Mapped[dict] = mapped_column(JSON, default=dict)
     questions: Mapped[list[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    question_rows: Mapped[list['AssessmentQuestion']] = relationship(back_populates='assessment', cascade='all,delete')
+    attempts: Mapped[list['AssessmentAttempt']] = relationship(back_populates='assessment', cascade='all,delete')
+
+
+class AssessmentQuestion(Base):
+    __tablename__ = 'assessment_questions'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    assessment_id: Mapped[int] = mapped_column(ForeignKey('assessments.id'), index=True)
+    question_type: Mapped[AssessmentQuestionType] = mapped_column(SAEnum(AssessmentQuestionType))
+    prompt: Mapped[str] = mapped_column(Text)
+    choices: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    expected_concepts: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rubric: Mapped[dict] = mapped_column(JSON, default=dict)
+    difficulty: Mapped[int] = mapped_column(Integer, default=1)
+    order_index: Mapped[int] = mapped_column(Integer, default=0)
+
+    assessment: Mapped['Assessment'] = relationship(back_populates='question_rows')
+    responses: Mapped[list['AssessmentResponse']] = relationship(back_populates='question', cascade='all,delete')
 
 
 class AssessmentAttempt(Base):
@@ -249,5 +312,46 @@ class AssessmentAttempt(Base):
     user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
     answers: Mapped[list[int]] = mapped_column(JSON)
     score: Mapped[float] = mapped_column(Float)
+    confidence_avg: Mapped[float] = mapped_column(Float, default=0.0)
+    mastery_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    weaknesses: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_next: Mapped[str] = mapped_column(Text, default='')
+    recommended_follow_up: Mapped[str] = mapped_column(Text, default='')
     feedback: Mapped[list[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    assessment: Mapped['Assessment'] = relationship(back_populates='attempts')
+    responses: Mapped[list['AssessmentResponse']] = relationship(back_populates='attempt', cascade='all,delete')
+    feedback_rows: Mapped[list['AssessmentFeedback']] = relationship(back_populates='attempt', cascade='all,delete')
+
+
+class AssessmentResponse(Base):
+    __tablename__ = 'assessment_responses'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey('assessment_attempts.id'), index=True)
+    question_id: Mapped[int] = mapped_column(ForeignKey('assessment_questions.id'), index=True)
+    answer_text: Mapped[str] = mapped_column(Text, default='')
+    selected_option_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    feedback: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    attempt: Mapped['AssessmentAttempt'] = relationship(back_populates='responses')
+    question: Mapped['AssessmentQuestion'] = relationship(back_populates='responses')
+
+
+class AssessmentFeedback(Base):
+    __tablename__ = 'assessment_feedback'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    attempt_id: Mapped[int] = mapped_column(ForeignKey('assessment_attempts.id'), index=True)
+    strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
+    weaknesses: Mapped[list[str]] = mapped_column(JSON, default=list)
+    review_next: Mapped[str] = mapped_column(Text, default='')
+    summary: Mapped[str] = mapped_column(Text, default='')
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    attempt: Mapped['AssessmentAttempt'] = relationship(back_populates='feedback_rows')

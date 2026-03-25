@@ -4,7 +4,7 @@ import json
 import logging
 import time
 from types import UnionType
-from typing import Any, TypeVar, Union, get_args, get_origin
+from typing import Any, Callable, TypeVar, Union, get_args, get_origin
 
 from annotated_types import MaxLen
 
@@ -166,6 +166,7 @@ class LLMService:
         temperature: float = 0.2,
         max_tokens: int = 1800,
         retries: int = 2,
+        repair_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     ) -> T:
         schema_json = json.dumps(schema_model.model_json_schema(), indent=2)
         structured_prompt = (
@@ -195,6 +196,25 @@ class LLMService:
                 attempt += 1
                 continue
 
+            if repair_payload is not None:
+                try:
+                    repaired_custom = repair_payload(payload)
+                    if isinstance(repaired_custom, dict):
+                        if repaired_custom != payload:
+                            logger.info(
+                                'openai.structured.custom_repair schema=%s attempt=%s',
+                                schema_model.__name__,
+                                attempt + 1,
+                            )
+                        payload = repaired_custom
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        'openai.structured.custom_repair_failed schema=%s attempt=%s error=%s',
+                        schema_model.__name__,
+                        attempt + 1,
+                        exc,
+                    )
+
             try:
                 return schema_model.model_validate(payload)
             except ValidationError as exc:
@@ -211,7 +231,21 @@ class LLMService:
                     except ValidationError:
                         pass
 
-                logger.warning('openai.structured.retry attempt=%s error=%s', attempt + 1, exc)
+                validation_errors = exc.errors()
+                compact_errors = [
+                    {
+                        'loc': '.'.join(str(part) for part in item.get('loc', [])),
+                        'type': item.get('type'),
+                        'msg': item.get('msg'),
+                    }
+                    for item in validation_errors[:6]
+                ]
+                logger.warning(
+                    'openai.structured.retry attempt=%s schema=%s validation_errors=%s',
+                    attempt + 1,
+                    schema_model.__name__,
+                    compact_errors,
+                )
                 if attempt == retries:
                     raise ProviderError(
                         f'Unable to parse structured output for schema {schema_model.__name__}: {exc}'

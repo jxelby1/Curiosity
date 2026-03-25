@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class SkillPlanNode(BaseModel):
@@ -126,3 +126,106 @@ class TutorReplyPlan(BaseModel):
     practical_steps: list[str] = Field(min_length=2, max_length=6)
     pitfalls: list[str] = Field(default_factory=list, max_length=4)
     next_step: str = Field(min_length=10, max_length=240)
+
+
+class TopicRelevancePlan(BaseModel):
+    relevance: Literal['relevant', 'related', 'unrelated']
+    rationale: str = Field(min_length=10, max_length=280)
+
+
+AssessmentQuestionTypeLiteral = Literal[
+    'multiple_choice',
+    'short_answer',
+    'explain',
+    'scenario',
+    'error_spotting',
+    'reflection',
+]
+
+
+class AssessmentRubricCriterion(BaseModel):
+    concept: str = Field(min_length=2, max_length=120)
+    description: str = Field(min_length=8, max_length=220)
+    weight: float = Field(ge=0.0, le=1.0)
+
+
+class AssessmentQuestionPlanItem(BaseModel):
+    id: str = Field(min_length=1, max_length=40)
+    question_type: AssessmentQuestionTypeLiteral
+    prompt: str = Field(min_length=10, max_length=700)
+    choices: list[str] | None = None
+    answer_index: int | None = None
+    expected_concepts: list[str] = Field(default_factory=list, max_length=8)
+    rubric: list[AssessmentRubricCriterion] = Field(default_factory=list, max_length=8)
+    difficulty: int = Field(ge=1, le=5)
+    confidence_prompt: str = Field(default='How confident are you in your answer?', max_length=120)
+
+    @model_validator(mode='after')
+    def validate_by_type(self) -> 'AssessmentQuestionPlanItem':
+        normalized_concepts = [item.strip() for item in self.expected_concepts if item and item.strip()]
+        rubric_concepts = [criterion.concept.strip() for criterion in self.rubric if criterion.concept.strip()]
+        if not normalized_concepts and rubric_concepts:
+            normalized_concepts = rubric_concepts[:4]
+        self.expected_concepts = list(dict.fromkeys(normalized_concepts))[:8]
+
+        if self.question_type == 'multiple_choice':
+            if not self.choices or len(self.choices) != 4:
+                raise ValueError('multiple_choice questions must include exactly 4 choices.')
+            if self.answer_index is None or self.answer_index < 0 or self.answer_index > 3:
+                raise ValueError('multiple_choice questions must include answer_index between 0 and 3.')
+            return self
+
+        self.answer_index = None
+        if self.choices:
+            self.choices = [str(item).strip() for item in self.choices if str(item).strip()]
+            if len(self.choices) == 0:
+                self.choices = None
+
+        if self.question_type == 'reflection':
+            self.expected_concepts = []
+            return self
+
+        if len(self.expected_concepts) == 0:
+            raise ValueError('expected_concepts must include at least one concept for non-reflection questions.')
+        return self
+
+    @model_validator(mode='after')
+    def ensure_rubric_for_open_questions(self) -> 'AssessmentQuestionPlanItem':
+        if self.question_type in {'short_answer', 'explain', 'scenario', 'error_spotting'} and len(self.rubric) == 0:
+            self.rubric = [
+                AssessmentRubricCriterion(
+                    concept=concept,
+                    description=f'Addresses {concept} accurately and applies it to the prompt.',
+                    weight=1.0 / max(1, len(self.expected_concepts)),
+                )
+                for concept in self.expected_concepts[:3]
+            ]
+        if self.question_type == 'reflection':
+            self.answer_index = None
+            self.choices = None
+        return self
+
+
+class AssessmentPlan(BaseModel):
+    title: str = Field(min_length=4, max_length=220)
+    instructions: str = Field(min_length=20, max_length=380)
+    difficulty: int = Field(ge=1, le=5)
+    target_level: Literal['beginner', 'intermediate', 'advanced']
+    questions: list[AssessmentQuestionPlanItem] = Field(min_length=4, max_length=12)
+
+
+class AssessmentQuestionEvaluation(BaseModel):
+    question_id: str = Field(min_length=1, max_length=40)
+    score: float = Field(ge=0.0, le=1.0)
+    feedback: str = Field(min_length=12, max_length=500)
+    strengths: list[str] = Field(default_factory=list, max_length=4)
+    missing_concepts: list[str] = Field(default_factory=list, max_length=6)
+
+
+class AssessmentEvaluationPlan(BaseModel):
+    question_feedback: list[AssessmentQuestionEvaluation] = Field(min_length=1, max_length=12)
+    strengths: list[str] = Field(default_factory=list, max_length=6)
+    weaknesses: list[str] = Field(default_factory=list, max_length=6)
+    review_next: str = Field(min_length=12, max_length=320)
+    recommended_follow_up: str = Field(min_length=12, max_length=320)
+    summary: str = Field(min_length=12, max_length=500)

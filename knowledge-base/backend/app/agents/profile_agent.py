@@ -6,7 +6,7 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import DocumentChunk, SkillEdge, SkillNode, SkillStatus, UserSkillState
+from app.db.models import DocumentChunk, SkillEdge, SkillNode, SkillStatus, User, UserSkillState
 
 
 logger = logging.getLogger(__name__)
@@ -252,6 +252,27 @@ class ProfileAgent:
         skill_node: SkillNode,
         score: float,
     ) -> UserSkillState:
+        score = self._clamp(score)
+        mastery_delta = (score - 0.55) * 0.35
+        return self.apply_assessment_result(
+            db,
+            user_id=user_id,
+            skill_node=skill_node,
+            score=score,
+            mastery_delta=mastery_delta,
+            confidence_signal=score,
+        )
+
+    def apply_assessment_result(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        skill_node: SkillNode,
+        score: float,
+        mastery_delta: float,
+        confidence_signal: float | None = None,
+    ) -> UserSkillState:
         state = db.scalar(
             select(UserSkillState).where(
                 UserSkillState.user_id == user_id,
@@ -267,11 +288,24 @@ class ProfileAgent:
                 )
             )
 
+        now = datetime.utcnow()
         state.best_quiz_score = max(state.best_quiz_score, self._clamp(score))
-        state.quiz_taken_at = datetime.utcnow()
-        state.last_activity_at = datetime.utcnow()
+        state.quiz_taken_at = now
+        state.last_activity_at = now
+        state.mastery = self._clamp(state.mastery + mastery_delta)
+        if confidence_signal is not None:
+            state.confidence = self._clamp((state.confidence * 0.7) + (self._clamp(confidence_signal) * 0.3))
 
         self._sync_state_metrics(state)
+        user = db.scalar(select(User).where(User.id == user_id))
+        if user:
+            xp_gain = 8 + int(round(self._clamp(score) * 20))
+            if mastery_delta > 0:
+                xp_gain += int(round(mastery_delta * 40))
+            user.xp = max(0, (user.xp or 0) + xp_gain)
+            user.level = max(1, int(user.xp / 120) + 1)
+            user.updated_at = now
+
         db.commit()
         db.refresh(state)
 
@@ -279,11 +313,12 @@ class ProfileAgent:
         db.refresh(state)
 
         logger.info(
-            'profile.quiz_applied user_id=%s skill_id=%s score=%.3f best=%.3f progress_state=%s',
+            'profile.assessment_applied user_id=%s skill_id=%s score=%.3f best=%.3f mastery_delta=%.3f progress_state=%s',
             user_id,
             skill_node.id,
             score,
             state.best_quiz_score,
+            mastery_delta,
             state.progress_state,
         )
         return state

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from app.db.models import NoteType, ResourceType, SkillStatus
+from app.db.models import AssessmentQuestionType, NoteType, ResourceType, SkillStatus
 
 
 class TopicCreateRequest(BaseModel):
-    user_id: int = 1
     name: str = Field(min_length=2, max_length=120)
     description: str = Field(default='', max_length=500)
     goal: str = Field(default='', max_length=500)
@@ -27,6 +25,27 @@ class TopicResponse(BaseModel):
 
 class TopicListResponse(BaseModel):
     topics: list[TopicResponse]
+
+
+class TopicInitializationStatusResponse(BaseModel):
+    topic_id: int
+    status: Literal['queued', 'running', 'ready', 'preloading', 'completed', 'failed']
+    current_step: str
+    progress: float = Field(ge=0.0, le=1.0)
+    ready_for_entry: bool = False
+    background_complete: bool = False
+    first_ready_skill_id: int | None = None
+    status_messages: list[str] = Field(default_factory=list)
+    error_text: str = ''
+    started_at: datetime | None = None
+    ready_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime
+
+
+class TopicInitializationResponse(BaseModel):
+    topic: TopicResponse
+    initialization: TopicInitializationStatusResponse
 
 
 class SkillNodeResponse(BaseModel):
@@ -56,7 +75,6 @@ class SkillTreeResponse(BaseModel):
 
 
 class DeepDiveBranchRequest(BaseModel):
-    user_id: int = 1
     focus: str = Field(default='', max_length=240)
     branch_size: int = Field(default=3, ge=2, le=5)
 
@@ -117,7 +135,6 @@ class NoteListResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    user_id: int = 1
     session_id: int | None = None
     skill_node_id: int | None = None
     include_personal_notes: bool = False
@@ -155,12 +172,7 @@ class ChatResponse(BaseModel):
     context_usage: ChatContextUsage
 
 
-class TutorSaveMode(BaseModel):
-    mode: Literal['full', 'excerpt', 'summary'] = 'full'
-
-
 class SaveTutorResponseToNoteRequest(BaseModel):
-    user_id: int = 1
     mode: Literal['full', 'excerpt', 'summary'] = 'full'
     title: str = Field(default='', max_length=120)
     body: str = Field(default='', max_length=8000)
@@ -170,7 +182,6 @@ class SaveTutorResponseToNoteRequest(BaseModel):
 
 
 class AppendTutorResponseToNoteRequest(BaseModel):
-    user_id: int = 1
     session_id: int
     message_id: int
     mode: Literal['full', 'excerpt', 'summary'] = 'excerpt'
@@ -198,7 +209,6 @@ class RecommendationResponse(BaseModel):
 
 
 class GenerateResourceRequest(BaseModel):
-    user_id: int = 1
     kind: Literal['lesson', 'examples', 'exercises']
 
 
@@ -230,8 +240,7 @@ class ExternalResourceResponse(BaseModel):
 
 
 class QuizGenerateRequest(BaseModel):
-    user_id: int = 1
-    num_questions: int = Field(default=3, ge=1, le=10)
+    num_questions: int = Field(default=6, ge=1, le=10)
 
 
 class QuizQuestion(BaseModel):
@@ -249,20 +258,18 @@ class QuizResponse(BaseModel):
 
 
 class QuizSubmitRequest(BaseModel):
-    user_id: int = 1
     answers: list[int]
 
 
 class QuizSubmitResponse(BaseModel):
     score: float
-    feedback: list[dict]
+    feedback: list[dict[str, Any]]
     updated_mastery: float
     updated_status: SkillStatus
     updated_progress_state: Literal['not_started', 'learning', 'completed', 'verified']
 
 
 class MasteryUpdateRequest(BaseModel):
-    user_id: int = 1
     action: Literal['complete_lesson', 'complete_exercises']
 
 
@@ -271,3 +278,132 @@ class MasteryUpdateResponse(BaseModel):
     mastery: float
     status: SkillStatus
     progress_state: Literal['not_started', 'learning', 'completed', 'verified']
+
+
+class AssessmentGenerateRequest(BaseModel):
+    topic_id: int
+    skill_node_id: int
+    question_count: int = Field(default=6, ge=4, le=10)
+    regenerate: bool = False
+
+
+class AssessmentQuestionResponse(BaseModel):
+    id: int
+    question_type: AssessmentQuestionType
+    prompt: str
+    choices: list[str] = Field(default_factory=list)
+    expected_concepts: list[str] = Field(default_factory=list)
+    rubric: dict[str, Any] = Field(default_factory=dict)
+    difficulty: int
+    order_index: int
+
+
+class AssessmentDetailResponse(BaseModel):
+    id: int
+    topic_id: int
+    skill_node_id: int
+    title: str
+    difficulty: int
+    target_level: str
+    question_mix: dict[str, int]
+    version: int
+    source: Literal['stored', 'generated', 'regenerated']
+    questions: list[AssessmentQuestionResponse]
+    created_at: datetime
+
+
+class AssessmentResponseInput(BaseModel):
+    question_id: int
+    selected_option_index: int | None = None
+    answer_text: str | None = Field(default=None, max_length=4000)
+    confidence_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    @model_validator(mode='after')
+    def ensure_answer(self) -> 'AssessmentResponseInput':
+        if self.selected_option_index is None and not (self.answer_text or '').strip():
+            raise ValueError('Provide selected_option_index or answer_text.')
+        return self
+
+
+class AssessmentSubmitRequest(BaseModel):
+    responses: list[AssessmentResponseInput] = Field(min_length=1, max_length=12)
+
+
+class AssessmentQuestionFeedbackResponse(BaseModel):
+    question_id: int
+    question_type: AssessmentQuestionType
+    score: float
+    confidence_score: float | None = None
+    feedback: str
+    missing_concepts: list[str] = Field(default_factory=list)
+
+
+class AssessmentSubmitResponse(BaseModel):
+    assessment_id: int
+    attempt_id: int
+    score: float
+    confidence_avg: float
+    mastery_delta: float
+    feedback: list[AssessmentQuestionFeedbackResponse]
+    strengths: list[str]
+    weaknesses: list[str]
+    review_next: str
+    recommended_follow_up: str
+    summary: str
+    updated_mastery: float
+    updated_status: SkillStatus
+    updated_progress_state: Literal['not_started', 'learning', 'completed', 'verified']
+    unlocked_skill_ids: list[int] = Field(default_factory=list)
+
+
+class AssessmentAttemptResponse(BaseModel):
+    id: int
+    assessment_id: int
+    user_id: int
+    score: float
+    confidence_avg: float
+    mastery_delta: float
+    strengths: list[str]
+    weaknesses: list[str]
+    review_next: str
+    recommended_follow_up: str
+    feedback: list[AssessmentQuestionFeedbackResponse]
+    created_at: datetime
+
+
+class TopicProgressNode(BaseModel):
+    skill_node_id: int
+    name: str
+    status: SkillStatus
+    progress_state: Literal['not_started', 'learning', 'completed', 'verified']
+    mastery: float
+    best_quiz_score: float
+    recommended_next_action: str
+
+
+class TopicProgressResponse(BaseModel):
+    topic_id: int
+    topic_name: str
+    total_nodes: int
+    verified_nodes: int
+    available_nodes: int
+    mastery_average: float
+    nodes: list[TopicProgressNode]
+
+
+class UserTopicProgressSummary(BaseModel):
+    topic_id: int
+    topic_name: str
+    total_nodes: int
+    verified_nodes: int
+    mastery_average: float
+
+
+class UserProgressSummaryResponse(BaseModel):
+    user_id: int
+    xp: int
+    level: int
+    topics_total: int
+    verified_nodes_total: int
+    mastery_average: float
+    topics: list[UserTopicProgressSummary]

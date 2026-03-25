@@ -4,7 +4,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useState } from 'react';
 
-import { createTopic, listTopics } from '@/lib/api';
+import { createTopicAndInitialize, listTopics } from '@/lib/api';
 import { Topic } from '@/lib/types';
 
 const TOPIC_NAME_MAX = 120;
@@ -50,8 +50,12 @@ export function TopicsDashboard() {
     setCreating(true);
     setError('');
     try {
-      const topic = await createTopic({ name: trimmedName, description: description.trim(), goal: goal.trim() });
-      router.push(`/topics/${topic.id}`);
+      const result = await createTopicAndInitialize({
+        name: trimmedName,
+        description: description.trim(),
+        goal: goal.trim()
+      });
+      router.push(`/topics/${result.topic.id}/initializing`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create topic');
     } finally {

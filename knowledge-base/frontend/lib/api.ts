@@ -1,4 +1,10 @@
+import { clearAuthToken, getAuthToken, setAuthToken } from '@/lib/auth';
 import {
+  Assessment,
+  AssessmentAttempt,
+  AssessmentResponseInput,
+  AssessmentSubmissionResult,
+  AuthUser,
   ChatReply,
   DocumentItem,
   ExternalResource,
@@ -11,23 +17,41 @@ import {
   Resource,
   SkillTree,
   Topic,
-  TutorNoteSaveResult
+  TopicInitializationResult,
+  TopicInitializationStatus,
+  TopicProgress,
+  TutorNoteSaveResult,
+  UserProgressSummary
 } from '@/lib/types';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+type RequestOptions = RequestInit & {
+  auth?: boolean;
+};
+
+async function request<T>(path: string, options?: RequestOptions): Promise<T> {
+  const authEnabled = options?.auth !== false;
+  const token = authEnabled ? getAuthToken() : null;
+  const headers = new Headers(options?.headers || {});
+
+  if (authEnabled && token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
-    headers: {
-      ...(options?.headers || {})
-    },
+    headers,
     cache: 'no-store'
   });
 
   if (!response.ok) {
     const detail = await response.text();
-    throw new Error(detail || `Request failed (${response.status})`);
+    const message = detail || `Request failed (${response.status})`;
+    if (response.status === 401) {
+      throw new Error(`Unauthorized: ${message}`);
+    }
+    throw new Error(message);
   }
 
   if (response.status === 204) {
@@ -37,13 +61,51 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function listTopics(userId = 1): Promise<Topic[]> {
-  const data = await request<{ topics: Topic[] }>(`/topics?user_id=${userId}`);
+export async function register(input: {
+  email: string;
+  password: string;
+  display_name: string;
+}): Promise<string> {
+  const data = await request<{ access_token: string }>('/auth/register', {
+    method: 'POST',
+    auth: false,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input)
+  });
+  setAuthToken(data.access_token);
+  return data.access_token;
+}
+
+export async function login(input: { email: string; password: string }): Promise<string> {
+  const data = await request<{ access_token: string }>('/auth/login', {
+    method: 'POST',
+    auth: false,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input)
+  });
+  setAuthToken(data.access_token);
+  return data.access_token;
+}
+
+export async function logout(): Promise<void> {
+  try {
+    await request('/auth/logout', { method: 'POST' });
+  } catch {
+    // ignore logout request failures and always clear local token
+  }
+  clearAuthToken();
+}
+
+export async function getMe(): Promise<AuthUser> {
+  return request<AuthUser>('/auth/me');
+}
+
+export async function listTopics(): Promise<Topic[]> {
+  const data = await request<{ topics: Topic[] }>('/topics');
   return data.topics;
 }
 
 export async function createTopic(input: {
-  user_id?: number;
   name: string;
   description?: string;
   goal?: string;
@@ -52,7 +114,6 @@ export async function createTopic(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       name: input.name,
       description: input.description ?? '',
       goal: input.goal ?? ''
@@ -60,34 +121,59 @@ export async function createTopic(input: {
   });
 }
 
-export async function deleteTopic(topicId: string | number, userId = 1): Promise<void> {
-  await request(`/topics/${topicId}?user_id=${userId}&confirm=true`, {
+export async function createTopicAndInitialize(input: {
+  name: string;
+  description?: string;
+  goal?: string;
+}): Promise<TopicInitializationResult> {
+  return request<TopicInitializationResult>('/topics/create-and-initialize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: input.name,
+      description: input.description ?? '',
+      goal: input.goal ?? ''
+    })
+  });
+}
+
+export async function getTopicInitializationStatus(topicId: string | number): Promise<TopicInitializationStatus> {
+  return request<TopicInitializationStatus>(`/topics/${topicId}/initialization-status`);
+}
+
+export async function startTopicInitialization(
+  topicId: string | number,
+  force = false
+): Promise<TopicInitializationStatus> {
+  const query = force ? '?force=true' : '';
+  return request<TopicInitializationStatus>(`/topics/${topicId}/initialize${query}`, {
+    method: 'POST'
+  });
+}
+
+export async function deleteTopic(topicId: string | number): Promise<void> {
+  await request(`/topics/${topicId}?confirm=true`, {
     method: 'DELETE'
   });
 }
 
-export async function getSkillTree(topicId: string | number, userId = 1): Promise<SkillTree> {
-  return request<SkillTree>(`/topics/${topicId}/skill-tree?user_id=${userId}`);
+export async function getSkillTree(topicId: string | number): Promise<SkillTree> {
+  return request<SkillTree>(`/topics/${topicId}/skill-tree`);
 }
 
-export async function listDocuments(topicId: string | number, userId = 1): Promise<DocumentItem[]> {
-  const data = await request<{ documents: DocumentItem[] }>(`/topics/${topicId}/documents?user_id=${userId}`);
+export async function listDocuments(topicId: string | number): Promise<DocumentItem[]> {
+  const data = await request<{ documents: DocumentItem[] }>(`/topics/${topicId}/documents`);
   return data.documents;
 }
 
-export async function deleteDocument(
-  topicId: string | number,
-  documentId: number,
-  userId = 1
-): Promise<void> {
-  await request(`/topics/${topicId}/documents/${documentId}?user_id=${userId}`, {
+export async function deleteDocument(topicId: string | number, documentId: number): Promise<void> {
+  await request(`/topics/${topicId}/documents/${documentId}`, {
     method: 'DELETE'
   });
 }
 
-export async function uploadRawNote(topicId: string | number, rawText: string, userId = 1): Promise<void> {
+export async function uploadRawNote(topicId: string | number, rawText: string): Promise<void> {
   const formData = new FormData();
-  formData.append('user_id', String(userId));
   formData.append('raw_text', rawText);
 
   await request(`/topics/${topicId}/documents/upload`, {
@@ -96,9 +182,8 @@ export async function uploadRawNote(topicId: string | number, rawText: string, u
   });
 }
 
-export async function uploadFileNote(topicId: string | number, file: File, userId = 1): Promise<void> {
+export async function uploadFileNote(topicId: string | number, file: File): Promise<void> {
   const formData = new FormData();
-  formData.append('user_id', String(userId));
   formData.append('file', file);
 
   await request(`/topics/${topicId}/documents/upload`, {
@@ -109,61 +194,62 @@ export async function uploadFileNote(topicId: string | number, file: File, userI
 
 export async function listNotes(
   topicId: string | number,
-  input?: { user_id?: number; skill_node_id?: number; query?: string }
+  input?: { skill_node_id?: number; query?: string }
 ): Promise<PersonalNote[]> {
   const params = new URLSearchParams();
-  params.set('user_id', String(input?.user_id ?? 1));
   if (typeof input?.skill_node_id === 'number') params.set('skill_node_id', String(input.skill_node_id));
   if (input?.query?.trim()) params.set('query', input.query.trim());
+  const query = params.toString();
+  const suffix = query ? `?${query}` : '';
 
-  const data = await request<{ notes: PersonalNote[] }>(`/topics/${topicId}/notes?${params.toString()}`);
+  const data = await request<{ notes: PersonalNote[] }>(`/topics/${topicId}/notes${suffix}`);
   return data.notes;
 }
 
 export async function createNote(input: {
   topic_id: number;
-  user_id?: number;
   title?: string;
   body: string;
   note_type?: NoteType;
   skill_node_id?: number | null;
+  tags?: string[];
 }): Promise<PersonalNote> {
-  const query = `?user_id=${input.user_id ?? 1}`;
-  return request<PersonalNote>(`/topics/${input.topic_id}/notes${query}`, {
+  return request<PersonalNote>(`/topics/${input.topic_id}/notes`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       title: input.title ?? '',
       body: input.body,
       note_type: input.note_type ?? 'personal',
-      skill_node_id: input.skill_node_id ?? null
+      skill_node_id: input.skill_node_id ?? null,
+      tags: input.tags ?? []
     })
   });
 }
 
 export async function updateNote(input: {
   note_id: number;
-  user_id?: number;
   title?: string;
   body?: string;
   note_type?: NoteType;
   skill_node_id?: number | null;
+  tags?: string[];
 }): Promise<PersonalNote> {
-  const query = `?user_id=${input.user_id ?? 1}`;
-  return request<PersonalNote>(`/notes/${input.note_id}${query}`, {
+  return request<PersonalNote>(`/notes/${input.note_id}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       title: input.title,
       body: input.body,
       note_type: input.note_type,
-      skill_node_id: input.skill_node_id ?? null
+      skill_node_id: input.skill_node_id ?? null,
+      tags: input.tags
     })
   });
 }
 
-export async function deleteNote(noteId: number, userId = 1): Promise<void> {
-  await request(`/notes/${noteId}?user_id=${userId}`, {
+export async function deleteNote(noteId: number): Promise<void> {
+  await request(`/notes/${noteId}`, {
     method: 'DELETE'
   });
 }
@@ -171,7 +257,6 @@ export async function deleteNote(noteId: number, userId = 1): Promise<void> {
 export async function chatTopic(input: {
   topicId: string | number;
   message: string;
-  user_id?: number;
   session_id?: number | null;
   skill_node_id?: number | null;
   include_personal_notes?: boolean;
@@ -181,7 +266,6 @@ export async function chatTopic(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       message: input.message,
       session_id: input.session_id ?? null,
       skill_node_id: input.skill_node_id ?? null,
@@ -191,13 +275,9 @@ export async function chatTopic(input: {
   });
 }
 
-export async function getRecommendations(
-  topicId: string | number,
-  userId = 1,
-  refresh = false
-): Promise<RecommendationItem[]> {
+export async function getRecommendations(topicId: string | number, refresh = false): Promise<RecommendationItem[]> {
   const data = await request<{ recommendations: RecommendationItem[] }>(
-    `/topics/${topicId}/recommendations?user_id=${userId}${refresh ? '&refresh=true' : ''}`
+    `/topics/${topicId}/recommendations${refresh ? '?refresh=true' : ''}`
   );
   return data.recommendations;
 }
@@ -205,7 +285,6 @@ export async function getRecommendations(
 export async function generateResource(input: {
   skillId: number;
   kind: 'lesson' | 'examples' | 'exercises';
-  user_id?: number;
   regenerate?: boolean;
 }): Promise<Resource> {
   const query = input.regenerate ? '?regenerate=true' : '';
@@ -213,55 +292,90 @@ export async function generateResource(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       kind: input.kind
     })
   });
 }
 
-export async function getExternalResources(skillId: number, userId = 1): Promise<ExternalResource[]> {
-  const data = await request<{ resources: ExternalResource[] }>(
-    `/skills/${skillId}/resources/external?user_id=${userId}`
-  );
+export async function getExternalResources(skillId: number): Promise<ExternalResource[]> {
+  const data = await request<{ resources: ExternalResource[] }>(`/skills/${skillId}/resources/external`);
   return data.resources;
+}
+
+export async function generateAssessment(input: {
+  topic_id: number;
+  skill_node_id: number;
+  question_count?: number;
+  regenerate?: boolean;
+}): Promise<Assessment> {
+  return request<Assessment>('/assessments/generate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      topic_id: input.topic_id,
+      skill_node_id: input.skill_node_id,
+      question_count: input.question_count ?? 6,
+      regenerate: input.regenerate ?? false
+    })
+  });
+}
+
+export async function getAssessment(assessmentId: number): Promise<Assessment> {
+  return request<Assessment>(`/assessments/${assessmentId}`);
+}
+
+export async function submitAssessment(
+  assessmentId: number,
+  responses: AssessmentResponseInput[]
+): Promise<AssessmentSubmissionResult> {
+  return request<AssessmentSubmissionResult>(`/assessments/${assessmentId}/submit`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ responses })
+  });
+}
+
+export async function getAssessmentAttempt(attemptId: number): Promise<AssessmentAttempt> {
+  return request<AssessmentAttempt>(`/assessment-attempts/${attemptId}`);
+}
+
+export async function getTopicProgress(topicId: number | string): Promise<TopicProgress> {
+  return request<TopicProgress>(`/topics/${topicId}/progress`);
+}
+
+export async function getMyProgressSummary(): Promise<UserProgressSummary> {
+  return request<UserProgressSummary>('/users/me/progress-summary');
 }
 
 export async function generateQuiz(
   skillId: number,
-  userId = 1,
-  numQuestions = 3,
+  numQuestions = 6,
   regenerate = false
 ): Promise<Quiz> {
   const query = regenerate ? '?regenerate=true' : '';
   return request<Quiz>(`/skills/${skillId}/quiz/generate${query}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId, num_questions: numQuestions })
+    body: JSON.stringify({ num_questions: numQuestions })
   });
 }
 
-export async function submitQuiz(
-  assessmentId: number,
-  answers: number[],
-  userId = 1
-): Promise<QuizSubmissionResult> {
-  return request<QuizSubmissionResult>(`/assessments/${assessmentId}/submit`, {
+export async function submitQuiz(assessmentId: number, answers: number[]): Promise<QuizSubmissionResult> {
+  return request<QuizSubmissionResult>(`/assessments/${assessmentId}/submit-quiz`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ user_id: userId, answers })
+    body: JSON.stringify({ answers })
   });
 }
 
 export async function updateProgress(input: {
   skillId: number;
   action: 'complete_lesson' | 'complete_exercises';
-  user_id?: number;
 }): Promise<ProgressUpdateResult> {
   return request<ProgressUpdateResult>(`/skills/${input.skillId}/progress/update`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       action: input.action
     })
   });
@@ -269,7 +383,6 @@ export async function updateProgress(input: {
 
 export async function createDeepDiveBranch(input: {
   skillId: number;
-  user_id?: number;
   focus?: string;
   branch_size?: number;
 }): Promise<SkillTree> {
@@ -277,7 +390,6 @@ export async function createDeepDiveBranch(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       focus: input.focus ?? '',
       branch_size: input.branch_size ?? 3
     })
@@ -288,7 +400,6 @@ export async function saveTutorResponseToNotes(input: {
   topic_id: number;
   session_id: number;
   message_id: number;
-  user_id?: number;
   mode: 'full' | 'excerpt' | 'summary';
   title?: string;
   body?: string;
@@ -302,7 +413,6 @@ export async function saveTutorResponseToNotes(input: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        user_id: input.user_id ?? 1,
         mode: input.mode,
         title: input.title ?? '',
         body: input.body ?? '',
@@ -318,7 +428,6 @@ export async function appendTutorResponseToExistingNote(input: {
   note_id: number;
   session_id: number;
   message_id: number;
-  user_id?: number;
   mode: 'full' | 'excerpt' | 'summary';
   body?: string;
   tags?: string[];
@@ -327,7 +436,6 @@ export async function appendTutorResponseToExistingNote(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      user_id: input.user_id ?? 1,
       session_id: input.session_id,
       message_id: input.message_id,
       mode: input.mode,

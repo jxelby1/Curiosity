@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     openai_embedding_model: str = 'text-embedding-3-small'
     openai_timeout_seconds: float = 60.0
 
+    jwt_secret_key: str = Field(default='change-me-in-production')
+    jwt_algorithm: str = 'HS256'
+    access_token_expire_minutes: int = 60 * 24
+
     embedding_dimensions: int = 1536
     retrieval_top_k: int = 5
     max_note_chunk_chars: int = 900
@@ -62,6 +66,8 @@ class Settings(BaseSettings):
 
         if not self.openai_api_key:
             errors.append('OPENAI_API_KEY is required for live LLM and embeddings.')
+        if self.jwt_secret_key == 'change-me-in-production' and self.environment.lower() == 'production':
+            errors.append('JWT_SECRET_KEY must be set to a strong secret in production.')
 
         if errors:
             joined = '; '.join(errors)

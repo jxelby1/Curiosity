@@ -9,6 +9,7 @@ from app.agents.profile_agent import ProfileAgent
 from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.core.config import get_settings
+from app.core.security import hash_password
 from app.db.database import SessionLocal
 from app.db.init_db import init_db
 from app.db.models import SkillNode, Topic, User
@@ -29,10 +30,18 @@ async def run() -> None:
     try:
         user = db.scalar(select(User).where(User.id == 1))
         if not user:
-            user = User(id=1, email=settings.default_user_email, display_name='Demo User')
+            user = User(
+                id=1,
+                email=settings.default_user_email,
+                display_name='Demo User',
+                hashed_password=hash_password('password123'),
+            )
             db.add(user)
             db.commit()
             db.refresh(user)
+        elif not user.hashed_password:
+            user.hashed_password = hash_password('password123')
+            db.commit()
 
         topic = db.scalar(select(Topic).where(Topic.user_id == user.id, Topic.name == 'Python Debugging'))
         if not topic:
