@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.course_preferences import ASSESSMENT_STYLE_TO_QUESTION_TYPE, ASSESSMENT_STYLE_VALUES
+
 
 class SkillPlanNode(BaseModel):
     key: str = Field(min_length=1, max_length=40)
@@ -39,6 +41,17 @@ class DeepDiveBranchPlan(BaseModel):
     branch_title: str = Field(min_length=4, max_length=180)
     rationale: str = Field(min_length=20, max_length=400)
     nodes: list[DeepDivePlanNode] = Field(min_length=2, max_length=6)
+
+
+class BranchSuggestionPlanItem(BaseModel):
+    title: str = Field(min_length=4, max_length=160)
+    focus: str = Field(min_length=3, max_length=180)
+    rationale: str = Field(min_length=20, max_length=320)
+    purpose: Literal['enrichment', 'remediation', 'specialization', 'exploration', 'assessment_prep', 'project']
+
+
+class BranchSuggestionPlan(BaseModel):
+    suggestions: list[BranchSuggestionPlanItem] = Field(min_length=1, max_length=4)
 
 
 class RecommendationChoice(BaseModel):
@@ -142,6 +155,19 @@ AssessmentQuestionTypeLiteral = Literal[
     'reflection',
 ]
 
+AssessmentStyleLiteral = Literal[
+    'open_text',
+    'short_answer',
+    'multiple_choice',
+    'flashcard',
+    'scenario',
+    'coding',
+    'debugging',
+    'code_completion',
+    'code_interpretation',
+    'math_problem',
+]
+
 
 class AssessmentRubricCriterion(BaseModel):
     concept: str = Field(min_length=2, max_length=120)
@@ -151,10 +177,13 @@ class AssessmentRubricCriterion(BaseModel):
 
 class AssessmentQuestionPlanItem(BaseModel):
     id: str = Field(min_length=1, max_length=40)
+    assessment_style: AssessmentStyleLiteral
     question_type: AssessmentQuestionTypeLiteral
     prompt: str = Field(min_length=10, max_length=700)
     choices: list[str] | None = None
     answer_index: int | None = None
+    model_answer: str = Field(min_length=12, max_length=2600)
+    hints: list[str] = Field(default_factory=list, max_length=4)
     expected_concepts: list[str] = Field(default_factory=list, max_length=8)
     rubric: list[AssessmentRubricCriterion] = Field(default_factory=list, max_length=8)
     difficulty: int = Field(ge=1, le=5)
@@ -162,6 +191,12 @@ class AssessmentQuestionPlanItem(BaseModel):
 
     @model_validator(mode='after')
     def validate_by_type(self) -> 'AssessmentQuestionPlanItem':
+        if self.assessment_style not in ASSESSMENT_STYLE_VALUES:
+            raise ValueError('assessment_style is not supported.')
+        expected_type = ASSESSMENT_STYLE_TO_QUESTION_TYPE[self.assessment_style]
+        if self.question_type != expected_type and self.question_type != 'reflection':
+            self.question_type = expected_type  # type: ignore[assignment]
+
         normalized_concepts = [item.strip() for item in self.expected_concepts if item and item.strip()]
         rubric_concepts = [criterion.concept.strip() for criterion in self.rubric if criterion.concept.strip()]
         if not normalized_concepts and rubric_concepts:
@@ -173,6 +208,8 @@ class AssessmentQuestionPlanItem(BaseModel):
                 raise ValueError('multiple_choice questions must include exactly 4 choices.')
             if self.answer_index is None or self.answer_index < 0 or self.answer_index > 3:
                 raise ValueError('multiple_choice questions must include answer_index between 0 and 3.')
+            if len(self.model_answer.strip()) < 12:
+                raise ValueError('multiple_choice questions must include a concrete model_answer.')
             return self
 
         self.answer_index = None
@@ -187,6 +224,8 @@ class AssessmentQuestionPlanItem(BaseModel):
 
         if len(self.expected_concepts) == 0:
             raise ValueError('expected_concepts must include at least one concept for non-reflection questions.')
+        if len(self.model_answer.strip()) < 12:
+            raise ValueError('model_answer must be provided for non-reflection questions.')
         return self
 
     @model_validator(mode='after')
@@ -203,6 +242,8 @@ class AssessmentQuestionPlanItem(BaseModel):
         if self.question_type == 'reflection':
             self.answer_index = None
             self.choices = None
+        if not self.hints:
+            self.hints = ['Focus on the core concept before adding detail.']
         return self
 
 

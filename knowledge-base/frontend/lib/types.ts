@@ -1,6 +1,19 @@
 export type SkillStatus = 'locked' | 'available' | 'in_progress' | 'mastered';
 export type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 export type NoteType = 'personal' | 'lesson' | 'summary' | 'reflection' | 'reminder';
+export type CourseDepth = 'light' | 'standard' | 'deep_dive';
+export type StartingSkillLevel = 'beginner' | 'intermediate' | 'advanced';
+export type AssessmentStyle =
+  | 'open_text'
+  | 'short_answer'
+  | 'multiple_choice'
+  | 'flashcard'
+  | 'scenario'
+  | 'coding'
+  | 'debugging'
+  | 'code_completion'
+  | 'code_interpretation'
+  | 'math_problem';
 export type AssessmentQuestionType =
   | 'multiple_choice'
   | 'short_answer'
@@ -38,6 +51,9 @@ export interface Topic {
   name: string;
   description: string;
   goal: string;
+  course_depth: CourseDepth;
+  starting_skill_level: StartingSkillLevel;
+  assessment_styles: AssessmentStyle[];
   created_at: string;
 }
 
@@ -77,9 +93,13 @@ export interface SkillNode {
   description: string;
   difficulty: number;
   node_kind: 'core' | 'optional_branch';
+  branch_origin: string;
+  branch_purpose: string;
+  branch_depth: number;
   branch_parent_skill_id: number | null;
   mastery_estimate: number;
   status: SkillStatus;
+  force_unlocked?: boolean;
   lock_reason?: string | null;
   progress_state: ProgressState;
   lesson_completed: boolean;
@@ -217,6 +237,7 @@ export interface QuizSubmissionResult {
 export interface AssessmentQuestion {
   id: number;
   question_type: AssessmentQuestionType;
+  assessment_style: AssessmentStyle | string;
   prompt: string;
   choices: string[];
   expected_concepts: string[];
@@ -235,6 +256,8 @@ export interface Assessment {
   question_mix: Record<string, number>;
   version: number;
   source: 'stored' | 'generated' | 'regenerated';
+  answers_revealed: boolean;
+  mastery_eligible: boolean;
   questions: AssessmentQuestion[];
   created_at: string;
 }
@@ -248,6 +271,7 @@ export interface AssessmentResponseInput {
 export interface AssessmentQuestionFeedback {
   question_id: number;
   question_type: AssessmentQuestionType;
+  assessment_style?: AssessmentStyle | string;
   score: number | null;
   confidence_score?: number | null;
   feedback: string;
@@ -260,6 +284,10 @@ export interface AssessmentSubmissionResult {
   score: number;
   confidence_avg: number;
   mastery_delta: number;
+  mastery_eligible: boolean;
+  mastery_applied: boolean;
+  practice_mode: boolean;
+  outcome_message: string;
   feedback: AssessmentQuestionFeedback[];
   strengths: string[];
   weaknesses: string[];
@@ -279,12 +307,45 @@ export interface AssessmentAttempt {
   score: number;
   confidence_avg: number;
   mastery_delta: number;
+  mastery_eligible: boolean;
+  practice_mode: boolean;
   strengths: string[];
   weaknesses: string[];
   review_next: string;
   recommended_follow_up: string;
   feedback: AssessmentQuestionFeedback[];
   created_at: string;
+}
+
+export interface AssessmentAnswerReveal {
+  question_id: number;
+  question_type: AssessmentQuestionType;
+  assessment_style: AssessmentStyle | string;
+  answer: string;
+  key_points: string[];
+}
+
+export interface AssessmentRevealResult {
+  assessment_id: number;
+  answers_revealed: boolean;
+  mastery_eligible: boolean;
+  warning: string;
+  question_reveals: AssessmentAnswerReveal[];
+}
+
+export interface BranchSuggestion {
+  id: number;
+  topic_id: number;
+  parent_skill_id: number;
+  title: string;
+  focus: string;
+  rationale: string;
+  purpose: string;
+  origin: string;
+  status: string;
+  accepted_branch_root_skill_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface TopicProgressNode {
@@ -369,6 +430,7 @@ export interface TopicRetentionLoop {
   streak_days: number;
   activity_days_last_14: number;
   latest_activity_at: string | null;
+  dev_unlock_enabled: boolean;
 }
 
 export interface UserTopicProgressSummary {

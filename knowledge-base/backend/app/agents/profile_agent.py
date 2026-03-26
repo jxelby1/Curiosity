@@ -6,7 +6,8 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import DocumentChunk, SkillEdge, SkillNode, SkillStatus, User, UserSkillState
+from app.core.course_preferences import normalize_starting_skill_level, starting_level_mastery_floor
+from app.db.models import DocumentChunk, SkillEdge, SkillNode, SkillStatus, Topic, User, UserSkillState
 
 
 logger = logging.getLogger(__name__)
@@ -20,6 +21,8 @@ class ProfileAgent:
 
     def ensure_states_for_topic(self, db: Session, user_id: int, topic_id: int) -> None:
         nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic_id)).all()
+        topic = db.scalar(select(Topic).where(Topic.id == topic_id))
+        starting_level = normalize_starting_skill_level(topic.starting_skill_level if topic else 'beginner')
         created = 0
         for node in nodes:
             existing = db.scalar(
@@ -30,12 +33,13 @@ class ProfileAgent:
             )
             if existing:
                 continue
+            baseline_mastery = max(node.mastery_estimate, starting_level_mastery_floor(starting_level, node.difficulty))
             db.add(
                 UserSkillState(
                     user_id=user_id,
                     skill_node_id=node.id,
-                    mastery=node.mastery_estimate,
-                    confidence=node.mastery_estimate,
+                    mastery=baseline_mastery,
+                    confidence=min(1.0, baseline_mastery * 0.8),
                     status=node.status,
                     progress_state='not_started',
                     best_quiz_score=0.0,
@@ -146,7 +150,15 @@ class ProfileAgent:
                 )
 
             if (prereqs and not prereq_ready) or not branch_parent_ready:
-                state.status = SkillStatus.locked
+                if state.force_unlocked:
+                    if state.progress_state == 'verified':
+                        state.status = SkillStatus.mastered
+                    elif state.progress_state in ('learning', 'completed'):
+                        state.status = SkillStatus.in_progress
+                    else:
+                        state.status = SkillStatus.available
+                else:
+                    state.status = SkillStatus.locked
                 continue
 
             if state.progress_state == 'verified':

@@ -178,6 +178,40 @@ When new nodes unlock during progression, the same starter bundle (lesson/exampl
 
 Initialization progress is persisted in `topic_initialization_jobs`.
 
+## Course personalization and skill-tree navigation
+
+Topic creation now includes learner-configurable course settings:
+
+- `course_depth`: `light | standard | deep_dive`
+- `starting_skill_level`: `beginner | intermediate | advanced`
+- `assessment_styles`: multi-select allowed styles
+
+Supported assessment styles in this release:
+
+- open text
+- short answer
+- multiple choice
+- flashcard recall
+- scenario reasoning
+- coding assessment
+- debugging
+- code completion
+- code interpretation
+- math problem solving
+
+These settings materially influence generation:
+
+- skill-graph depth and breadth (node count target ranges)
+- progression ramp-up from selected starting level
+- assessment style sequencing and question composition
+
+The skill constellation now supports:
+
+- drag-to-pan navigation
+- wheel/trackpad zoom
+- reset view control
+- auto-keeping selected nodes in view
+
 ## Retention loop (new)
 
 Topic pages now prioritize guided momentum instead of a large standalone growth card.

@@ -53,6 +53,9 @@ class Settings(BaseSettings):
     search_api_key: str = Field(default='')
     search_base_url: str = 'https://google.serper.dev/search'
 
+    enable_dev_unlocks: bool = True
+    dev_unlock_emails: str = ''
+
     log_level: str = 'INFO'
 
     @model_validator(mode='after')
@@ -66,6 +69,10 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [item.strip() for item in self.cors_origins.split(',') if item.strip()]
+
+    @property
+    def dev_unlock_email_list(self) -> list[str]:
+        return [item.strip().lower() for item in self.dev_unlock_emails.split(',') if item.strip()]
 
     def validate_runtime_requirements(self) -> None:
         errors: list[str] = []

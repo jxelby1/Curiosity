@@ -1,10 +1,14 @@
 import { clearAuthToken, getAuthToken, setAuthToken } from '@/lib/auth';
 import {
   Assessment,
+  AssessmentRevealResult,
   AssessmentAttempt,
   AssessmentResponseInput,
   AssessmentSubmissionResult,
+  AssessmentStyle,
+  BranchSuggestion,
   AuthUser,
+  CourseDepth,
   ChatReply,
   DocumentItem,
   ExternalResource,
@@ -23,6 +27,7 @@ import {
   TopicProgress,
   TutorNoteSaveResult,
   ResetPasswordResult,
+  StartingSkillLevel,
   TopicRetentionLoop,
   UserProgressSummary
 } from '@/lib/types';
@@ -130,6 +135,9 @@ export async function createTopic(input: {
   name: string;
   description?: string;
   goal?: string;
+  course_depth?: CourseDepth;
+  starting_skill_level?: StartingSkillLevel;
+  assessment_styles?: AssessmentStyle[];
 }): Promise<Topic> {
   return request<Topic>('/topics', {
     method: 'POST',
@@ -137,7 +145,10 @@ export async function createTopic(input: {
     body: JSON.stringify({
       name: input.name,
       description: input.description ?? '',
-      goal: input.goal ?? ''
+      goal: input.goal ?? '',
+      course_depth: input.course_depth ?? 'standard',
+      starting_skill_level: input.starting_skill_level ?? 'beginner',
+      assessment_styles: input.assessment_styles ?? []
     })
   });
 }
@@ -146,6 +157,9 @@ export async function createTopicAndInitialize(input: {
   name: string;
   description?: string;
   goal?: string;
+  course_depth?: CourseDepth;
+  starting_skill_level?: StartingSkillLevel;
+  assessment_styles?: AssessmentStyle[];
 }): Promise<TopicInitializationResult> {
   return request<TopicInitializationResult>('/topics/create-and-initialize', {
     method: 'POST',
@@ -153,7 +167,10 @@ export async function createTopicAndInitialize(input: {
     body: JSON.stringify({
       name: input.name,
       description: input.description ?? '',
-      goal: input.goal ?? ''
+      goal: input.goal ?? '',
+      course_depth: input.course_depth ?? 'standard',
+      starting_skill_level: input.starting_skill_level ?? 'beginner',
+      assessment_styles: input.assessment_styles ?? []
     })
   });
 }
@@ -328,21 +345,34 @@ export async function generateAssessment(input: {
   skill_node_id: number;
   question_count?: number;
   regenerate?: boolean;
+  assessment_styles?: AssessmentStyle[];
 }): Promise<Assessment> {
+  const payload: Record<string, unknown> = {
+    topic_id: input.topic_id,
+    skill_node_id: input.skill_node_id,
+    regenerate: input.regenerate ?? false
+  };
+  if (typeof input.question_count === 'number') {
+    payload.question_count = input.question_count;
+  }
+  if (input.assessment_styles && input.assessment_styles.length > 0) {
+    payload.assessment_styles = input.assessment_styles;
+  }
   return request<Assessment>('/assessments/generate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      topic_id: input.topic_id,
-      skill_node_id: input.skill_node_id,
-      question_count: input.question_count ?? 6,
-      regenerate: input.regenerate ?? false
-    })
+    body: JSON.stringify(payload)
   });
 }
 
 export async function getAssessment(assessmentId: number): Promise<Assessment> {
   return request<Assessment>(`/assessments/${assessmentId}`);
+}
+
+export async function revealAssessmentAnswers(assessmentId: number): Promise<AssessmentRevealResult> {
+  return request<AssessmentRevealResult>(`/assessments/${assessmentId}/reveal-answers`, {
+    method: 'POST',
+  });
 }
 
 export async function submitAssessment(
@@ -418,18 +448,68 @@ export async function updateProgress(input: {
   });
 }
 
+export async function forceUnlockSkill(skillId: number): Promise<ProgressUpdateResult> {
+  return request<ProgressUpdateResult>(`/skills/${skillId}/force-unlock`, {
+    method: 'POST'
+  });
+}
+
 export async function createDeepDiveBranch(input: {
   skillId: number;
   focus?: string;
   branch_size?: number;
+  purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project';
 }): Promise<SkillTree> {
   return request<SkillTree>(`/skills/${input.skillId}/deep-dive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       focus: input.focus ?? '',
-      branch_size: input.branch_size ?? 3
+      branch_size: input.branch_size ?? 3,
+      purpose: input.purpose ?? 'exploration'
     })
+  });
+}
+
+export async function listBranchSuggestions(
+  skillId: number,
+  statusFilter: 'pending' | 'accepted' | 'rejected' | 'all' = 'pending'
+): Promise<BranchSuggestion[]> {
+  const data = await request<{ suggestions: BranchSuggestion[] }>(
+    `/skills/${skillId}/branch-suggestions?status_filter=${statusFilter}`
+  );
+  return data.suggestions;
+}
+
+export async function generateBranchSuggestions(input: {
+  skillId: number;
+  limit?: number;
+  trigger_event?: 'manual' | 'assessment_performance' | 'completion' | 'interest';
+}): Promise<BranchSuggestion[]> {
+  const data = await request<{ suggestions: BranchSuggestion[] }>(`/skills/${input.skillId}/branch-suggestions/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      limit: input.limit ?? 2,
+      trigger_event: input.trigger_event ?? 'manual',
+    }),
+  });
+  return data.suggestions;
+}
+
+export async function acceptBranchSuggestion(input: {
+  suggestionId: number;
+  branch_size?: number;
+}): Promise<SkillTree> {
+  const query = `?branch_size=${input.branch_size ?? 3}`;
+  return request<SkillTree>(`/branch-suggestions/${input.suggestionId}/accept${query}`, {
+    method: 'POST',
+  });
+}
+
+export async function rejectBranchSuggestion(suggestionId: number): Promise<BranchSuggestion> {
+  return request<BranchSuggestion>(`/branch-suggestions/${suggestionId}/reject`, {
+    method: 'POST',
   });
 }
 

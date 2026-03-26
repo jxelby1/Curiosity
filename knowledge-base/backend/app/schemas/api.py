@@ -5,6 +5,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.core.course_preferences import (
+    ASSESSMENT_STYLE_VALUES,
+    DEFAULT_ASSESSMENT_STYLES,
+)
 from app.db.models import AssessmentQuestionType, NoteType, ResourceType, SkillStatus
 
 
@@ -12,6 +16,34 @@ class TopicCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = Field(default='', max_length=500)
     goal: str = Field(default='', max_length=500)
+    course_depth: Literal['light', 'standard', 'deep_dive'] = 'standard'
+    starting_skill_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
+    assessment_styles: list[
+        Literal[
+            'open_text',
+            'short_answer',
+            'multiple_choice',
+            'flashcard',
+            'scenario',
+            'coding',
+            'debugging',
+            'code_completion',
+            'code_interpretation',
+            'math_problem',
+        ]
+    ] = Field(default_factory=lambda: DEFAULT_ASSESSMENT_STYLES.copy(), max_length=10)
+
+    @model_validator(mode='after')
+    def ensure_assessment_styles(self) -> 'TopicCreateRequest':
+        deduped = []
+        seen: set[str] = set()
+        for style in self.assessment_styles:
+            if style in seen:
+                continue
+            seen.add(style)
+            deduped.append(style)
+        self.assessment_styles = deduped or DEFAULT_ASSESSMENT_STYLES.copy()
+        return self
 
 
 class TopicResponse(BaseModel):
@@ -20,6 +52,22 @@ class TopicResponse(BaseModel):
     name: str
     description: str
     goal: str
+    course_depth: Literal['light', 'standard', 'deep_dive'] = 'standard'
+    starting_skill_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
+    assessment_styles: list[
+        Literal[
+            'open_text',
+            'short_answer',
+            'multiple_choice',
+            'flashcard',
+            'scenario',
+            'coding',
+            'debugging',
+            'code_completion',
+            'code_interpretation',
+            'math_problem',
+        ]
+    ] = Field(default_factory=lambda: DEFAULT_ASSESSMENT_STYLES.copy())
     created_at: datetime
 
 
@@ -55,9 +103,13 @@ class SkillNodeResponse(BaseModel):
     description: str
     difficulty: int
     node_kind: Literal['core', 'optional_branch'] = 'core'
+    branch_origin: str = 'core'
+    branch_purpose: str = 'core_curriculum'
+    branch_depth: int = 0
     branch_parent_skill_id: int | None = None
     mastery_estimate: float
     status: SkillStatus
+    force_unlocked: bool = False
     lock_reason: str | None = None
     progress_state: Literal['not_started', 'learning', 'completed', 'verified'] = 'not_started'
     lesson_completed: bool = False
@@ -77,6 +129,31 @@ class SkillTreeResponse(BaseModel):
 class DeepDiveBranchRequest(BaseModel):
     focus: str = Field(default='', max_length=240)
     branch_size: int = Field(default=3, ge=2, le=5)
+    purpose: Literal['exploration', 'specialization', 'enrichment', 'remediation', 'assessment_prep', 'project'] = 'exploration'
+
+
+class BranchSuggestionGenerateRequest(BaseModel):
+    limit: int = Field(default=2, ge=1, le=3)
+    trigger_event: Literal['manual', 'assessment_performance', 'completion', 'interest'] = 'manual'
+
+
+class BranchSuggestionResponse(BaseModel):
+    id: int
+    topic_id: int
+    parent_skill_id: int
+    title: str
+    focus: str
+    rationale: str
+    purpose: str
+    origin: str
+    status: str
+    accepted_branch_root_skill_id: int | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class BranchSuggestionListResponse(BaseModel):
+    suggestions: list[BranchSuggestionResponse] = Field(default_factory=list)
 
 
 class DocumentUploadResponse(BaseModel):
@@ -283,13 +360,31 @@ class MasteryUpdateResponse(BaseModel):
 class AssessmentGenerateRequest(BaseModel):
     topic_id: int
     skill_node_id: int
-    question_count: int = Field(default=6, ge=4, le=10)
+    question_count: int | None = Field(default=None, ge=4, le=10)
     regenerate: bool = False
+    assessment_styles: list[str] | None = None
+
+    @model_validator(mode='after')
+    def validate_styles(self) -> 'AssessmentGenerateRequest':
+        if self.assessment_styles is None:
+            return self
+        normalized = []
+        seen: set[str] = set()
+        for style in self.assessment_styles:
+            if style not in ASSESSMENT_STYLE_VALUES:
+                continue
+            if style in seen:
+                continue
+            seen.add(style)
+            normalized.append(style)
+        self.assessment_styles = normalized
+        return self
 
 
 class AssessmentQuestionResponse(BaseModel):
     id: int
     question_type: AssessmentQuestionType
+    assessment_style: str
     prompt: str
     choices: list[str] = Field(default_factory=list)
     expected_concepts: list[str] = Field(default_factory=list)
@@ -308,8 +403,26 @@ class AssessmentDetailResponse(BaseModel):
     question_mix: dict[str, int]
     version: int
     source: Literal['stored', 'generated', 'regenerated']
+    answers_revealed: bool = False
+    mastery_eligible: bool = True
     questions: list[AssessmentQuestionResponse]
     created_at: datetime
+
+
+class AssessmentRevealQuestionResponse(BaseModel):
+    question_id: int
+    question_type: AssessmentQuestionType
+    assessment_style: str = ''
+    answer: str
+    key_points: list[str] = Field(default_factory=list)
+
+
+class AssessmentRevealResponse(BaseModel):
+    assessment_id: int
+    answers_revealed: bool
+    mastery_eligible: bool
+    warning: str
+    question_reveals: list[AssessmentRevealQuestionResponse] = Field(default_factory=list)
 
 
 class AssessmentResponseInput(BaseModel):
@@ -332,6 +445,7 @@ class AssessmentSubmitRequest(BaseModel):
 class AssessmentQuestionFeedbackResponse(BaseModel):
     question_id: int
     question_type: AssessmentQuestionType
+    assessment_style: str = ''
     score: float | None = None
     confidence_score: float | None = None
     feedback: str
@@ -344,6 +458,10 @@ class AssessmentSubmitResponse(BaseModel):
     score: float
     confidence_avg: float
     mastery_delta: float
+    mastery_eligible: bool = True
+    mastery_applied: bool = True
+    practice_mode: bool = False
+    outcome_message: str = ''
     feedback: list[AssessmentQuestionFeedbackResponse]
     strengths: list[str]
     weaknesses: list[str]
@@ -363,6 +481,8 @@ class AssessmentAttemptResponse(BaseModel):
     score: float
     confidence_avg: float
     mastery_delta: float
+    mastery_eligible: bool = True
+    practice_mode: bool = False
     strengths: list[str]
     weaknesses: list[str]
     review_next: str
@@ -470,3 +590,4 @@ class TopicRetentionLoopResponse(BaseModel):
     streak_days: int = 0
     activity_days_last_14: int = 0
     latest_activity_at: datetime | None = None
+    dev_unlock_enabled: bool = False

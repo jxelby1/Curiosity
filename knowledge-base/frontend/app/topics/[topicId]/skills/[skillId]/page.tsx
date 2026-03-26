@@ -5,21 +5,30 @@ import { useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
+  acceptBranchSuggestion,
   createDeepDiveBranch,
+  forceUnlockSkill,
   generateAssessment,
+  generateBranchSuggestions,
   generateResource,
   getExternalResources,
+  listBranchSuggestions,
   getRecommendations,
   getSkillTree,
+  revealAssessmentAnswers,
+  rejectBranchSuggestion,
   submitAssessment,
   updateProgress
 } from '@/lib/api';
 import { readRecommendationCache, readSkillTreeCache, writeRecommendationCache, writeSkillTreeCache } from '@/lib/cache';
 import {
+  AssessmentAnswerReveal,
   Assessment,
+  AssessmentStyle,
   AssessmentResponseInput,
   AssessmentSubmissionResult,
   ExternalResource,
+  BranchSuggestion,
   RecommendationItem,
   Resource,
   SkillNode,
@@ -44,6 +53,9 @@ type NodeCache = {
   resources: Partial<Record<ResourceKind, Resource>>;
   assessment?: Assessment;
   assessmentResult?: AssessmentSubmissionResult;
+  revealedAnswers?: AssessmentAnswerReveal[];
+  revealWarning?: string;
+  branchSuggestions?: BranchSuggestion[];
   externalResources?: ExternalResource[];
 };
 
@@ -91,6 +103,20 @@ function questionTypeLabel(questionType: Assessment['questions'][number]['questi
   if (questionType === 'scenario') return 'Applied scenario';
   if (questionType === 'error_spotting') return 'Error spotting';
   return 'Reflection';
+}
+
+function assessmentStyleLabel(style: AssessmentStyle | string): string {
+  if (style === 'open_text') return 'Open text';
+  if (style === 'short_answer') return 'Short answer';
+  if (style === 'multiple_choice') return 'Multiple choice';
+  if (style === 'flashcard') return 'Flashcard recall';
+  if (style === 'scenario') return 'Scenario reasoning';
+  if (style === 'coding') return 'Coding assessment';
+  if (style === 'debugging') return 'Debugging';
+  if (style === 'code_completion') return 'Code completion';
+  if (style === 'code_interpretation') return 'Code interpretation';
+  if (style === 'math_problem') return 'Math problem';
+  return style.replace(/_/g, ' ');
 }
 
 const tabs: Array<{ id: LearningTab; label: string }> = [
@@ -148,6 +174,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [loadingTree, setLoadingTree] = useState(!cachedTree);
   const [loadingRecommendations, setLoadingRecommendations] = useState(cachedRecommendations.length === 0);
   const [deepDiveFocus, setDeepDiveFocus] = useState('');
+  const [deepDivePurpose, setDeepDivePurpose] = useState<
+    'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project'
+  >('exploration');
   const [pageError, setPageError] = useState('');
 
   const selectedSkill = useMemo(() => {
@@ -221,6 +250,35 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
     setActiveTab('overview');
   }, [routeSkillId, searchParams]);
+
+  useEffect(() => {
+    if (!selectedSkill) return;
+    if (selectedSkill.status === 'locked') return;
+
+    if (activeTab === 'overview') {
+      void ensureBranchSuggestions();
+      return;
+    }
+    if (activeTab === 'lesson') {
+      void ensureResource('lesson');
+      return;
+    }
+    if (activeTab === 'examples') {
+      void ensureResource('examples');
+      return;
+    }
+    if (activeTab === 'exercises') {
+      void ensureResource('exercises');
+      return;
+    }
+    if (activeTab === 'resources') {
+      void ensureExternalResources();
+      return;
+    }
+    if (activeTab === 'quiz') {
+      void ensureAssessment();
+    }
+  }, [activeTab, selectedSkill?.id, selectedSkill?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function keyFor(type: string, skillId?: number) {
     const id = skillId || selectedSkill?.id || 0;
@@ -307,6 +365,120 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  async function ensureBranchSuggestions(force = false) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') return;
+    const existing = contentCache[nodeId]?.branchSuggestions;
+    if (existing && !force) return;
+
+    setLoadingState('branch-suggestions', true, nodeId);
+    setErrorState('branch-suggestions', '', nodeId);
+    try {
+      const suggestions = await listBranchSuggestions(nodeId, 'pending');
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            branchSuggestions: suggestions,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('branch-suggestions', err instanceof Error ? err.message : 'Failed to load branch suggestions', nodeId);
+    } finally {
+      setLoadingState('branch-suggestions', false, nodeId);
+    }
+  }
+
+  async function handleGenerateBranchSuggestions() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') return;
+
+    setLoadingState('branch-suggestions', true, nodeId);
+    setErrorState('branch-suggestions', '', nodeId);
+    try {
+      const suggestions = await generateBranchSuggestions({
+        skillId: nodeId,
+        limit: 2,
+        trigger_event: 'manual',
+      });
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            branchSuggestions: suggestions,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('branch-suggestions', err instanceof Error ? err.message : 'Failed to generate branch suggestions', nodeId);
+    } finally {
+      setLoadingState('branch-suggestions', false, nodeId);
+    }
+  }
+
+  async function handleAcceptBranchSuggestion(suggestionId: number) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setLoadingState('branch-suggestions-action', true, nodeId);
+    setErrorState('branch-suggestions', '', nodeId);
+    try {
+      const nextTree = await acceptBranchSuggestion({
+        suggestionId,
+        branch_size: 3,
+      });
+      setTree(nextTree);
+      writeSkillTreeCache(topicId, nextTree);
+      await loadRecommendations(true);
+      const suggestions = await listBranchSuggestions(nodeId, 'pending');
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            branchSuggestions: suggestions,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('branch-suggestions', err instanceof Error ? err.message : 'Failed to accept suggestion', nodeId);
+    } finally {
+      setLoadingState('branch-suggestions-action', false, nodeId);
+    }
+  }
+
+  async function handleRejectBranchSuggestion(suggestionId: number) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setLoadingState('branch-suggestions-action', true, nodeId);
+    setErrorState('branch-suggestions', '', nodeId);
+    try {
+      await rejectBranchSuggestion(suggestionId);
+      const suggestions = await listBranchSuggestions(nodeId, 'pending');
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            branchSuggestions: suggestions,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('branch-suggestions', err instanceof Error ? err.message : 'Failed to reject suggestion', nodeId);
+    } finally {
+      setLoadingState('branch-suggestions-action', false, nodeId);
+    }
+  }
+
   async function ensureAssessment(forceRegenerate = false) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
@@ -324,7 +496,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       const assessment = await generateAssessment({
         topic_id: Number(topicId),
         skill_node_id: nodeId,
-        question_count: 6,
         regenerate: forceRegenerate
       });
       setContentCache((prev) => {
@@ -334,15 +505,77 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           [nodeId]: {
             ...nodeCache,
             assessment,
-            assessmentResult: forceRegenerate ? undefined : nodeCache.assessmentResult
+            assessmentResult: forceRegenerate ? undefined : nodeCache.assessmentResult,
+            revealedAnswers: forceRegenerate ? undefined : nodeCache.revealedAnswers,
+            revealWarning: forceRegenerate ? undefined : nodeCache.revealWarning,
           }
         };
       });
       setAssessmentDraftsByNode((prev) => ({ ...prev, [nodeId]: {} }));
+      if (assessment.answers_revealed) {
+        const reveal = await revealAssessmentAnswers(assessment.id);
+        setContentCache((prev) => {
+          const nodeCache = prev[nodeId] || { resources: {} };
+          return {
+            ...prev,
+            [nodeId]: {
+              ...nodeCache,
+              assessment: {
+                ...assessment,
+                answers_revealed: reveal.answers_revealed,
+                mastery_eligible: reveal.mastery_eligible,
+              },
+              revealedAnswers: reveal.question_reveals,
+              revealWarning: reveal.warning,
+            },
+          };
+        });
+      }
     } catch (err) {
       setErrorState('quiz', err instanceof Error ? err.message : 'Failed to generate assessment', nodeId);
     } finally {
       setLoadingState('quiz', false, nodeId);
+    }
+  }
+
+  async function handleRevealAnswers() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    const assessment = contentCache[nodeId]?.assessment;
+    if (!assessment) return;
+
+    const proceed = window.confirm(
+      'Revealing answers will convert this assessment into practice mode. It will no longer count toward mastery. Continue?'
+    );
+    if (!proceed) return;
+
+    setLoadingState('quiz-reveal', true, nodeId);
+    setErrorState('quiz', '', nodeId);
+    try {
+      const reveal = await revealAssessmentAnswers(assessment.id);
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            assessment: nodeCache.assessment
+              ? {
+                  ...nodeCache.assessment,
+                  answers_revealed: reveal.answers_revealed,
+                  mastery_eligible: reveal.mastery_eligible,
+                }
+              : nodeCache.assessment,
+            revealedAnswers: reveal.question_reveals,
+            revealWarning: reveal.warning,
+            assessmentResult: undefined,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('quiz', err instanceof Error ? err.message : 'Failed to reveal answers', nodeId);
+    } finally {
+      setLoadingState('quiz-reveal', false, nodeId);
     }
   }
 
@@ -426,6 +659,21 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  async function handleForceUnlock() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setLoadingState('force-unlock', true, nodeId);
+    setErrorState('force-unlock', '', nodeId);
+    try {
+      await forceUnlockSkill(nodeId);
+      await refreshTopicData(true);
+    } catch (err) {
+      setErrorState('force-unlock', err instanceof Error ? err.message : 'Failed to force unlock node', nodeId);
+    } finally {
+      setLoadingState('force-unlock', false, nodeId);
+    }
+  }
+
   async function handleDeepDive() {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
@@ -440,7 +688,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       const nextTree = await createDeepDiveBranch({
         skillId: nodeId,
         focus: deepDiveFocus.trim() || undefined,
-        branch_size: 3
+        branch_size: 3,
+        purpose: deepDivePurpose,
       });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
@@ -458,11 +707,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       return;
     }
     setActiveTab(tab);
-    if (tab === 'lesson') await ensureResource('lesson');
-    if (tab === 'examples') await ensureResource('examples');
-    if (tab === 'exercises') await ensureResource('exercises');
-    if (tab === 'resources') await ensureExternalResources();
-    if (tab === 'quiz') await ensureAssessment();
   }
 
   function updateAssessmentDraft(questionId: number, patch: AssessmentDraft) {
@@ -494,15 +738,21 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const tabError = errorByKey[keyFor(activeTab, activeNodeId)] || '';
   const progressError = errorByKey[keyFor('progress', activeNodeId)] || '';
   const progressLoading = !!loadingByKey[keyFor('progress', activeNodeId)];
+  const forceUnlockError = errorByKey[keyFor('force-unlock', activeNodeId)] || '';
+  const forceUnlockLoading = !!loadingByKey[keyFor('force-unlock', activeNodeId)];
 
   const lessonLoading = !!loadingByKey[keyFor('lesson', activeNodeId)];
   const examplesLoading = !!loadingByKey[keyFor('examples', activeNodeId)];
   const exercisesLoading = !!loadingByKey[keyFor('exercises', activeNodeId)];
   const assessmentLoading = !!loadingByKey[keyFor('quiz', activeNodeId)];
   const assessmentSubmitLoading = !!loadingByKey[keyFor('quiz-submit', activeNodeId)];
+  const assessmentRevealLoading = !!loadingByKey[keyFor('quiz-reveal', activeNodeId)];
   const resourcesLoading = !!loadingByKey[keyFor('resources', activeNodeId)];
   const deepDiveLoading = !!loadingByKey[keyFor('deep-dive', activeNodeId)];
   const deepDiveError = errorByKey[keyFor('deep-dive', activeNodeId)] || '';
+  const branchSuggestionsLoading = !!loadingByKey[keyFor('branch-suggestions', activeNodeId)];
+  const branchSuggestionsActionLoading = !!loadingByKey[keyFor('branch-suggestions-action', activeNodeId)];
+  const branchSuggestionsError = errorByKey[keyFor('branch-suggestions', activeNodeId)] || '';
 
   const lessonResource = currentNodeCache?.resources?.lesson;
   const examplesResource = currentNodeCache?.resources?.examples;
@@ -510,6 +760,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const externalResources = currentNodeCache?.externalResources || [];
   const assessment = currentNodeCache?.assessment;
   const assessmentResult = currentNodeCache?.assessmentResult;
+  const revealedAnswers = currentNodeCache?.revealedAnswers || [];
+  const branchSuggestions = currentNodeCache?.branchSuggestions || [];
+  const revealByQuestionId = new Map(revealedAnswers.map((item) => [item.question_id, item]));
+  const revealWarning = currentNodeCache?.revealWarning || '';
 
   const lesson = parseLessonContent(lessonResource?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
@@ -555,8 +809,13 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold leading-snug">{node.name}</p>
                     <div className="flex flex-wrap items-center gap-1">
-                      {node.node_kind === 'optional_branch' && (
+                  {node.node_kind === 'optional_branch' && (
                         <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional</span>
+                      )}
+                      {node.node_kind === 'optional_branch' && node.branch_origin !== 'core' && (
+                        <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
+                          {node.branch_origin === 'system_suggested' ? 'Suggested' : 'Custom'}
+                        </span>
                       )}
                       <span className={`badge border ${statusClasses(node.status)}`}>{node.status.replace('_', ' ')}</span>
                     </div>
@@ -601,12 +860,22 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <h2 className="text-2xl font-semibold leading-tight">{selectedSkill.name}</h2>
                 <p className="muted mt-2 max-w-3xl text-sm leading-relaxed">{selectedSkill.description}</p>
                 {selectedSkill.status === 'locked' && selectedSkill.lock_reason && (
-                  <p className="mt-2 text-sm text-red-700">{selectedSkill.lock_reason}</p>
-                )}
-              </div>
+                <p className="mt-2 text-sm text-red-700">{selectedSkill.lock_reason}</p>
+              )}
+              {selectedSkill.force_unlocked && (
+                <p className="mt-2 inline-flex rounded-full border border-fuchsia-300 bg-fuchsia-100 px-3 py-1 text-xs text-fuchsia-900">
+                  Dev override active
+                </p>
+              )}
+            </div>
               <div className="flex items-center gap-2">
                 {selectedSkill.node_kind === 'optional_branch' && (
                   <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional branch</span>
+                )}
+                {selectedSkill.node_kind === 'optional_branch' && selectedSkill.branch_origin !== 'core' && (
+                  <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
+                    {selectedSkill.branch_origin === 'system_suggested' ? 'System suggestion' : 'User created'}
+                  </span>
                 )}
                 <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
                   {progressStateLabel(selectedSkill.progress_state)}
@@ -699,9 +968,20 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 </div>
                 {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then complete exercises, then pass the assessment.</p>}
                 {isLocked && (
-                  <p className="mt-3 text-xs text-red-700">
-                    This node is locked. Verify prerequisite nodes to unlock learning content.
-                  </p>
+                  <div className="mt-3 space-y-2">
+                    <p className="text-xs text-red-700">
+                      This node is locked. Verify prerequisite nodes to unlock learning content.
+                    </p>
+                    <button
+                      type="button"
+                      className="rounded-md border border-fuchsia-300 bg-fuchsia-100 px-3 py-2 text-xs text-fuchsia-900 disabled:opacity-60"
+                      onClick={handleForceUnlock}
+                      disabled={forceUnlockLoading}
+                    >
+                      {forceUnlockLoading ? 'Unlocking...' : 'Dev unlock (eligible accounts only)'}
+                    </button>
+                    {forceUnlockError && <p className="text-xs text-red-700">{forceUnlockError}</p>}
+                  </div>
                 )}
                 {progressError && <p className="mt-3 text-sm text-red-700">{progressError}</p>}
               </section>
@@ -711,7 +991,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <p className="muted mt-2 text-sm">
                   Create a side branch with optional modules if you want to go deeper on this node.
                 </p>
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-center">
                   <input
                     value={deepDiveFocus}
                     onChange={(event) => setDeepDiveFocus(event.target.value)}
@@ -719,6 +999,18 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     placeholder="Optional focus (e.g. groove timing, edge cases, troubleshooting)"
                     maxLength={180}
                   />
+                  <select
+                    value={deepDivePurpose}
+                    onChange={(event) => setDeepDivePurpose(event.target.value as typeof deepDivePurpose)}
+                    className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                  >
+                    <option value="exploration">Exploration</option>
+                    <option value="specialization">Specialization</option>
+                    <option value="enrichment">Enrichment</option>
+                    <option value="remediation">Remediation</option>
+                    <option value="assessment_prep">Assessment prep</option>
+                    <option value="project">Project</option>
+                  </select>
                   <button
                     className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
                     onClick={handleDeepDive}
@@ -729,6 +1021,63 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   </button>
                 </div>
                 {deepDiveError && <p className="mt-2 text-sm text-red-700">{deepDiveError}</p>}
+              </section>
+
+              <section className="rounded-xl border border-black/10 bg-white p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Suggested Side Branches</h3>
+                  <button
+                    type="button"
+                    className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
+                    onClick={handleGenerateBranchSuggestions}
+                    disabled={branchSuggestionsLoading || branchSuggestionsActionLoading || isLocked}
+                  >
+                    {branchSuggestionsLoading ? 'Generating...' : 'Refresh suggestions'}
+                  </button>
+                </div>
+                <p className="muted mt-2 text-sm">
+                  Optional paths tailored to this node. Accept a suggestion to grow your tree with a focused offshoot.
+                </p>
+                {branchSuggestionsError && <p className="mt-2 text-sm text-red-700">{branchSuggestionsError}</p>}
+                <div className="mt-3 space-y-2">
+                  {branchSuggestions.map((suggestion) => (
+                    <article key={suggestion.id} className="rounded-lg border border-black/10 bg-paper/40 p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold">{suggestion.title}</p>
+                          <p className="muted mt-1 text-xs">{suggestion.focus}</p>
+                        </div>
+                        <span className="badge border border-black/15 bg-white text-black/70">
+                          {suggestion.purpose.replace('_', ' ')}
+                        </span>
+                      </div>
+                      <p className="muted mt-2 text-sm">{suggestion.rationale}</p>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
+                          onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
+                          disabled={branchSuggestionsActionLoading}
+                        >
+                          Accept branch
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
+                          onClick={() => handleRejectBranchSuggestion(suggestion.id)}
+                          disabled={branchSuggestionsActionLoading}
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                    </article>
+                  ))}
+                  {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
+                    <p className="muted text-xs">
+                      No pending suggestions yet. Use “Refresh suggestions” or create your own optional branch above.
+                    </p>
+                  )}
+                </div>
               </section>
 
               <section className="rounded-xl border border-black/10 bg-white p-4">
@@ -818,24 +1167,61 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 >
                   {assessmentLoading ? 'Loading...' : assessment ? 'Regenerate assessment' : 'Generate assessment'}
                 </button>
+                {assessment && (
+                  <button
+                    className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 disabled:opacity-60"
+                    onClick={handleRevealAnswers}
+                    disabled={assessmentRevealLoading || assessment.answers_revealed}
+                  >
+                    {assessmentRevealLoading
+                      ? 'Revealing...'
+                      : assessment.answers_revealed
+                        ? 'Answers revealed'
+                        : 'Show answers'}
+                  </button>
+                )}
               </div>
 
               {assessmentLoading && <p className="rounded-md border border-black/10 bg-white p-3 text-sm">Loading assessment...</p>}
 
               {assessment && (
                 <div className="space-y-4">
-                  <div className="rounded-lg border border-black/10 bg-white p-3 text-xs text-black/70">
-                    <p>
-                      Score at least <span className="font-semibold">70%</span> to verify this node.
-                    </p>
-                    <p className="mt-1">Difficulty: {assessment.difficulty} · Target level: {assessment.target_level}</p>
-                  </div>
+                  {assessment.answers_revealed ? (
+                    <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+                      <p className="font-semibold">Practice mode: mastery credit disabled for this assessment.</p>
+                      <p className="mt-1">
+                        {revealWarning ||
+                          'Answers were revealed. Submit for feedback only, then regenerate a new assessment to earn mastery credit.'}
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-black/10 bg-white p-3 text-xs text-black/70">
+                      <p>
+                        Score at least <span className="font-semibold">70%</span> to verify this node.
+                      </p>
+                      <p className="mt-1">Difficulty: {assessment.difficulty} · Target level: {assessment.target_level}</p>
+                    </div>
+                  )}
 
                   <h3 className="text-xl font-semibold">{assessment.title}</h3>
 
                   {assessment.questions.map((question, questionIndex) => {
                     const draft = assessmentDrafts[question.id] || {};
                     const isMCQ = question.question_type === 'multiple_choice';
+                    const style = question.assessment_style || question.question_type;
+                    const isCodeStyle =
+                      style === 'coding' ||
+                      style === 'debugging' ||
+                      style === 'code_completion' ||
+                      style === 'code_interpretation';
+                    const isMathStyle = style === 'math_problem';
+                    const placeholder = isCodeStyle
+                      ? 'Write code or pseudocode answer...'
+                      : isMathStyle
+                        ? 'Show your calculation or reasoning...'
+                        : style === 'flashcard'
+                          ? 'Type a concise recall answer...'
+                          : 'Write your response...';
 
                     return (
                       <article key={question.id} className="rounded-xl border border-black/10 bg-white p-4">
@@ -843,7 +1229,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           <p className="text-sm font-semibold">
                             {questionIndex + 1}. {question.prompt}
                           </p>
-                          <span className="badge">{questionTypeLabel(question.question_type)}</span>
+                          <div className="flex flex-wrap gap-1">
+                            <span className="badge">{assessmentStyleLabel(style)}</span>
+                            <span className="badge">{questionTypeLabel(question.question_type)}</span>
+                          </div>
                         </div>
 
                         {isMCQ ? (
@@ -867,10 +1256,34 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           <textarea
                             value={draft.answer_text || ''}
                             onChange={(event) => updateAssessmentDraft(question.id, { answer_text: event.target.value })}
-                            className="mt-3 min-h-[120px] w-full rounded-md border border-black/10 bg-white p-3 text-sm"
-                            placeholder="Write your response..."
+                            className={`mt-3 min-h-[120px] w-full rounded-md border border-black/10 bg-white p-3 text-sm ${
+                              isCodeStyle ? 'font-mono' : ''
+                            }`}
+                            placeholder={placeholder}
                             maxLength={4000}
                           />
+                        )}
+
+                        {assessment.answers_revealed && revealByQuestionId.get(question.id) && (
+                          <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                            <p className="font-semibold">Model answer</p>
+                            <pre
+                              className={`mt-1 whitespace-pre-wrap rounded-md border border-emerald-200 bg-white/70 p-2 text-xs ${
+                                style === 'coding' || style === 'debugging' || style === 'code_completion'
+                                  ? 'font-mono'
+                                  : ''
+                              }`}
+                            >
+                              {revealByQuestionId.get(question.id)?.answer}
+                            </pre>
+                            {(revealByQuestionId.get(question.id)?.key_points || []).length > 0 && (
+                              <ul className="mt-2 list-disc space-y-1 pl-5 text-xs">
+                                {revealByQuestionId.get(question.id)?.key_points.map((point) => (
+                                  <li key={point}>{point}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
                         )}
 
                       </article>
@@ -882,7 +1295,11 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     onClick={handleSubmitAssessment}
                     disabled={assessmentSubmitLoading}
                   >
-                    {assessmentSubmitLoading ? 'Submitting...' : 'Submit assessment'}
+                    {assessmentSubmitLoading
+                      ? 'Submitting...'
+                      : assessment.answers_revealed
+                        ? 'Submit practice attempt'
+                        : 'Submit assessment'}
                   </button>
                 </div>
               )}
@@ -895,9 +1312,16 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   <p className="muted text-sm">
                     Progress state: <strong>{progressStateLabel(assessmentResult.updated_progress_state)}</strong>
                   </p>
-                  <p className="muted text-sm">
-                    Progress updated. Current mastery estimate: {(assessmentResult.updated_mastery * 100).toFixed(0)}%
-                  </p>
+                  {assessmentResult.mastery_applied ? (
+                    <p className="muted text-sm">
+                      Progress updated. Current mastery estimate: {(assessmentResult.updated_mastery * 100).toFixed(0)}%
+                    </p>
+                  ) : (
+                    <p className="rounded-md border border-amber-300 bg-amber-50 p-2 text-sm text-amber-900">
+                      {assessmentResult.outcome_message ||
+                        'Practice attempt recorded. Generate a new assessment for mastery credit.'}
+                    </p>
+                  )}
 
                   <div className="grid gap-3 md:grid-cols-2">
                     <div className="rounded-lg border border-black/10 bg-paper/50 p-3">
@@ -931,12 +1355,13 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
                   <div className="space-y-2">
                     {assessmentResult.feedback.map((item) => (
-                      <div key={item.question_id} className="rounded-md border border-black/10 bg-white p-3 text-sm">
-                        <p className="font-semibold">
-                          Q{item.question_id} · {questionTypeLabel(item.question_type)}
-                          {item.question_type === 'reflection' || item.score === null
-                            ? ' · Reflection recorded'
-                            : ` · ${(item.score * 100).toFixed(0)}%`}
+                    <div key={item.question_id} className="rounded-md border border-black/10 bg-white p-3 text-sm">
+                      <p className="font-semibold">
+                        Q{item.question_id} · {questionTypeLabel(item.question_type)}
+                        {item.assessment_style ? ` · ${assessmentStyleLabel(item.assessment_style)}` : ''}
+                        {item.question_type === 'reflection' || item.score === null
+                          ? ' · Reflection recorded'
+                          : ` · ${(item.score * 100).toFixed(0)}%`}
                         </p>
                         <p className="muted mt-1">{item.feedback}</p>
                       </div>

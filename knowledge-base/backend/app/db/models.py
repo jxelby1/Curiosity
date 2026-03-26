@@ -8,6 +8,7 @@ from sqlalchemy import Boolean, DateTime, Enum as SAEnum, Float, ForeignKey, Int
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
+from app.core.course_preferences import DEFAULT_ASSESSMENT_STYLES
 from app.core.config import get_settings
 from app.db.database import Base
 
@@ -79,6 +80,9 @@ class Topic(Base):
     name: Mapped[str] = mapped_column(String(255), index=True)
     description: Mapped[str] = mapped_column(Text, default='')
     goal: Mapped[str] = mapped_column(Text, default='')
+    course_depth: Mapped[str] = mapped_column(String(30), default='standard')
+    starting_skill_level: Mapped[str] = mapped_column(String(30), default='beginner')
+    allowed_assessment_styles: Mapped[list[str]] = mapped_column(JSON, default=lambda: DEFAULT_ASSESSMENT_STYLES.copy())
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped['User'] = relationship(back_populates='topics')
@@ -128,6 +132,9 @@ class SkillNode(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
     node_kind: Mapped[str] = mapped_column(String(40), default='core')
+    branch_origin: Mapped[str] = mapped_column(String(60), default='core')
+    branch_purpose: Mapped[str] = mapped_column(String(60), default='core_curriculum')
+    branch_depth: Mapped[int] = mapped_column(Integer, default=0)
     branch_parent_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)
     description: Mapped[str] = mapped_column(Text)
@@ -165,6 +172,7 @@ class UserSkillState(Base):
     mastery: Mapped[float] = mapped_column(Float, default=0.0)
     confidence: Mapped[float] = mapped_column(Float, default=0.0)
     status: Mapped[SkillStatus] = mapped_column(SAEnum(SkillStatus), default=SkillStatus.locked)
+    force_unlocked: Mapped[bool] = mapped_column(Boolean, default=False)
     progress_state: Mapped[str] = mapped_column(String(40), default='not_started')
     lesson_completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     examples_generated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -297,6 +305,8 @@ class Assessment(Base):
     difficulty: Mapped[int] = mapped_column(Integer, default=1)
     target_level: Mapped[str] = mapped_column(String(40), default='beginner')
     question_mix: Mapped[dict] = mapped_column(JSON, default=dict)
+    answers_revealed: Mapped[bool] = mapped_column(Boolean, default=False)
+    answers_revealed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     questions: Mapped[list[dict]] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -310,8 +320,11 @@ class AssessmentQuestion(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     assessment_id: Mapped[int] = mapped_column(ForeignKey('assessments.id'), index=True)
     question_type: Mapped[AssessmentQuestionType] = mapped_column(SAEnum(AssessmentQuestionType))
+    assessment_style: Mapped[str] = mapped_column(String(40), default='short_answer')
     prompt: Mapped[str] = mapped_column(Text)
     choices: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    model_answer: Mapped[str] = mapped_column(Text, default='')
+    hints: Mapped[list[str]] = mapped_column(JSON, default=list)
     expected_concepts: Mapped[list[str]] = mapped_column(JSON, default=list)
     rubric: Mapped[dict] = mapped_column(JSON, default=dict)
     difficulty: Mapped[int] = mapped_column(Integer, default=1)
@@ -331,6 +344,8 @@ class AssessmentAttempt(Base):
     score: Mapped[float] = mapped_column(Float)
     confidence_avg: Mapped[float] = mapped_column(Float, default=0.0)
     mastery_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    mastery_eligible: Mapped[bool] = mapped_column(Boolean, default=True)
+    practice_mode: Mapped[bool] = mapped_column(Boolean, default=False)
     strengths: Mapped[list[str]] = mapped_column(JSON, default=list)
     weaknesses: Mapped[list[str]] = mapped_column(JSON, default=list)
     review_next: Mapped[str] = mapped_column(Text, default='')
@@ -372,6 +387,29 @@ class AssessmentFeedback(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     attempt: Mapped['AssessmentAttempt'] = relationship(back_populates='feedback_rows')
+
+
+class BranchSuggestion(Base):
+    __tablename__ = 'branch_suggestions'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    parent_skill_id: Mapped[int] = mapped_column(ForeignKey('skill_nodes.id'), index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    focus: Mapped[str] = mapped_column(String(255), default='')
+    rationale: Mapped[str] = mapped_column(Text, default='')
+    purpose: Mapped[str] = mapped_column(String(60), default='exploration')
+    origin: Mapped[str] = mapped_column(String(60), default='system_suggested')
+    trigger_event: Mapped[str] = mapped_column(String(80), default='manual')
+    status: Mapped[str] = mapped_column(String(30), default='pending')
+    accepted_branch_root_skill_id: Mapped[int | None] = mapped_column(
+        ForeignKey('skill_nodes.id'),
+        nullable=True,
+        index=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class UserReminder(Base):

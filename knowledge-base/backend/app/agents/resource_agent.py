@@ -8,6 +8,7 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import LearningResource, ResourceType, SkillEdge, SkillNode, Topic, UserSkillState
+from app.core.exceptions import ProviderError
 from app.schemas.llm import (
     ExamplesPlan,
     ExercisesPlan,
@@ -168,6 +169,130 @@ class ResourceAgent:
             raise ValueError('Unsupported resource kind.')
         return mapping[kind]
 
+    def _fallback_lesson_content(self, *, topic: Topic, skill_node: SkillNode, learner_level: str) -> dict[str, Any]:
+        return {
+            'title': f'{skill_node.name}: Starter lesson',
+            'summary': (
+                f'A concise introduction to {skill_node.name} for {learner_level} learners in {topic.name}.'
+            )[:300],
+            'learning_objectives': [
+                f'Explain the core purpose of {skill_node.name}.',
+                'Apply one foundational method correctly in a small example.',
+            ],
+            'key_concepts': [
+                {
+                    'term': skill_node.name[:100],
+                    'description': 'The core concept this node teaches and why it matters in practice.',
+                },
+                {
+                    'term': 'Foundational workflow',
+                    'description': 'A repeatable sequence of steps for basic execution and review.',
+                },
+            ],
+            'sections': [
+                {
+                    'heading': 'What this skill is for',
+                    'content': (
+                        f'{skill_node.name} helps you make reliable progress inside {topic.name}. '
+                        'Focus on one clear concept at a time before adding complexity.'
+                    )[:800],
+                },
+                {
+                    'heading': 'How to practice this node',
+                    'content': (
+                        'Use short focused practice rounds. Run one attempt, review what happened, and repeat with '
+                        'a single adjustment so progress is measurable.'
+                    )[:800],
+                },
+            ],
+            'takeaways': [
+                f'You should be able to describe {skill_node.name} in plain language.',
+                'Small, repeatable drills build faster mastery than broad unfocused practice.',
+            ],
+            'next_steps': [
+                'Open examples to see the concept applied in context.',
+                'Move to exercises and complete one short task end-to-end.',
+            ],
+        }
+
+    def _fallback_examples_content(self, *, topic: Topic, skill_node: SkillNode) -> dict[str, Any]:
+        return {
+            'title': f'{skill_node.name}: Worked examples',
+            'intro': (
+                f'These examples show practical, beginner-safe uses of {skill_node.name} in {topic.name}.'
+            )[:420],
+            'examples': [
+                {
+                    'name': 'Baseline example',
+                    'explanation': (
+                        f'Start with a minimal case where {skill_node.name} is applied once with clear inputs and outputs.'
+                    )[:500],
+                    'why_it_matters': 'This anchors the core concept before adding edge cases.'[:280],
+                },
+                {
+                    'name': 'Common mistake and correction',
+                    'explanation': (
+                        f'Show a frequent mistake in {skill_node.name}, then demonstrate the corrected approach.'
+                    )[:500],
+                    'why_it_matters': 'Seeing failure modes early improves retention and confidence.'[:280],
+                },
+            ],
+        }
+
+    def _fallback_exercises_content(self, *, topic: Topic, skill_node: SkillNode) -> dict[str, Any]:
+        return {
+            'title': f'{skill_node.name}: Starter exercises',
+            'intro': (
+                f'Complete these short drills to build confidence in {skill_node.name} within {topic.name}.'
+            )[:420],
+            'exercises': [
+                {
+                    'title': 'Quick concept drill',
+                    'task': (
+                        f'Spend 10 minutes applying one core {skill_node.name} technique in a minimal practice setup.'
+                    )[:500],
+                    'hints': [
+                        'Keep the task narrow and repeatable.',
+                        'Check one variable at a time.',
+                    ],
+                    'expected_outcome': (
+                        'You can perform one clean attempt and explain what worked and what to improve next.'
+                    )[:300],
+                    'difficulty': 'easy',
+                },
+                {
+                    'title': 'Error-spotting mini task',
+                    'task': (
+                        f'Review a flawed {skill_node.name} attempt, identify one mistake, and produce a corrected version.'
+                    )[:500],
+                    'hints': [
+                        'Write down the mistake before fixing it.',
+                        'Validate the correction with one quick re-test.',
+                    ],
+                    'expected_outcome': (
+                        'You can identify a common error pattern and apply a targeted correction.'
+                    )[:300],
+                    'difficulty': 'medium',
+                },
+            ],
+        }
+
+    def _fallback_structured_content(
+        self,
+        *,
+        kind: str,
+        topic: Topic,
+        skill_node: SkillNode,
+        learner_level: str,
+    ) -> dict[str, Any]:
+        if kind == 'lesson':
+            return self._fallback_lesson_content(topic=topic, skill_node=skill_node, learner_level=learner_level)
+        if kind == 'examples':
+            return self._fallback_examples_content(topic=topic, skill_node=skill_node)
+        if kind == 'exercises':
+            return self._fallback_exercises_content(topic=topic, skill_node=skill_node)
+        raise ValueError('Unsupported resource kind for fallback.')
+
     def _get_active_generated_resource(
         self,
         db: Session,
@@ -307,15 +432,31 @@ class ResourceAgent:
             f'Instruction: {instruction}'
         )
 
-        structured_model = await self.llm_service.generate_structured(
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            schema_model=schema_model,
-            temperature=0.3,
-            max_tokens=max_tokens,
-        )
-
-        structured_content = structured_model.model_dump()
+        used_fallback = False
+        try:
+            structured_model = await self.llm_service.generate_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_model=schema_model,
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            structured_content = structured_model.model_dump()
+        except ProviderError as exc:
+            used_fallback = True
+            logger.warning(
+                'resource.generation_fallback kind=%s topic_id=%s skill_id=%s error=%s',
+                kind,
+                topic.id,
+                skill_node.id,
+                exc,
+            )
+            structured_content = self._fallback_structured_content(
+                kind=kind,
+                topic=topic,
+                skill_node=skill_node,
+                learner_level=learner_level,
+            )
         if skill_node.difficulty <= 2 or learner_level == 'beginner':
             structured_content = self._enforce_foundation_scope(
                 kind=kind,
@@ -359,12 +500,13 @@ class ResourceAgent:
 
         source: ResourceSource = 'regenerated' if existing else 'generated'
         logger.info(
-            'resource.generated topic_id=%s skill_id=%s kind=%s version=%s source=%s',
+            'resource.generated topic_id=%s skill_id=%s kind=%s version=%s source=%s fallback=%s',
             topic.id,
             skill_node.id,
             kind,
             resource.version,
             source,
+            used_fallback,
         )
         return resource, structured_content, source
 

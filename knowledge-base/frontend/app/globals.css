@@ -66,3 +66,37 @@ body {
     background-position: -40% 0;
   }
 }
+
+.skill-tree-link-glow {
+  animation: skill-tree-path-pulse 2.8s ease-in-out infinite;
+}
+
+.skill-tree-node-pulse {
+  border: 1px solid rgba(125, 211, 252, 0.7);
+  box-shadow:
+    0 0 0 1px rgba(125, 211, 252, 0.3) inset,
+    0 0 26px rgba(56, 189, 248, 0.34);
+  animation: skill-tree-node-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes skill-tree-path-pulse {
+  0%,
+  100% {
+    opacity: 0.2;
+  }
+  50% {
+    opacity: 0.78;
+  }
+}
+
+@keyframes skill-tree-node-pulse {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.035);
+  }
+}

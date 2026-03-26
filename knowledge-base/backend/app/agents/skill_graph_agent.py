@@ -5,8 +5,19 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import SkillEdge, SkillNode, SkillStatus, Topic, UserSkillState
-from app.schemas.llm import DeepDiveBranchPlan, SkillGraphPlan
+from app.core.course_preferences import (
+    depth_node_bounds,
+    level_prompt_guidance,
+    normalize_course_depth,
+    normalize_starting_skill_level,
+)
+from app.db.models import BranchSuggestion, SkillEdge, SkillNode, SkillStatus, Topic, UserSkillState
+from app.schemas.llm import (
+    BranchSuggestionPlan,
+    DeepDiveBranchPlan,
+    SkillGraphPlan,
+    SkillPlanNode,
+)
 from app.services.llm import LLMService
 
 
@@ -27,6 +38,11 @@ class SkillGraphAgent:
         return 'beginner'
 
     async def create_skill_tree(self, db: Session, topic: Topic) -> list[SkillNode]:
+        course_depth = normalize_course_depth(topic.course_depth)
+        starting_level = normalize_starting_skill_level(topic.starting_skill_level)
+        min_nodes, max_nodes = depth_node_bounds(course_depth)
+        level_guidance = level_prompt_guidance(starting_level)
+
         system_prompt = (
             'You are SkillGraphAgent. Build a practical learning skill graph for a topic. '
             'Prefer atomic skills, clear prerequisite ordering, and realistic progression from fundamentals '
@@ -36,7 +52,11 @@ class SkillGraphAgent:
             f'Topic: {topic.name}\n'
             f'Description: {topic.description or "No description"}\n'
             f'Goal: {topic.goal or "No explicit goal"}\n\n'
-            'Create between 7 and 12 skill nodes. Each node needs key, name, description, difficulty (1-5), '
+            f'Course depth preference: {course_depth}\n'
+            f'Starting skill level preference: {starting_level}\n'
+            f'Guidance: {level_guidance}\n\n'
+            f'Create between {min_nodes} and {max_nodes} skill nodes. '
+            'Each node needs key, name, description, difficulty (1-5), '
             'and prerequisites (list of node keys).'
         )
 
@@ -56,8 +76,22 @@ class SkillGraphAgent:
             seen_keys.add(node.key)
             unique_nodes.append(node)
 
-        if len(unique_nodes) < 5:
-            raise ValueError('Skill graph generation returned too few unique nodes.')
+        unique_nodes = unique_nodes[:max_nodes]
+
+        while len(unique_nodes) < min_nodes:
+            idx = len(unique_nodes) + 1
+            fallback_key = f'auto_skill_{idx}'
+            fallback_prereq = [unique_nodes[-1].key] if unique_nodes else []
+            unique_nodes.append(
+                SkillPlanNode(
+                    key=fallback_key,
+                    name=f'{topic.name} skill {idx}',
+                    description=f'Practical progression step {idx} for {topic.name}.',
+                    difficulty=min(5, max(1, 1 + (idx // 3))),
+                    prerequisites=fallback_prereq,
+                )
+            )
+            seen_keys.add(fallback_key)
 
         prereq_map: dict[str, list[str]] = {}
         for node in unique_nodes:
@@ -77,6 +111,9 @@ class SkillGraphAgent:
             record = SkillNode(
                 topic_id=topic.id,
                 node_kind='core',
+                branch_origin='core',
+                branch_purpose='core_curriculum',
+                branch_depth=0,
                 branch_parent_skill_id=None,
                 name=node.name,
                 description=node.description,
@@ -121,6 +158,8 @@ class SkillGraphAgent:
         user_id: int,
         focus: str | None = None,
         branch_size: int = 3,
+        branch_origin: str = 'user_requested',
+        branch_purpose: str = 'exploration',
     ) -> list[SkillNode]:
         user_state = db.scalar(
             select(UserSkillState).where(
@@ -210,6 +249,9 @@ class SkillGraphAgent:
             record = SkillNode(
                 topic_id=topic.id,
                 node_kind='optional_branch',
+                branch_origin=branch_origin,
+                branch_purpose=branch_purpose,
+                branch_depth=max(1, (parent_node.branch_depth or 0) + 1),
                 branch_parent_skill_id=parent_node.id,
                 name=node.name,
                 description=node.description,
@@ -283,9 +325,161 @@ class SkillGraphAgent:
             db.refresh(node)
 
         logger.info(
-            'skill_graph.deep_dive_created topic_id=%s parent_skill_id=%s node_count=%s',
+            'skill_graph.deep_dive_created topic_id=%s parent_skill_id=%s node_count=%s origin=%s purpose=%s',
             topic.id,
             parent_node.id,
             len(created_nodes),
+            branch_origin,
+            branch_purpose,
         )
         return created_nodes
+
+    async def suggest_branch_paths(
+        self,
+        db: Session,
+        *,
+        topic: Topic,
+        parent_node: SkillNode,
+        user_id: int,
+        limit: int = 2,
+        trigger_event: str = 'manual',
+    ) -> list[BranchSuggestion]:
+        limit = max(1, min(3, int(limit)))
+
+        pending = db.scalars(
+            select(BranchSuggestion).where(
+                BranchSuggestion.topic_id == topic.id,
+                BranchSuggestion.user_id == user_id,
+                BranchSuggestion.parent_skill_id == parent_node.id,
+                BranchSuggestion.status == 'pending',
+            )
+        ).all()
+        if len(pending) >= limit:
+            return pending[:limit]
+
+        learner_state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == user_id,
+                UserSkillState.skill_node_id == parent_node.id,
+            )
+        )
+        learner_level = self._learner_level(learner_state)
+
+        system_prompt = (
+            'You are SkillGraphAgent. Suggest optional branch pathways for a selected learning node. '
+            'Suggestions must be specific, useful, and clearly optional.'
+        )
+        user_prompt = (
+            f'Topic: {topic.name}\n'
+            f'Goal: {topic.goal or "No explicit goal"}\n'
+            f'Parent node: {parent_node.name}\n'
+            f'Parent description: {parent_node.description}\n'
+            f'Learner level: {learner_level}\n'
+            f'Trigger event: {trigger_event}\n'
+            f'Provide {limit} optional branch suggestions.\n'
+            'Each suggestion must include: title, focus, rationale, purpose.\n'
+            'purpose must be one of: enrichment, remediation, specialization, exploration, assessment_prep, project.'
+        )
+        plan = await self.llm_service.generate_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema_model=BranchSuggestionPlan,
+            temperature=0.3,
+            max_tokens=1200,
+        )
+
+        existing_focuses = {
+            row.focus.strip().lower()
+            for row in db.scalars(
+                select(BranchSuggestion).where(
+                    BranchSuggestion.topic_id == topic.id,
+                    BranchSuggestion.user_id == user_id,
+                    BranchSuggestion.parent_skill_id == parent_node.id,
+                )
+            ).all()
+        }
+        created: list[BranchSuggestion] = []
+        for item in plan.suggestions:
+            focus_key = item.focus.strip().lower()
+            if not focus_key or focus_key in existing_focuses:
+                continue
+            existing_focuses.add(focus_key)
+            record = BranchSuggestion(
+                topic_id=topic.id,
+                user_id=user_id,
+                parent_skill_id=parent_node.id,
+                title=item.title.strip(),
+                focus=item.focus.strip(),
+                rationale=item.rationale.strip(),
+                purpose=item.purpose,
+                origin='system_suggested',
+                trigger_event=trigger_event,
+                status='pending',
+            )
+            db.add(record)
+            db.flush()
+            created.append(record)
+            if len(created) >= limit:
+                break
+
+        db.commit()
+        for row in created:
+            db.refresh(row)
+
+        return created
+
+    def create_performance_branch_suggestion(
+        self,
+        db: Session,
+        *,
+        topic: Topic,
+        parent_node: SkillNode,
+        user_id: int,
+        score: float,
+    ) -> BranchSuggestion | None:
+        purpose = None
+        title = ''
+        rationale = ''
+        focus = ''
+        if score <= 0.45:
+            purpose = 'remediation'
+            title = f'Reinforcement: {parent_node.name} foundations'
+            focus = f'Foundational reinforcement for {parent_node.name}'
+            rationale = 'Recent assessment signals gaps. A focused reinforcement branch can strengthen prerequisites.'
+        elif score >= 0.85:
+            purpose = 'enrichment'
+            title = f'Advanced extension: {parent_node.name}'
+            focus = f'Advanced applications of {parent_node.name}'
+            rationale = 'Strong performance detected. An enrichment branch can deepen mastery with advanced application.'
+
+        if not purpose:
+            return None
+
+        existing_pending = db.scalar(
+            select(BranchSuggestion).where(
+                BranchSuggestion.topic_id == topic.id,
+                BranchSuggestion.user_id == user_id,
+                BranchSuggestion.parent_skill_id == parent_node.id,
+                BranchSuggestion.purpose == purpose,
+                BranchSuggestion.status == 'pending',
+            )
+        )
+        if existing_pending:
+            return existing_pending
+
+        suggestion = BranchSuggestion(
+            topic_id=topic.id,
+            user_id=user_id,
+            parent_skill_id=parent_node.id,
+            title=title,
+            focus=focus,
+            rationale=rationale,
+            purpose=purpose,
+            origin='system_suggested',
+            trigger_event='assessment_performance',
+            status='pending',
+        )
+        db.add(suggestion)
+        db.commit()
+        db.refresh(suggestion)
+        return suggestion

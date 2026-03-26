@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from types import UnionType
 from typing import Any, Callable, TypeVar, Union, get_args, get_origin
@@ -20,28 +21,83 @@ T = TypeVar('T', bound=BaseModel)
 
 
 def _extract_json_object(text: str) -> dict:
-    cleaned = text.strip()
+    cleaned = _strip_wrapping_fences(text).strip()
     if not cleaned:
         raise ProviderError('LLM returned empty response while JSON output was required.')
 
-    try:
-        parsed = json.loads(cleaned)
-        if isinstance(parsed, dict):
-            return parsed
-    except json.JSONDecodeError:
-        pass
+    parse_errors: list[str] = []
+    for candidate in _json_candidate_strings(cleaned):
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError as exc:
+            parse_errors.append(str(exc))
+            repaired = _repair_common_json_issues(candidate)
+            if repaired != candidate:
+                try:
+                    parsed = json.loads(repaired)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError as repaired_exc:
+                    parse_errors.append(str(repaired_exc))
+
+    detail = parse_errors[-1] if parse_errors else 'No parseable JSON object found.'
+    raise ProviderError(f'Could not parse structured LLM JSON response: {detail}')
+
+
+def _strip_wrapping_fences(text: str) -> str:
+    cleaned = text.strip()
+    if cleaned.startswith('```'):
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+    return cleaned
+
+
+def _json_candidate_strings(cleaned: str) -> list[str]:
+    candidates: list[str] = []
+    if cleaned:
+        candidates.append(cleaned)
 
     start = cleaned.find('{')
     end = cleaned.rfind('}')
     if start >= 0 and end > start:
-        try:
-            parsed = json.loads(cleaned[start:end + 1])
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError as exc:
-            raise ProviderError(f'Could not parse structured LLM JSON response: {exc}') from exc
+        candidates.append(cleaned[start:end + 1])
 
-    raise ProviderError('Could not locate a valid JSON object in LLM response.')
+    # Balanced-object scan for cases where wrapper text or extra braces are present.
+    depth = 0
+    object_start: int | None = None
+    for idx, char in enumerate(cleaned):
+        if char == '{':
+            if depth == 0:
+                object_start = idx
+            depth += 1
+        elif char == '}':
+            if depth > 0:
+                depth -= 1
+                if depth == 0 and object_start is not None:
+                    candidates.append(cleaned[object_start: idx + 1])
+                    object_start = None
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in sorted(candidates, key=len, reverse=True):
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(key)
+    return deduped
+
+
+def _repair_common_json_issues(raw: str) -> str:
+    repaired = raw
+    repaired = repaired.replace('\u201c', '"').replace('\u201d', '"')
+    repaired = repaired.replace('\u2018', "'").replace('\u2019', "'")
+    repaired = repaired.replace('\xa0', ' ')
+    # Remove trailing commas before object/array close.
+    repaired = re.sub(r',(\s*[}\]])', r'\1', repaired)
+    return repaired
 
 
 def _unwrap_optional(annotation: Any) -> Any:
@@ -176,6 +232,26 @@ class LLMService:
             f'JSON Schema:\n{schema_json}'
         )
 
+        async def _repair_broken_json(raw_text: str) -> dict[str, Any]:
+            repair_system_prompt = (
+                'You repair malformed JSON. Return one valid JSON object only with no commentary. '
+                'Preserve user intent and satisfy the required schema.'
+            )
+            repair_user_prompt = (
+                f'Target schema:\n{schema_json}\n\n'
+                'Malformed output to repair:\n'
+                f'{raw_text}\n\n'
+                'Return strictly valid JSON.'
+            )
+            repaired_raw = await self.generate(
+                repair_system_prompt,
+                repair_user_prompt,
+                temperature=0.0,
+                max_tokens=max_tokens,
+                json_mode=True,
+            )
+            return _extract_json_object(repaired_raw)
+
         attempt = 0
         while attempt <= retries:
             raw = await self.generate(
@@ -188,13 +264,27 @@ class LLMService:
             try:
                 payload = _extract_json_object(raw)
             except ProviderError as exc:
-                logger.warning('openai.structured.retry attempt=%s error=%s', attempt + 1, exc)
-                if attempt == retries:
-                    raise ProviderError(
-                        f'Unable to parse structured output for schema {schema_model.__name__}: {exc}'
-                    ) from exc
-                attempt += 1
-                continue
+                logger.warning('openai.structured.parse_failed attempt=%s error=%s', attempt + 1, exc)
+                try:
+                    payload = await _repair_broken_json(raw)
+                    logger.info(
+                        'openai.structured.json_repaired schema=%s attempt=%s',
+                        schema_model.__name__,
+                        attempt + 1,
+                    )
+                except Exception as repair_exc:  # noqa: BLE001
+                    logger.warning(
+                        'openai.structured.retry attempt=%s error=%s repair_error=%s',
+                        attempt + 1,
+                        exc,
+                        repair_exc,
+                    )
+                    if attempt == retries:
+                        raise ProviderError(
+                            f'Unable to parse structured output for schema {schema_model.__name__}: {exc}'
+                        ) from exc
+                    attempt += 1
+                    continue
 
             if repair_payload is not None:
                 try:

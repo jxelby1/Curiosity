@@ -4,13 +4,19 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from statistics import mean
 from typing import Any, Literal
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from app.core.exceptions import ProviderError
+from app.core.course_preferences import (
+    ASSESSMENT_STYLE_TO_QUESTION_TYPE,
+    build_assessment_style_sequence,
+    normalize_assessment_styles,
+    normalize_starting_skill_level,
+)
 from app.db.models import (
     Assessment,
     AssessmentAttempt,
@@ -56,6 +62,8 @@ class AssessmentScoringResult:
     review_next: str
     recommended_follow_up: str
     summary: str
+    mastery_eligible: bool = True
+    practice_mode: bool = False
 
 
 class AssessmentAgent:
@@ -81,29 +89,11 @@ class AssessmentAgent:
             return 'intermediate'
         return 'beginner'
 
-    def _recommended_mix(self, *, learner_level: str, question_count: int) -> dict[str, int]:
-        question_count = max(4, min(10, question_count))
-        if learner_level == 'beginner':
-            pattern = ['multiple_choice', 'multiple_choice', 'short_answer', 'explain', 'scenario', 'reflection']
-        elif learner_level == 'intermediate':
-            pattern = ['multiple_choice', 'short_answer', 'explain', 'scenario', 'error_spotting', 'reflection']
-        else:
-            pattern = ['multiple_choice', 'short_answer', 'explain', 'scenario', 'error_spotting', 'reflection']
-
+    def _recommended_mix(self, *, style_sequence: list[str]) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for idx in range(question_count):
-            key = pattern[idx % len(pattern)]
-            counts[key] = counts.get(key, 0) + 1
+        for style in style_sequence:
+            counts[style] = counts.get(style, 0) + 1
         return counts
-
-    def _question_type_sequence(self, *, learner_level: str, question_count: int) -> list[str]:
-        if learner_level == 'beginner':
-            pattern = ['multiple_choice', 'multiple_choice', 'short_answer', 'scenario', 'reflection']
-        elif learner_level == 'intermediate':
-            pattern = ['multiple_choice', 'short_answer', 'explain', 'scenario', 'reflection']
-        else:
-            pattern = ['multiple_choice', 'short_answer', 'explain', 'scenario', 'error_spotting', 'reflection']
-        return [pattern[idx % len(pattern)] for idx in range(question_count)]
 
     def _extract_concepts_from_text(self, text: str, *, max_items: int = 3) -> list[str]:
         if not text:
@@ -125,6 +115,90 @@ class AssessmentAgent:
                 break
         return concepts
 
+    def _looks_like_guidance_not_answer(self, text: str) -> bool:
+        value = (text or '').strip().lower()
+        if len(value) < 18:
+            return True
+        weak_phrases = (
+            'should include',
+            'make sure to',
+            'you should',
+            'a strong answer',
+            'a good answer',
+            'the response should',
+            'mention these points',
+            'consider covering',
+        )
+        return any(phrase in value for phrase in weak_phrases)
+
+    def _fallback_model_answer(
+        self,
+        *,
+        assessment_style: str,
+        question_type: str,
+        prompt: str,
+        concepts: list[str],
+    ) -> str:
+        concept_text = ', '.join(concepts[:3]) if concepts else 'the core concept'
+        if question_type == 'multiple_choice':
+            return (
+                f'The correct choice is the option that directly applies {concept_text} to this prompt: "{prompt}". '
+                'It is best because it is both accurate and specific to the asked scenario, while distractors are '
+                'either incomplete, over-general, or conceptually wrong.'
+            )
+        if assessment_style in {'coding', 'code_completion', 'code_interpretation'}:
+            return (
+                '```python\n'
+                'def solve(input_data):\n'
+                '    """Model solution for the prompt."""\n'
+                '    if input_data is None:\n'
+                "        raise ValueError('input_data is required')\n"
+                '    # 1) Validate inputs\n'
+                '    # 2) Apply the target logic clearly\n'
+                '    # 3) Return deterministic output\n'
+                '    result = input_data\n'
+                '    return result\n'
+                '```\n'
+                f'Why this works: it demonstrates {concept_text}, keeps control flow explicit, and is easy to test.'
+            )
+        if assessment_style == 'debugging':
+            return (
+                f'Root cause analysis: identify where "{prompt}" fails by tracing inputs and branches.\n'
+                'Fix:\n'
+                '1) reproduce the bug with a minimal test,\n'
+                '2) isolate the failing line,\n'
+                '3) apply a targeted code correction,\n'
+                '4) confirm with regression checks.\n'
+                f'Expected corrected reasoning should explicitly apply {concept_text}.'
+            )
+        if assessment_style == 'math_problem':
+            first = concepts[0] if concepts else 'the relevant formula'
+            return (
+                f'Worked solution:\n'
+                f'1) Write the governing relationship ({first}).\n'
+                '2) Substitute the known values from the prompt.\n'
+                '3) Simplify each intermediate step clearly.\n'
+                '4) Compute the final value and verify units/constraints.\n'
+                'Final answer: present one clear numeric/symbolic result with a short sanity check.'
+            )
+        if assessment_style == 'scenario':
+            return (
+                f'Model response:\n'
+                f'- Decision: choose the option that best applies {concept_text}.\n'
+                '- Reasoning: compare alternatives using concrete tradeoffs (risk, impact, feasibility).\n'
+                '- Execution: define first step, ownership, and expected outcome.\n'
+                '- Conclusion: justify why this option is strongest for the specific scenario.'
+            )
+        if assessment_style == 'flashcard':
+            return f'{concept_text}: concise definition plus one practical implication tied to the prompt.'
+        return (
+            'Model answer:\n'
+            f'1) Define the core idea ({concept_text}) in plain terms.\n'
+            '2) Apply it directly to the exact question context.\n'
+            '3) Add one concrete example or implication.\n'
+            '4) Close with a crisp takeaway that answers the prompt.'
+        )
+
     def _normalize_assessment_payload(
         self,
         payload: dict[str, Any],
@@ -133,6 +207,7 @@ class AssessmentAgent:
         skill_node: SkillNode,
         learner_level: str,
         question_count: int,
+        style_sequence: list[str],
     ) -> dict[str, Any]:
         normalized = dict(payload)
         normalized['title'] = str(normalized.get('title') or f'{skill_node.name} Skill Assessment').strip()[:220]
@@ -147,12 +222,26 @@ class AssessmentAgent:
         if not isinstance(raw_questions, list):
             raw_questions = []
 
-        expected_types = self._question_type_sequence(learner_level=learner_level, question_count=question_count)
+        expected_styles = style_sequence[:question_count]
+        if len(expected_styles) < question_count:
+            default_styles = build_assessment_style_sequence(
+                allowed_styles=topic.allowed_assessment_styles,
+                question_count=question_count,
+                topic_text=f'{topic.name} {topic.description} {topic.goal}',
+                skill_text=f'{skill_node.name} {skill_node.description}',
+                learner_level=learner_level,
+            )
+            expected_styles = default_styles[:question_count]
+
         normalized_questions: list[dict[str, Any]] = []
         repaired_missing_concepts = 0
 
         for idx in range(min(len(raw_questions), question_count)):
             raw_question = raw_questions[idx] if isinstance(raw_questions[idx], dict) else {}
+            assessment_style = str(raw_question.get('assessment_style') or '').strip()
+            if assessment_style not in ASSESSMENT_STYLE_TO_QUESTION_TYPE:
+                assessment_style = expected_styles[idx]
+
             question_type = raw_question.get('question_type')
             if question_type not in {
                 'multiple_choice',
@@ -162,11 +251,13 @@ class AssessmentAgent:
                 'error_spotting',
                 'reflection',
             }:
-                question_type = expected_types[idx]
+                question_type = ASSESSMENT_STYLE_TO_QUESTION_TYPE[assessment_style]
+            elif question_type != 'reflection':
+                question_type = ASSESSMENT_STYLE_TO_QUESTION_TYPE[assessment_style]
 
             prompt = str(raw_question.get('prompt') or '').strip()
             if not prompt:
-                prompt = f'Question {idx + 1}: apply {skill_node.name} in a practical way.'
+                prompt = f'Question {idx + 1}: apply {skill_node.name} in a practical way ({assessment_style.replace("_", " ")}).'
 
             expected_concepts = raw_question.get('expected_concepts')
             if isinstance(expected_concepts, list):
@@ -213,6 +304,36 @@ class AssessmentAgent:
                 concepts = concept_seed
                 repaired_missing_concepts += 1
 
+            model_answer = str(raw_question.get('model_answer') or '').strip()
+            if question_type == 'reflection' and len(model_answer) < 12:
+                model_answer = 'This is reflective; no single correct answer is required.'
+            elif question_type != 'reflection' and len(model_answer) < 12:
+                model_answer = self._fallback_model_answer(
+                    assessment_style=assessment_style,
+                    question_type=question_type,
+                    prompt=prompt,
+                    concepts=concepts,
+                )
+            elif question_type != 'reflection' and self._looks_like_guidance_not_answer(model_answer):
+                model_answer = self._fallback_model_answer(
+                    assessment_style=assessment_style,
+                    question_type=question_type,
+                    prompt=prompt,
+                    concepts=concepts,
+                )
+
+            hints_payload = raw_question.get('hints')
+            hints: list[str] = []
+            if isinstance(hints_payload, list):
+                hints = [str(item).strip() for item in hints_payload if str(item).strip()]
+            if not hints:
+                if concepts:
+                    hints = [f'Center the response on: {concepts[0]}']
+                    if len(concepts) > 1:
+                        hints.append(f'Include this concept too: {concepts[1]}')
+                else:
+                    hints = ['Start with the core concept, then apply it directly to the prompt.']
+
             choices_payload = raw_question.get('choices')
             choices: list[str] | None = None
             answer_index: int | None = None
@@ -252,38 +373,50 @@ class AssessmentAgent:
 
             normalized_question: dict[str, Any] = {
                 'id': str(raw_question.get('id') or f'q_{idx + 1}')[:40],
+                'assessment_style': assessment_style,
                 'question_type': question_type,
                 'prompt': prompt[:700],
                 'choices': choices,
                 'answer_index': answer_index,
+                'model_answer': model_answer[:2600],
+                'hints': hints[:4],
                 'expected_concepts': concepts[:8] if question_type != 'reflection' else [],
                 'rubric': rubric[:8],
                 'difficulty': max(1, min(5, int(raw_question.get('difficulty') or normalized['difficulty']))),
                 'confidence_prompt': str(
-                    raw_question.get('confidence_prompt') or 'How confident are you in your answer?'
+                    raw_question.get('confidence_prompt') or 'How sure are you about this answer?'
                 )[:120],
             }
             normalized_questions.append(normalized_question)
 
         while len(normalized_questions) < question_count:
             idx = len(normalized_questions)
-            fallback_type = expected_types[idx]
+            fallback_style = expected_styles[idx]
+            fallback_type = ASSESSMENT_STYLE_TO_QUESTION_TYPE[fallback_style]
             concept = skill_node.name.strip()[:80]
             fallback_prompt = (
                 f'Question {idx + 1}: '
                 f'{"Choose the best option" if fallback_type == "multiple_choice" else "Respond briefly"} '
-                f'for {skill_node.name}.'
+                f'for {skill_node.name} ({fallback_style.replace("_", " ")}).'
             )
             question_payload: dict[str, Any] = {
                 'id': f'q_{idx + 1}',
+                'assessment_style': fallback_style,
                 'question_type': fallback_type,
                 'prompt': fallback_prompt[:700],
                 'choices': None,
                 'answer_index': None,
+                'model_answer': self._fallback_model_answer(
+                    assessment_style=fallback_style,
+                    question_type=fallback_type,
+                    prompt=fallback_prompt,
+                    concepts=[concept],
+                ),
+                'hints': [f'Use {concept} explicitly in your response.'],
                 'expected_concepts': [] if fallback_type == 'reflection' else [concept],
                 'rubric': [],
                 'difficulty': normalized['difficulty'],
-                'confidence_prompt': 'How confident are you in your answer?',
+                'confidence_prompt': 'How sure are you about this answer?',
             }
             if fallback_type == 'multiple_choice':
                 question_payload['choices'] = [
@@ -301,19 +434,21 @@ class AssessmentAgent:
                         'weight': 1.0,
                     }
                 ]
+            elif fallback_type == 'reflection':
+                question_payload['model_answer'] = 'This is reflective; no single correct answer is required.'
             normalized_questions.append(question_payload)
 
         normalized['questions'] = normalized_questions[:question_count]
-        type_counts: dict[str, int] = {}
+        style_counts: dict[str, int] = {}
         for item in normalized['questions']:
-            question_type = str(item.get('question_type', 'unknown'))
-            type_counts[question_type] = type_counts.get(question_type, 0) + 1
+            style = str(item.get('assessment_style', 'unknown'))
+            style_counts[style] = style_counts.get(style, 0) + 1
         logger.info(
             'assessment.normalize topic_id=%s skill_id=%s repaired_missing_concepts=%s composition=%s',
             topic.id,
             skill_node.id,
             repaired_missing_concepts,
-            type_counts,
+            style_counts,
         )
         return normalized
 
@@ -328,6 +463,8 @@ class AssessmentAgent:
         prerequisite_names: list[str],
         question_count: int,
         recommended_mix: dict[str, int],
+        style_sequence: list[str],
+        allowed_styles: list[str],
     ) -> tuple[AssessmentPlan, bool]:
         system_prompt = (
             'You are AssessmentAgent.\n'
@@ -346,20 +483,28 @@ class AssessmentAgent:
             f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\\n'
             f'Prerequisites: {", ".join(prerequisite_names) if prerequisite_names else "None"}\\n'
             f'Target question count: {question_count}\\n'
-            f'Recommended question-type mix: {json.dumps(recommended_mix)}\\n\\n'
+            f'Allowed assessment styles: {json.dumps(allowed_styles)}\\n'
+            f'Recommended style mix: {json.dumps(recommended_mix)}\\n'
+            f'Required style order to follow: {json.dumps(style_sequence)}\\n\\n'
             'Output contract:\\n'
             '- Include fields: title, instructions, difficulty, target_level, questions.\\n'
-            '- For every question include: id, question_type, prompt, difficulty, confidence_prompt.\\n'
+            '- For every question include: id, assessment_style, question_type, prompt, model_answer, hints, difficulty, confidence_prompt.\\n'
+            '- assessment_style must be one of the allowed styles.\\n'
+            '- question_type must align to style mapping:\\n'
+            '  open_text->explain, short_answer->short_answer, multiple_choice->multiple_choice, flashcard->short_answer,\\n'
+            '  scenario->scenario, coding->scenario, debugging->error_spotting, code_completion->short_answer,\\n'
+            '  code_interpretation->explain, math_problem->short_answer.\\n'
             '- multiple_choice must include exactly 4 choices and answer_index 0..3.\\n'
-            '- short_answer/explain/scenario/error_spotting must include expected_concepts (>=1) and rubric criteria.\\n'
-            '- reflection should focus on confidence/metacognition and may have empty expected_concepts.\\n'
+            '- model_answer must be a concrete high-quality answer for the exact question, never generic guidance.\\n'
+            '- non-multiple-choice questions must include expected_concepts (>=1) and rubric criteria.\\n'
             '- Never return empty arrays for required conceptual fields.\\n'
             '- Keep question prompts concise and node-specific.\\n'
             '- Intro/foundation nodes must avoid advanced capstone asks.\\n\\n'
             'Valid example fragment:\\n'
-            '{\"id\":\"q_1\",\"question_type\":\"short_answer\",\"prompt\":\"...\",\"expected_concepts\":[\"x\"],'
+            '{\"id\":\"q_1\",\"assessment_style\":\"short_answer\",\"question_type\":\"short_answer\",\"prompt\":\"...\",'
+            '\"model_answer\":\"A concise but complete answer...\",\"hints\":[\"mention x clearly\"],\"expected_concepts\":[\"x\"],'
             '\"rubric\":[{\"concept\":\"x\",\"description\":\"...\",\"weight\":1.0}],\"difficulty\":2,'
-            '\"confidence_prompt\":\"How confident are you in your answer?\"}'
+            '\"confidence_prompt\":\"How sure are you about this answer?\"}'
         )
 
         def _repair(payload: dict[str, Any]) -> dict[str, Any]:
@@ -369,6 +514,7 @@ class AssessmentAgent:
                 skill_node=skill_node,
                 learner_level=learner_level,
                 question_count=question_count,
+                style_sequence=style_sequence,
             )
 
         try:
@@ -396,6 +542,8 @@ class AssessmentAgent:
             f'Skill description: {skill_node.description}\\n'
             f'Learner level: {learner_level}\\n'
             f'Generate exactly {max(4, min(question_count, 5))} concise questions across 3-5 types.\\n'
+            f'Allowed styles: {json.dumps(allowed_styles)}\\n'
+            f'Style order to follow: {json.dumps(style_sequence[:max(4, min(question_count, 5))])}\\n'
             'Prioritize correctness and schema validity over creativity.\\n'
             'Keep each question practical and tightly scoped to this node.'
         )
@@ -415,6 +563,7 @@ class AssessmentAgent:
                     skill_node=skill_node,
                     learner_level=learner_level,
                     question_count=fallback_count,
+                    style_sequence=style_sequence[:fallback_count],
                 ),
             )
             logger.warning(
@@ -444,6 +593,7 @@ class AssessmentAgent:
             skill_node=skill_node,
             learner_level=learner_level,
             question_count=max(4, min(question_count, 5)),
+            style_sequence=style_sequence[: max(4, min(question_count, 5))],
         )
         plan = AssessmentPlan.model_validate(deterministic)
         logger.warning(
@@ -474,6 +624,7 @@ class AssessmentAgent:
                     'id': f'q{row.id}',
                     'question_id': row.id,
                     'question_type': row.question_type.value,
+                    'assessment_style': row.assessment_style or 'short_answer',
                     'prompt': row.prompt,
                     'choices': row.choices or [],
                     'expected_concepts': row.expected_concepts or [],
@@ -485,6 +636,45 @@ class AssessmentAgent:
         serialized.sort(key=lambda item: item['order_index'])
         return serialized
 
+    def _build_answer_reveal(self, question: AssessmentQuestion) -> dict[str, Any]:
+        style = question.assessment_style or 'short_answer'
+        key_points = question.expected_concepts or []
+        if question.question_type == AssessmentQuestionType.reflection:
+            return {
+                'question_id': question.id,
+                'question_type': question.question_type.value,
+                'assessment_style': style,
+                'answer': 'Reflection prompt: there is no single correct answer.',
+                'key_points': [],
+            }
+        answer = (question.model_answer or '').strip()
+        if not answer or self._looks_like_guidance_not_answer(answer):
+            answer = self._fallback_model_answer(
+                assessment_style=style,
+                question_type=question.question_type.value,
+                prompt=question.prompt,
+                concepts=key_points,
+            )
+        if question.question_type == AssessmentQuestionType.multiple_choice:
+            rubric = question.rubric or {}
+            answer_index = rubric.get('answer_index')
+            choice_line = ''
+            if isinstance(answer_index, int) and question.choices and 0 <= answer_index < len(question.choices):
+                choice_line = f'Correct option: {answer_index + 1}) {question.choices[answer_index]}'
+            elif question.choices:
+                choice_line = f'Correct option: {question.choices[0]}'
+            if choice_line:
+                answer = f'{choice_line}\nWhy: {answer}'
+        hints = question.hints or []
+
+        return {
+            'question_id': question.id,
+            'question_type': question.question_type.value,
+            'assessment_style': style,
+            'answer': answer,
+            'key_points': list(dict.fromkeys(key_points + hints))[:6],
+        }
+
     async def generate_assessment(
         self,
         db: Session,
@@ -494,6 +684,7 @@ class AssessmentAgent:
         user_id: int,
         question_count: int = 6,
         regenerate: bool = False,
+        preferred_styles: list[str] | None = None,
     ) -> tuple[Assessment, AssessmentSource]:
         existing = self._active_assessment(db, user_id=user_id, skill_node_id=skill_node.id)
         if existing and not regenerate:
@@ -515,7 +706,23 @@ class AssessmentAgent:
         )
         learner_level = self._learner_level(user_state)
         difficulty_band = self._difficulty_band(skill_node.difficulty)
-        recommended_mix = self._recommended_mix(learner_level=learner_level, question_count=question_count)
+        allowed_styles = normalize_assessment_styles(preferred_styles or topic.allowed_assessment_styles)
+        learner_level_for_styles = normalize_starting_skill_level(learner_level)
+        style_sequence = build_assessment_style_sequence(
+            allowed_styles=allowed_styles,
+            question_count=question_count,
+            topic_text=f'{topic.name} {topic.description} {topic.goal}',
+            skill_text=f'{skill_node.name} {skill_node.description}',
+            learner_level=learner_level_for_styles,
+        )
+        recommended_mix = self._recommended_mix(style_sequence=style_sequence)
+        logger.info(
+            'assessment.style_plan topic_id=%s skill_id=%s allowed=%s sequence=%s',
+            topic.id,
+            skill_node.id,
+            allowed_styles,
+            style_sequence,
+        )
 
         prerequisite_ids = db.scalars(
             select(SkillEdge.parent_skill_id).where(
@@ -540,6 +747,8 @@ class AssessmentAgent:
             prerequisite_names=prerequisite_names,
             question_count=question_count,
             recommended_mix=recommended_mix,
+            style_sequence=style_sequence,
+            allowed_styles=allowed_styles,
         )
 
         questions = plan.questions[:question_count]
@@ -583,9 +792,12 @@ class AssessmentAgent:
             }
             row = AssessmentQuestion(
                 assessment_id=assessment.id,
+                assessment_style=question.assessment_style,
                 question_type=AssessmentQuestionType(question.question_type),
                 prompt=question.prompt,
                 choices=question.choices,
+                model_answer=question.model_answer,
+                hints=question.hints,
                 expected_concepts=question.expected_concepts,
                 rubric=rubric_payload,
                 difficulty=question.difficulty,
@@ -677,6 +889,7 @@ class AssessmentAgent:
         skill_node: SkillNode,
         user_id: int,
         responses: list[dict[str, Any]],
+        mastery_eligible: bool = True,
     ) -> AssessmentScoringResult:
         question_rows = db.scalars(
             select(AssessmentQuestion)
@@ -704,6 +917,7 @@ class AssessmentAgent:
                 {
                     'question_id': str(question.id),
                     'question_type': question.question_type.value,
+                    'assessment_style': question.assessment_style or 'short_answer',
                     'prompt': question.prompt,
                     'expected_concepts': question.expected_concepts or [],
                     'rubric': question.rubric or {},
@@ -790,6 +1004,8 @@ class AssessmentAgent:
             overall_score=overall_score,
             confidence_values=confidence_values,
         )
+        if not mastery_eligible:
+            mastery_delta = 0.0
 
         fallback_strengths = [
             item for scored in scored_questions for item in scored.strengths if item
@@ -814,11 +1030,17 @@ class AssessmentAgent:
             if evaluation
             else f'Overall score {round(overall_score * 100)}%. Continue with targeted review then reassess.'
         )
+        if not mastery_eligible:
+            summary = (
+                'Practice attempt completed. Mastery was not updated because answers were revealed for this assessment. '
+                'Generate a fresh assessment for mastery credit.'
+            )
 
         feedback_rows = [
             {
                 'question_id': item.question.id,
                 'question_type': item.question.question_type.value,
+                'assessment_style': item.question.assessment_style or 'short_answer',
                 'score': round(item.score, 3) if item.graded else None,
                 'confidence_score': round(item.confidence_score, 3) if item.confidence_score is not None else None,
                 'feedback': item.feedback,
@@ -834,6 +1056,8 @@ class AssessmentAgent:
             score=overall_score,
             confidence_avg=confidence_avg,
             mastery_delta=mastery_delta,
+            mastery_eligible=mastery_eligible,
+            practice_mode=not mastery_eligible,
             strengths=strengths,
             weaknesses=weaknesses,
             review_next=review_next,
@@ -869,13 +1093,14 @@ class AssessmentAgent:
         db.refresh(attempt)
 
         logger.info(
-            'assessment.scored assessment_id=%s user_id=%s attempt_id=%s score=%.3f confidence_avg=%.3f mastery_delta=%.3f',
+            'assessment.scored assessment_id=%s user_id=%s attempt_id=%s score=%.3f confidence_avg=%.3f mastery_delta=%.3f mastery_eligible=%s',
             assessment.id,
             user_id,
             attempt.id,
             overall_score,
             confidence_avg,
             mastery_delta,
+            mastery_eligible,
         )
 
         return AssessmentScoringResult(
@@ -889,6 +1114,8 @@ class AssessmentAgent:
             review_next=review_next,
             recommended_follow_up=recommended_follow_up,
             summary=summary,
+            mastery_eligible=mastery_eligible,
+            practice_mode=not mastery_eligible,
         )
 
     def get_assessment(self, db: Session, *, assessment_id: int, user_id: int) -> Assessment | None:
@@ -901,3 +1128,34 @@ class AssessmentAgent:
                 AssessmentAttempt.user_id == user_id,
             )
         )
+
+    def reveal_answers(
+        self,
+        db: Session,
+        *,
+        assessment: Assessment,
+        user_id: int,
+    ) -> list[dict[str, Any]]:
+        if assessment.user_id != user_id:
+            raise ValueError('Assessment does not belong to this user.')
+
+        rows = db.scalars(
+            select(AssessmentQuestion)
+            .where(AssessmentQuestion.assessment_id == assessment.id)
+            .order_by(AssessmentQuestion.order_index.asc())
+        ).all()
+        if not rows:
+            raise ValueError('Assessment has no questions to reveal.')
+
+        if not assessment.answers_revealed:
+            assessment.answers_revealed = True
+            assessment.answers_revealed_at = datetime.utcnow()
+            db.commit()
+            db.refresh(assessment)
+            logger.info(
+                'assessment.answers_revealed assessment_id=%s user_id=%s',
+                assessment.id,
+                user_id,
+            )
+
+        return [self._build_answer_reveal(row) for row in rows]

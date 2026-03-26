@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from statistics import mean
+from typing import Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import delete, select
@@ -16,6 +17,13 @@ from app.agents.resource_agent import ResourceAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.agents.tutor_agent import TutorAgent
 from app.api.auth import CurrentUser
+from app.core.course_preferences import (
+    assessment_question_count_for_depth,
+    normalize_assessment_styles,
+    normalize_course_depth,
+    normalize_starting_skill_level,
+)
+from app.core.config import get_settings
 from app.core.exceptions import ConfigurationError, ProviderError
 from app.db.database import get_db
 from app.db.models import (
@@ -25,6 +33,7 @@ from app.db.models import (
     AssessmentQuestion,
     AssessmentQuestionType,
     AssessmentResponse,
+    BranchSuggestion,
     Document,
     DocumentChunk,
     LearningResource,
@@ -45,6 +54,8 @@ from app.schemas.api import (
     AssessmentAttemptResponse,
     AssessmentDetailResponse,
     AssessmentGenerateRequest,
+    AssessmentRevealQuestionResponse,
+    AssessmentRevealResponse,
     AssessmentQuestionFeedbackResponse,
     AssessmentQuestionResponse,
     AssessmentSubmitRequest,
@@ -52,6 +63,9 @@ from app.schemas.api import (
     ChatRequest,
     ChatResponse,
     AppendTutorResponseToNoteRequest,
+    BranchSuggestionGenerateRequest,
+    BranchSuggestionListResponse,
+    BranchSuggestionResponse,
     SaveTutorResponseToNoteRequest,
     TutorNoteSaveResponse,
     DeepDiveBranchRequest,
@@ -122,6 +136,7 @@ topic_bootstrap_service = TopicBootstrapService(
     resource_agent=resource_agent,
     assessment_agent=assessment_agent,
 )
+settings = get_settings()
 
 
 def _raise_service_error(exc: Exception) -> None:
@@ -139,6 +154,9 @@ def _topic_to_response(topic: Topic) -> TopicResponse:
         name=topic.name,
         description=topic.description,
         goal=topic.goal,
+        course_depth=normalize_course_depth(topic.course_depth),
+        starting_skill_level=normalize_starting_skill_level(topic.starting_skill_level),
+        assessment_styles=normalize_assessment_styles(topic.allowed_assessment_styles),
         created_at=topic.created_at,
     )
 
@@ -188,6 +206,23 @@ def _note_to_response(note: Note) -> NoteResponse:
         body=note.body,
         created_at=note.created_at,
         updated_at=note.updated_at,
+    )
+
+
+def _branch_suggestion_to_response(suggestion: BranchSuggestion) -> BranchSuggestionResponse:
+    return BranchSuggestionResponse(
+        id=suggestion.id,
+        topic_id=suggestion.topic_id,
+        parent_skill_id=suggestion.parent_skill_id,
+        title=suggestion.title,
+        focus=suggestion.focus,
+        rationale=suggestion.rationale,
+        purpose=suggestion.purpose,
+        origin=suggestion.origin,
+        status=suggestion.status,
+        accepted_branch_root_skill_id=suggestion.accepted_branch_root_skill_id,
+        created_at=suggestion.created_at,
+        updated_at=suggestion.updated_at,
     )
 
 
@@ -404,6 +439,16 @@ def _assert_skill_unlocked_for_learning(db: Session, *, user_id: int, skill: Ski
     return state
 
 
+def _current_user_can_force_unlock(current_user: CurrentUser) -> bool:
+    if not settings.enable_dev_unlocks:
+        return False
+    if current_user.subscription_tier in {'dev', 'admin'}:
+        return True
+    if current_user.email.lower() in settings.dev_unlock_email_list:
+        return True
+    return False
+
+
 def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> SkillTreeResponse:
     nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
     edges = db.scalars(select(SkillEdge).where(SkillEdge.topic_id == topic.id)).all()
@@ -429,6 +474,8 @@ def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> Skill
         state = state_map.get(node.id)
         mastery = state.mastery if state else node.mastery_estimate
         node_status = state.status if state else node.status
+        if state and state.force_unlocked and node_status == SkillStatus.locked:
+            node_status = SkillStatus.available
         progress_state = state.progress_state if state else 'not_started'
         lesson_completed = bool(state.lesson_completed_at) if state else False
         exercises_completed = bool(state.exercises_completed_at) if state else False
@@ -461,9 +508,13 @@ def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> Skill
                 description=node.description,
                 difficulty=node.difficulty,
                 node_kind=node.node_kind,  # type: ignore[arg-type]
+                branch_origin=node.branch_origin,
+                branch_purpose=node.branch_purpose,
+                branch_depth=node.branch_depth,
                 branch_parent_skill_id=node.branch_parent_skill_id,
                 mastery_estimate=round(float(mastery), 3),
                 status=node_status,
+                force_unlocked=bool(state.force_unlocked) if state else False,
                 lock_reason=lock_reason,
                 progress_state=progress_state,  # type: ignore[arg-type]
                 lesson_completed=lesson_completed,
@@ -616,6 +667,7 @@ def _assessment_to_response(
         AssessmentQuestionResponse(
             id=row.id,
             question_type=row.question_type,
+            assessment_style=row.assessment_style or 'short_answer',
             prompt=row.prompt,
             choices=row.choices or [],
             expected_concepts=row.expected_concepts or [],
@@ -635,6 +687,8 @@ def _assessment_to_response(
         question_mix=assessment.question_mix or {},
         version=assessment.version,
         source=source,  # type: ignore[arg-type]
+        answers_revealed=bool(assessment.answers_revealed),
+        mastery_eligible=not bool(assessment.answers_revealed),
         questions=questions,
         created_at=assessment.created_at,
     )
@@ -661,6 +715,7 @@ def _attempt_to_response(db: Session, *, attempt: AssessmentAttempt) -> Assessme
             question_type=question_map[row.question_id].question_type
             if row.question_id in question_map
             else AssessmentQuestionType.short_answer,
+            assessment_style=question_map[row.question_id].assessment_style if row.question_id in question_map else 'short_answer',
             score=(
                 None
                 if row.question_id in question_map
@@ -681,6 +736,8 @@ def _attempt_to_response(db: Session, *, attempt: AssessmentAttempt) -> Assessme
         score=round(attempt.score, 3),
         confidence_avg=round(attempt.confidence_avg, 3),
         mastery_delta=round(attempt.mastery_delta, 3),
+        mastery_eligible=attempt.mastery_eligible is not False,
+        practice_mode=bool(attempt.practice_mode),
         strengths=attempt.strengths or [],
         weaknesses=attempt.weaknesses or [],
         review_next=attempt.review_next,
@@ -715,6 +772,9 @@ async def create_topic(
         name=payload.name.strip(),
         description=payload.description.strip(),
         goal=payload.goal.strip(),
+        course_depth=normalize_course_depth(payload.course_depth),
+        starting_skill_level=normalize_starting_skill_level(payload.starting_skill_level),
+        allowed_assessment_styles=normalize_assessment_styles(payload.assessment_styles),
     )
     db.add(topic)
     db.commit()
@@ -746,6 +806,9 @@ async def create_topic_and_initialize(
         name=payload.name.strip(),
         description=payload.description.strip(),
         goal=payload.goal.strip(),
+        course_depth=normalize_course_depth(payload.course_depth),
+        starting_skill_level=normalize_starting_skill_level(payload.starting_skill_level),
+        allowed_assessment_styles=normalize_assessment_styles(payload.assessment_styles),
     )
     db.add(topic)
     db.commit()
@@ -832,27 +895,35 @@ def delete_topic(
         raise HTTPException(status_code=400, detail='Set confirm=true to delete this topic.')
 
     skill_ids = db.scalars(select(SkillNode.id).where(SkillNode.topic_id == topic_id)).all()
-    assessment_ids = db.scalars(select(Assessment.id).where(Assessment.topic_id == topic_id)).all()
 
-    if assessment_ids:
-        attempt_ids = db.scalars(select(AssessmentAttempt.id).where(AssessmentAttempt.assessment_id.in_(assessment_ids))).all()
-        question_ids = db.scalars(
-            select(AssessmentQuestion.id).where(AssessmentQuestion.assessment_id.in_(assessment_ids))
-        ).all()
+    assessment_ids_subquery = select(Assessment.id).where(
+        Assessment.topic_id == topic_id,
+        Assessment.user_id == current_user.id,
+    )
+    assessment_attempt_ids_subquery = select(AssessmentAttempt.id).where(
+        AssessmentAttempt.assessment_id.in_(assessment_ids_subquery)
+    )
+    assessment_question_ids_subquery = select(AssessmentQuestion.id).where(
+        AssessmentQuestion.assessment_id.in_(assessment_ids_subquery)
+    )
 
-        if attempt_ids:
-            db.execute(delete(AssessmentFeedback).where(AssessmentFeedback.attempt_id.in_(attempt_ids)))
-            db.execute(delete(AssessmentResponse).where(AssessmentResponse.attempt_id.in_(attempt_ids)))
-            db.execute(delete(AssessmentAttempt).where(AssessmentAttempt.id.in_(attempt_ids)))
-
-        if question_ids:
-            db.execute(delete(AssessmentResponse).where(AssessmentResponse.question_id.in_(question_ids)))
-            db.execute(delete(AssessmentQuestion).where(AssessmentQuestion.id.in_(question_ids)))
+    # Delete assessment children first to avoid FK violations on assessment removal.
+    db.execute(delete(AssessmentFeedback).where(AssessmentFeedback.attempt_id.in_(assessment_attempt_ids_subquery)))
+    db.execute(delete(AssessmentResponse).where(AssessmentResponse.attempt_id.in_(assessment_attempt_ids_subquery)))
+    db.execute(delete(AssessmentResponse).where(AssessmentResponse.question_id.in_(assessment_question_ids_subquery)))
+    db.execute(delete(AssessmentAttempt).where(AssessmentAttempt.id.in_(assessment_attempt_ids_subquery)))
+    db.execute(delete(AssessmentQuestion).where(AssessmentQuestion.id.in_(assessment_question_ids_subquery)))
 
     db.execute(delete(ChatMessage).where(ChatMessage.topic_id == topic_id))
     db.execute(delete(ChatSession).where(ChatSession.topic_id == topic_id))
     db.execute(
         delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
+    )
+    db.execute(
+        delete(BranchSuggestion).where(
+            BranchSuggestion.topic_id == topic_id,
+            BranchSuggestion.user_id == current_user.id,
+        )
     )
     db.execute(delete(UserReminder).where(UserReminder.topic_id == topic_id, UserReminder.user_id == current_user.id))
     db.execute(delete(MilestoneEvent).where(MilestoneEvent.topic_id == topic_id, MilestoneEvent.user_id == current_user.id))
@@ -864,7 +935,7 @@ def delete_topic(
     db.execute(delete(Document).where(Document.topic_id == topic_id, Document.user_id == current_user.id))
     db.execute(delete(Note).where(Note.topic_id == topic_id, Note.user_id == current_user.id))
     db.execute(delete(LearningResource).where(LearningResource.topic_id == topic_id))
-    db.execute(delete(Assessment).where(Assessment.topic_id == topic_id, Assessment.user_id == current_user.id))
+    db.execute(delete(Assessment).where(Assessment.id.in_(assessment_ids_subquery)))
     db.execute(
         delete(TopicInitializationJob).where(
             TopicInitializationJob.topic_id == topic_id,
@@ -1483,6 +1554,9 @@ async def generate_assessment(
     if skill.topic_id != topic.id:
         raise HTTPException(status_code=400, detail='skill_node_id does not belong to this topic')
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    question_count = payload.question_count
+    if question_count is None:
+        question_count = assessment_question_count_for_depth(normalize_course_depth(topic.course_depth))
 
     try:
         assessment, source = await assessment_agent.generate_assessment(
@@ -1490,8 +1564,9 @@ async def generate_assessment(
             topic=topic,
             skill_node=skill,
             user_id=current_user.id,
-            question_count=payload.question_count,
+            question_count=question_count,
             regenerate=payload.regenerate,
+            preferred_styles=payload.assessment_styles or None,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
@@ -1533,6 +1608,7 @@ async def generate_quiz_compat(
             user_id=current_user.id,
             question_count=payload.num_questions,
             regenerate=regenerate,
+            preferred_styles=None,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
@@ -1585,6 +1661,7 @@ async def submit_assessment(
     skill = _get_skill_or_404(db, assessment.skill_node_id)
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
     unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    mastery_eligible = not assessment.answers_revealed
 
     try:
         scored = await assessment_agent.score_assessment(
@@ -1594,30 +1671,51 @@ async def submit_assessment(
             skill_node=skill,
             user_id=current_user.id,
             responses=[item.model_dump() for item in payload.responses],
+            mastery_eligible=mastery_eligible,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    updated_state = profile_agent.apply_assessment_result(
-        db,
-        user_id=current_user.id,
-        skill_node=skill,
-        score=scored.overall_score,
-        mastery_delta=scored.mastery_delta,
-        confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
-    )
-    _invalidate_recommendations(db, skill.topic_id, current_user.id)
-
-    tree = _build_skill_tree_response(db, topic, current_user.id)
-    unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
-    newly_unlocked_ids = sorted(set(unlocked_skill_ids) - unlocked_before)
-    if newly_unlocked_ids:
-        topic_bootstrap_service.prepare_unlocked_nodes(
-            topic_id=topic.id,
+    if mastery_eligible:
+        updated_state = profile_agent.apply_assessment_result(
+            db,
             user_id=current_user.id,
-            node_ids=newly_unlocked_ids,
+            skill_node=skill,
+            score=scored.overall_score,
+            mastery_delta=scored.mastery_delta,
+            confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
         )
-    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+        _invalidate_recommendations(db, skill.topic_id, current_user.id)
+
+        tree = _build_skill_tree_response(db, topic, current_user.id)
+        unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
+        newly_unlocked_ids = sorted(set(unlocked_skill_ids) - unlocked_before)
+        if newly_unlocked_ids:
+            topic_bootstrap_service.prepare_unlocked_nodes(
+                topic_id=topic.id,
+                user_id=current_user.id,
+                node_ids=newly_unlocked_ids,
+            )
+        _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+        skill_graph_agent.create_performance_branch_suggestion(
+            db,
+            topic=topic,
+            parent_node=skill,
+            user_id=current_user.id,
+            score=scored.overall_score,
+        )
+    else:
+        profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+        updated_state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == current_user.id,
+                UserSkillState.skill_node_id == skill.id,
+            )
+        )
+        if not updated_state:
+            raise HTTPException(status_code=500, detail='Unable to load user skill state.')
+        tree = _build_skill_tree_response(db, topic, current_user.id)
+        unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
 
     return AssessmentSubmitResponse(
         assessment_id=assessment.id,
@@ -1625,10 +1723,19 @@ async def submit_assessment(
         score=round(scored.overall_score, 3),
         confidence_avg=round(scored.confidence_avg, 3),
         mastery_delta=round(scored.mastery_delta, 3),
+        mastery_eligible=mastery_eligible,
+        mastery_applied=mastery_eligible,
+        practice_mode=not mastery_eligible,
+        outcome_message=(
+            'Practice attempt recorded. Mastery is unchanged because answers were revealed for this assessment.'
+            if not mastery_eligible
+            else 'Assessment submitted. Progress updated from your result.'
+        ),
         feedback=[
             AssessmentQuestionFeedbackResponse(
                 question_id=int(item['question_id']),
                 question_type=AssessmentQuestionType(item['question_type']),
+                assessment_style=str(item.get('assessment_style') or ''),
                 score=float(item['score']) if item.get('score') is not None else None,
                 confidence_score=item.get('confidence_score'),
                 feedback=item['feedback'],
@@ -1645,6 +1752,46 @@ async def submit_assessment(
         updated_status=updated_state.status,
         updated_progress_state=updated_state.progress_state,  # type: ignore[arg-type]
         unlocked_skill_ids=unlocked_skill_ids,
+    )
+
+
+@router.post('/assessments/{assessment_id}/reveal-answers', response_model=AssessmentRevealResponse)
+def reveal_assessment_answers(
+    assessment_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> AssessmentRevealResponse:
+    assessment = assessment_agent.get_assessment(db, assessment_id=assessment_id, user_id=current_user.id)
+    if not assessment:
+        raise HTTPException(status_code=404, detail='Assessment not found')
+
+    try:
+        reveals = assessment_agent.reveal_answers(
+            db,
+            assessment=assessment,
+            user_id=current_user.id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
+    return AssessmentRevealResponse(
+        assessment_id=assessment.id,
+        answers_revealed=True,
+        mastery_eligible=False,
+        warning=(
+            'Answers are now revealed. This assessment is practice-only and will not count toward mastery. '
+            'Generate a new assessment for a mastery-eligible attempt.'
+        ),
+        question_reveals=[
+            AssessmentRevealQuestionResponse(
+                question_id=int(item['question_id']),
+                question_type=AssessmentQuestionType(item['question_type']),
+                assessment_style=str(item.get('assessment_style') or ''),
+                answer=str(item.get('answer') or ''),
+                key_points=[str(point) for point in item.get('key_points', [])],
+            )
+            for item in reveals
+        ],
     )
 
 
@@ -1701,6 +1848,7 @@ async def submit_quiz_compat(
     topic = _get_topic_or_404(db, assessment.topic_id)
     skill = _get_skill_or_404(db, assessment.skill_node_id)
     unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    mastery_eligible = not assessment.answers_revealed
     scored = await assessment_agent.score_assessment(
         db,
         assessment=assessment,
@@ -1708,25 +1856,44 @@ async def submit_quiz_compat(
         skill_node=skill,
         user_id=current_user.id,
         responses=responses,
+        mastery_eligible=mastery_eligible,
     )
-    updated_state = profile_agent.apply_assessment_result(
-        db,
-        user_id=current_user.id,
-        skill_node=skill,
-        score=scored.overall_score,
-        mastery_delta=scored.mastery_delta,
-        confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
-    )
-    _invalidate_recommendations(db, skill.topic_id, current_user.id)
-    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
-    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
-    if newly_unlocked_ids:
-        topic_bootstrap_service.prepare_unlocked_nodes(
-            topic_id=topic.id,
+    if mastery_eligible:
+        updated_state = profile_agent.apply_assessment_result(
+            db,
             user_id=current_user.id,
-            node_ids=newly_unlocked_ids,
+            skill_node=skill,
+            score=scored.overall_score,
+            mastery_delta=scored.mastery_delta,
+            confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
         )
-    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+        _invalidate_recommendations(db, skill.topic_id, current_user.id)
+        unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+        newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+        if newly_unlocked_ids:
+            topic_bootstrap_service.prepare_unlocked_nodes(
+                topic_id=topic.id,
+                user_id=current_user.id,
+                node_ids=newly_unlocked_ids,
+            )
+        _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+        skill_graph_agent.create_performance_branch_suggestion(
+            db,
+            topic=topic,
+            parent_node=skill,
+            user_id=current_user.id,
+            score=scored.overall_score,
+        )
+    else:
+        profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+        updated_state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == current_user.id,
+                UserSkillState.skill_node_id == skill.id,
+            )
+        )
+        if not updated_state:
+            raise HTTPException(status_code=500, detail='Unable to load user skill state.')
 
     return QuizSubmitResponse(
         score=round(scored.overall_score, 3),
@@ -1770,6 +1937,48 @@ async def update_progress(
             user_id=current_user.id,
             node_ids=newly_unlocked_ids,
         )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+
+    return MasteryUpdateResponse(
+        skill_node_id=skill_id,
+        mastery=round(state.mastery, 3),
+        status=state.status,
+        progress_state=state.progress_state,  # type: ignore[arg-type]
+    )
+
+
+@router.post('/skills/{skill_id}/force-unlock', response_model=MasteryUpdateResponse)
+async def force_unlock_skill(
+    skill_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MasteryUpdateResponse:
+    if not _current_user_can_force_unlock(current_user):
+        raise HTTPException(status_code=403, detail='Dev unlock is not enabled for this account.')
+
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Skill node not found')
+
+    state = _get_or_create_state_for_skill(db, user_id=current_user.id, skill=skill)
+    state.force_unlocked = True
+    if state.progress_state == 'verified':
+        state.status = SkillStatus.mastered
+    elif state.progress_state in ('learning', 'completed'):
+        state.status = SkillStatus.in_progress
+    else:
+        state.status = SkillStatus.available
+    state.last_activity_at = datetime.utcnow()
+    db.commit()
+    db.refresh(state)
+
+    _invalidate_recommendations(db, topic.id, current_user.id)
+    topic_bootstrap_service.prepare_unlocked_nodes(
+        topic_id=topic.id,
+        user_id=current_user.id,
+        node_ids=[skill.id],
+    )
     _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
 
     return MasteryUpdateResponse(
@@ -1887,6 +2096,7 @@ def get_topic_retention_loop(
         streak_days=loop['streak_days'],
         activity_days_last_14=loop['activity_days_last_14'],
         latest_activity_at=loop['latest_activity_at'],
+        dev_unlock_enabled=_current_user_can_force_unlock(current_user),
     )
 
 
@@ -2005,6 +2215,8 @@ async def create_deep_dive_branch(
             user_id=current_user.id,
             focus=payload.focus.strip() or None,
             branch_size=payload.branch_size,
+            branch_origin='user_requested',
+            branch_purpose=payload.purpose,
         )
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
@@ -2022,3 +2234,143 @@ async def create_deep_dive_branch(
         )
     _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
     return _build_skill_tree_response(db, topic, current_user.id)
+
+
+@router.get('/skills/{skill_id}/branch-suggestions', response_model=BranchSuggestionListResponse)
+def list_branch_suggestions(
+    skill_id: int,
+    current_user: CurrentUser,
+    status_filter: Literal['pending', 'accepted', 'rejected', 'all'] = Query(default='pending'),
+    db: Session = Depends(get_db),
+) -> BranchSuggestionListResponse:
+    parent_skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, parent_skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+
+    stmt = select(BranchSuggestion).where(
+        BranchSuggestion.topic_id == topic.id,
+        BranchSuggestion.user_id == current_user.id,
+        BranchSuggestion.parent_skill_id == parent_skill.id,
+    )
+    if status_filter != 'all':
+        stmt = stmt.where(BranchSuggestion.status == status_filter)
+    suggestions = db.scalars(stmt.order_by(BranchSuggestion.created_at.desc())).all()
+    return BranchSuggestionListResponse(
+        suggestions=[_branch_suggestion_to_response(item) for item in suggestions]
+    )
+
+
+@router.post('/skills/{skill_id}/branch-suggestions/generate', response_model=BranchSuggestionListResponse)
+async def generate_branch_suggestions(
+    skill_id: int,
+    payload: BranchSuggestionGenerateRequest,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> BranchSuggestionListResponse:
+    parent_skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, parent_skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=parent_skill)
+
+    try:
+        await skill_graph_agent.suggest_branch_paths(
+            db,
+            topic=topic,
+            parent_node=parent_skill,
+            user_id=current_user.id,
+            limit=payload.limit,
+            trigger_event=payload.trigger_event,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
+    suggestions = db.scalars(
+        select(BranchSuggestion)
+        .where(
+            BranchSuggestion.topic_id == topic.id,
+            BranchSuggestion.user_id == current_user.id,
+            BranchSuggestion.parent_skill_id == parent_skill.id,
+            BranchSuggestion.status == 'pending',
+        )
+        .order_by(BranchSuggestion.created_at.desc())
+    ).all()
+    return BranchSuggestionListResponse(
+        suggestions=[_branch_suggestion_to_response(item) for item in suggestions]
+    )
+
+
+@router.post('/branch-suggestions/{suggestion_id}/accept', response_model=SkillTreeResponse)
+async def accept_branch_suggestion(
+    suggestion_id: int,
+    current_user: CurrentUser,
+    branch_size: int = Query(default=3, ge=2, le=5),
+    db: Session = Depends(get_db),
+) -> SkillTreeResponse:
+    suggestion = db.scalar(
+        select(BranchSuggestion).where(
+            BranchSuggestion.id == suggestion_id,
+            BranchSuggestion.user_id == current_user.id,
+        )
+    )
+    if not suggestion:
+        raise HTTPException(status_code=404, detail='Branch suggestion not found')
+    if suggestion.status == 'rejected':
+        raise HTTPException(status_code=400, detail='Branch suggestion was rejected and cannot be accepted.')
+
+    topic = _get_topic_or_404(db, suggestion.topic_id)
+    parent_skill = _get_skill_or_404(db, suggestion.parent_skill_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=parent_skill)
+
+    created_nodes: list[SkillNode] = []
+    if suggestion.status != 'accepted':
+        try:
+            created_nodes = await skill_graph_agent.create_deep_dive_branch(
+                db,
+                topic=topic,
+                parent_node=parent_skill,
+                user_id=current_user.id,
+                focus=suggestion.focus,
+                branch_size=branch_size,
+                branch_origin='system_suggested',
+                branch_purpose=suggestion.purpose,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _raise_service_error(exc)
+
+        suggestion.status = 'accepted'
+        suggestion.accepted_branch_root_skill_id = created_nodes[0].id if created_nodes else None
+        suggestion.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(suggestion)
+
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
+    profile_agent.recompute_unlocks(db, current_user.id, topic.id)
+    _invalidate_recommendations(db, topic.id, current_user.id)
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+    return _build_skill_tree_response(db, topic, current_user.id)
+
+
+@router.post('/branch-suggestions/{suggestion_id}/reject', response_model=BranchSuggestionResponse)
+def reject_branch_suggestion(
+    suggestion_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> BranchSuggestionResponse:
+    suggestion = db.scalar(
+        select(BranchSuggestion).where(
+            BranchSuggestion.id == suggestion_id,
+            BranchSuggestion.user_id == current_user.id,
+        )
+    )
+    if not suggestion:
+        raise HTTPException(status_code=404, detail='Branch suggestion not found')
+    if suggestion.status != 'accepted':
+        suggestion.status = 'rejected'
+        suggestion.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(suggestion)
+    return _branch_suggestion_to_response(suggestion)
