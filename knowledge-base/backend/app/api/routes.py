@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, select
+from sqlalchemy import delete, desc, select
 from sqlalchemy.orm import Session
 
 from app.agents.assessment_agent import AssessmentAgent
@@ -102,6 +103,8 @@ from app.schemas.api import (
     TopicCreateRequest,
     TopicInitializationResponse,
     TopicInitializationStatusResponse,
+    TopicPlausibilityCheckRequest,
+    TopicPlausibilityCheckResponse,
     TopicJournalEntryResponse,
     TopicJournalResponse,
     TopicListResponse,
@@ -121,10 +124,12 @@ from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 from app.services.retention import RetentionService
 from app.services.topic_bootstrap import TopicBootstrapService
+from app.services.topic_plausibility import TopicPlausibilityService
 from app.utils.text import extract_text_from_upload
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 embedding_service = EmbeddingService()
 retrieval_service = RetrievalService(embedding_service)
@@ -139,6 +144,7 @@ recommendation_agent = RecommendationAgent(llm_service, retrieval_service)
 resource_agent = ResourceAgent(llm_service, search_service, retrieval_service)
 assessment_agent = AssessmentAgent(llm_service)
 retention_service = RetentionService()
+topic_plausibility_service = TopicPlausibilityService(llm_service)
 topic_bootstrap_service = TopicBootstrapService(
     skill_graph_agent=skill_graph_agent,
     profile_agent=profile_agent,
@@ -147,6 +153,9 @@ topic_bootstrap_service = TopicBootstrapService(
     assessment_agent=assessment_agent,
 )
 settings = get_settings()
+
+
+_INIT_STAGE_TOTAL = 8
 
 
 def _raise_service_error(exc: Exception) -> None:
@@ -182,10 +191,58 @@ def _document_to_response(document: Document) -> DocumentItemResponse:
 
 def _topic_init_to_response(job: TopicInitializationJob) -> TopicInitializationStatusResponse:
     status_value = job.status if job.status in {'queued', 'running', 'ready', 'preloading', 'completed', 'failed'} else 'running'
+    stage_key = 'setup'
+    stage_label = 'Setting up your topic'
+    stage_index = 1
+    step = (job.current_step or '').strip().lower()
+
+    if status_value == 'failed':
+        stage_key = 'failed'
+        stage_label = 'Setup needs attention'
+        stage_index = _INIT_STAGE_TOTAL
+    elif status_value in {'ready', 'preloading', 'completed'}:
+        stage_key = 'ready' if status_value == 'ready' else 'preloading' if status_value == 'preloading' else 'complete'
+        stage_label = (
+            'Ready to start learning'
+            if status_value == 'ready'
+            else 'Preparing extra modules'
+            if status_value == 'preloading'
+            else 'Topic fully prepared'
+        )
+        stage_index = _INIT_STAGE_TOTAL
+    elif 'creating your learning path' in step:
+        stage_key = 'path'
+        stage_label = 'Creating your learning path'
+        stage_index = 2
+    elif 'setting up your starting path' in step:
+        stage_key = 'unlocks'
+        stage_label = 'Setting up your starting path'
+        stage_index = 3
+    elif 'preparing your first lesson' in step:
+        stage_key = 'lesson'
+        stage_label = 'Preparing your first lesson'
+        stage_index = 4
+    elif 'getting examples ready' in step:
+        stage_key = 'examples'
+        stage_label = 'Getting examples ready'
+        stage_index = 5
+    elif 'preparing your first activities' in step:
+        stage_key = 'activities'
+        stage_label = 'Preparing your first activities'
+        stage_index = 6
+    elif 'finalising your starting point' in step:
+        stage_key = 'finalising'
+        stage_label = 'Finalising your starting point'
+        stage_index = 7
+
     return TopicInitializationStatusResponse(
         topic_id=job.topic_id,
         status=status_value,  # type: ignore[arg-type]
         current_step=job.current_step or 'Initializing topic',
+        stage_key=stage_key,
+        stage_label=stage_label,
+        stage_index=stage_index,
+        stage_total=_INIT_STAGE_TOTAL,
         progress=round(max(0.0, min(1.0, float(job.progress or 0.0))), 3),
         ready_for_entry=bool(job.ready_for_entry),
         background_complete=bool(job.background_complete),
@@ -196,6 +253,20 @@ def _topic_init_to_response(job: TopicInitializationJob) -> TopicInitializationS
         ready_at=job.ready_at,
         completed_at=job.completed_at,
         updated_at=job.updated_at,
+    )
+
+
+def _raise_topic_clarification(result: TopicPlausibilityCheckResponse) -> None:
+    raise HTTPException(
+        status_code=422,
+        detail={
+            'code': 'topic_needs_clarification',
+            'message': (
+                'This topic appears to rely on a factual premise that may not be real. '
+                'Revise the topic, or continue with explicit fictional/hypothetical framing.'
+            ),
+            'plausibility': result.model_dump(),
+        },
     )
 
 
@@ -639,12 +710,143 @@ def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> Skill
     edges = db.scalars(select(SkillEdge).where(SkillEdge.topic_id == topic.id)).all()
     node_map = {node.id: node for node in nodes}
 
-    prereq_map: dict[int, list[int]] = {}
-    child_map: dict[int, list[int]] = {}
+    def _ordered_unique(items: list[int]) -> list[int]:
+        seen: set[int] = set()
+        ordered: list[int] = []
+        for value in items:
+            if value in seen:
+                continue
+            seen.add(value)
+            ordered.append(value)
+        return ordered
+
+    declared_prereq_map: dict[int, list[int]] = {node.id: [] for node in nodes}
     for edge in edges:
-        if edge.edge_type == 'prerequisite':
-            prereq_map.setdefault(edge.child_skill_id, []).append(edge.parent_skill_id)
-        child_map.setdefault(edge.parent_skill_id, []).append(edge.child_skill_id)
+        if edge.edge_type not in {'prerequisite', 'optional_branch'}:
+            continue
+        if edge.child_skill_id not in node_map or edge.parent_skill_id not in node_map:
+            continue
+        if edge.parent_skill_id == edge.child_skill_id:
+            continue
+        declared_prereq_map[edge.child_skill_id].append(edge.parent_skill_id)
+    declared_prereq_map = {
+        node_id: _ordered_unique(parent_ids)
+        for node_id, parent_ids in declared_prereq_map.items()
+    }
+
+    core_nodes = [node for node in nodes if node.node_kind == 'core']
+    core_nodes_sorted = sorted(core_nodes, key=lambda item: (item.difficulty, item.id))
+    core_index = {node.id: index for index, node in enumerate(core_nodes_sorted)}
+    core_ids = set(core_index.keys())
+
+    explicit_core_parent_map: dict[int, list[int]] = {}
+    for node in core_nodes_sorted:
+        explicit_core_parent_map[node.id] = [
+            parent_id
+            for parent_id in declared_prereq_map.get(node.id, [])
+            if parent_id in core_ids and core_index[parent_id] < core_index[node.id]
+        ]
+
+    explicit_roots = [
+        node
+        for node in core_nodes_sorted
+        if len(explicit_core_parent_map.get(node.id, [])) == 0
+    ]
+    root_core = explicit_roots[0] if explicit_roots else (core_nodes_sorted[0] if core_nodes_sorted else None)
+
+    prereq_map: dict[int, list[int]] = {}
+    orphan_repairs: list[dict[str, object]] = []
+    for node in nodes:
+        declared_parents = declared_prereq_map.get(node.id, [])
+        if node.node_kind != 'core':
+            prereq_map[node.id] = declared_parents[:2]
+            continue
+
+        if root_core and node.id == root_core.id:
+            prereq_map[node.id] = []
+            continue
+
+        valid_declared_core_parents = explicit_core_parent_map.get(node.id, [])
+        if valid_declared_core_parents:
+            chosen_parent = max(valid_declared_core_parents, key=lambda parent_id: core_index[parent_id])
+            prereq_map[node.id] = [chosen_parent]
+            continue
+
+        chosen_parent: int | None = None
+        reason: str = 'missing'
+        idx = core_index.get(node.id)
+        if idx is not None and idx > 0:
+            chosen_parent = core_nodes_sorted[idx - 1].id
+            reason = 'sequential_core_repair'
+        elif root_core and root_core.id != node.id:
+            chosen_parent = root_core.id
+            reason = 'root_core_repair'
+
+        if chosen_parent is None:
+            prereq_map[node.id] = []
+            orphan_repairs.append(
+                {
+                    'node_id': node.id,
+                    'node_title': node.name,
+                    'is_core_path': True,
+                    'declared_parent_ids': declared_parents,
+                    'repaired_parent_id': None,
+                    'repair_succeeded': False,
+                    'reason': reason,
+                }
+            )
+            continue
+
+        prereq_map[node.id] = [chosen_parent]
+        orphan_repairs.append(
+            {
+                'node_id': node.id,
+                'node_title': node.name,
+                'is_core_path': True,
+                'declared_parent_ids': declared_parents,
+                'repaired_parent_id': chosen_parent,
+                'repair_succeeded': True,
+                'reason': reason,
+            }
+        )
+
+    child_map: dict[int, list[int]] = {}
+    for child_id, parent_ids in prereq_map.items():
+        for parent_id in parent_ids:
+            child_map.setdefault(parent_id, []).append(child_id)
+    child_map = {
+        parent_id: _ordered_unique(child_ids)
+        for parent_id, child_ids in child_map.items()
+    }
+
+    core_nodes_without_parent = [
+        node.id
+        for node in core_nodes_sorted
+        if not prereq_map.get(node.id)
+    ]
+    if len(core_nodes_without_parent) > 1:
+        logger.error(
+            'skill_tree.graph.core_integrity_violation topic_id=%s root_candidates=%s',
+            topic.id,
+            core_nodes_without_parent,
+        )
+    for repair in orphan_repairs:
+        if repair['repair_succeeded']:
+            logger.warning(
+                'skill_tree.graph.orphan_core_node topic_id=%s node_id=%s repaired_parent_id=%s reason=%s',
+                topic.id,
+                repair['node_id'],
+                repair['repaired_parent_id'],
+                repair['reason'],
+            )
+        else:
+            logger.error(
+                'skill_tree.graph.orphan_core_node topic_id=%s node_id=%s repair_failed reason=%s declared_parents=%s',
+                topic.id,
+                repair['node_id'],
+                repair['reason'],
+                repair['declared_parent_ids'],
+            )
 
     state_map: dict[int, UserSkillState] = {}
     for state in db.scalars(
@@ -1123,12 +1325,34 @@ def list_topics(current_user: CurrentUser, db: Session = Depends(get_db)) -> Top
     return TopicListResponse(topics=[_topic_to_response(topic) for topic in topics])
 
 
+@router.post('/topics/plausibility-check', response_model=TopicPlausibilityCheckResponse)
+async def topic_plausibility_check(
+    payload: TopicPlausibilityCheckRequest,
+    current_user: CurrentUser,  # noqa: ARG001
+) -> TopicPlausibilityCheckResponse:
+    result = await topic_plausibility_service.evaluate(
+        name=payload.name.strip(),
+        description=payload.description.strip(),
+        goal=payload.goal.strip(),
+        topic_mode=payload.topic_mode,
+    )
+    return result
+
+
 @router.post('/topics', response_model=TopicResponse, status_code=status.HTTP_201_CREATED)
 async def create_topic(
     payload: TopicCreateRequest,
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> TopicResponse:
+    plausibility = await topic_plausibility_service.evaluate(
+        name=payload.name.strip(),
+        description=payload.description.strip(),
+        goal=payload.goal.strip(),
+        topic_mode=payload.topic_mode,
+    )
+    if plausibility.status in {'clarify', 'block'} and payload.topic_mode == 'factual':
+        _raise_topic_clarification(plausibility)
 
     topic = Topic(
         user_id=current_user.id,
@@ -1164,6 +1388,15 @@ async def create_topic_and_initialize(
     current_user: CurrentUser,
     db: Session = Depends(get_db),
 ) -> TopicInitializationResponse:
+    plausibility = await topic_plausibility_service.evaluate(
+        name=payload.name.strip(),
+        description=payload.description.strip(),
+        goal=payload.goal.strip(),
+        topic_mode=payload.topic_mode,
+    )
+    if plausibility.status in {'clarify', 'block'} and payload.topic_mode == 'factual':
+        _raise_topic_clarification(plausibility)
+
     topic = Topic(
         user_id=current_user.id,
         name=payload.name.strip(),
@@ -2824,7 +3057,10 @@ def list_branch_suggestions(
     )
     if status_filter != 'all':
         stmt = stmt.where(BranchSuggestion.status == status_filter)
-    suggestions = db.scalars(stmt.order_by(BranchSuggestion.created_at.desc())).all()
+    query = stmt.order_by(desc(BranchSuggestion.created_at))
+    if status_filter == 'pending':
+        query = query.limit(1)
+    suggestions = db.scalars(query).all()
     return BranchSuggestionListResponse(
         suggestions=[_branch_suggestion_to_response(item) for item in suggestions]
     )
@@ -2863,7 +3099,8 @@ async def generate_branch_suggestions(
             BranchSuggestion.parent_skill_id == parent_skill.id,
             BranchSuggestion.status == 'pending',
         )
-        .order_by(BranchSuggestion.created_at.desc())
+        .order_by(desc(BranchSuggestion.created_at))
+        .limit(1)
     ).all()
     return BranchSuggestionListResponse(
         suggestions=[_branch_suggestion_to_response(item) for item in suggestions]
@@ -2874,7 +3111,7 @@ async def generate_branch_suggestions(
 async def accept_branch_suggestion(
     suggestion_id: int,
     current_user: CurrentUser,
-    branch_size: int = Query(default=3, ge=2, le=5),
+    branch_size: int = Query(default=3, ge=1, le=5),
     db: Session = Depends(get_db),
 ) -> SkillTreeResponse:
     suggestion = db.scalar(
@@ -2913,6 +3150,18 @@ async def accept_branch_suggestion(
         suggestion.status = 'accepted'
         suggestion.accepted_branch_root_skill_id = created_nodes[0].id if created_nodes else None
         suggestion.updated_at = datetime.utcnow()
+        stale_pending = db.scalars(
+            select(BranchSuggestion).where(
+                BranchSuggestion.topic_id == topic.id,
+                BranchSuggestion.user_id == current_user.id,
+                BranchSuggestion.parent_skill_id == parent_skill.id,
+                BranchSuggestion.status == 'pending',
+                BranchSuggestion.id != suggestion.id,
+            )
+        ).all()
+        for stale in stale_pending:
+            stale.status = 'rejected'
+            stale.updated_at = datetime.utcnow()
         db.commit()
         db.refresh(suggestion)
 

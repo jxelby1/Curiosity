@@ -213,7 +213,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     setBranchError(skillId, '');
     try {
       const suggestions = await listBranchSuggestions(skillId, 'pending');
-      setBranchSuggestionsByNode((prev) => ({ ...prev, [skillId]: suggestions }));
+      setBranchSuggestionsByNode((prev) => ({ ...prev, [skillId]: suggestions.slice(0, 1) }));
     } catch (err) {
       setBranchError(skillId, err instanceof Error ? err.message : 'Failed to load branch suggestions.');
     } finally {
@@ -225,8 +225,8 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     setBranchLoading(skillId, true);
     setBranchError(skillId, '');
     try {
-      const suggestions = await generateBranchSuggestions({ skillId, limit: 2, trigger_event: 'manual' });
-      setBranchSuggestionsByNode((prev) => ({ ...prev, [skillId]: suggestions }));
+      const suggestions = await generateBranchSuggestions({ skillId, limit: 1, trigger_event: 'manual' });
+      setBranchSuggestionsByNode((prev) => ({ ...prev, [skillId]: suggestions.slice(0, 1) }));
     } catch (err) {
       setBranchError(skillId, err instanceof Error ? err.message : 'Failed to generate branch suggestions.');
     } finally {
@@ -248,7 +248,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
       const nextTree = await createDeepDiveBranch({
         skillId,
         focus: input.focus,
-        branch_size: 3,
+        branch_size: input.purpose === 'exploration' ? 1 : 3,
         purpose: input.purpose,
       });
       setTree(nextTree);
@@ -267,7 +267,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     setBranchActionLoading(skillId, true);
     setBranchError(skillId, '');
     try {
-      const nextTree = await acceptBranchSuggestion({ suggestionId, branch_size: 3 });
+      const nextTree = await acceptBranchSuggestion({ suggestionId });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
       await loadRecommendations(true);
@@ -525,7 +525,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
               <p className="text-xs uppercase tracking-[0.18em] text-black/58">Skill Constellation</p>
               <p className="mt-1 text-sm text-black/66">Follow the core trunk and grow optional offshoot branches as your interests evolve.</p>
               <p className="mt-1 text-xs text-black/52">
-                Select any unlocked node to continue learning or open the branch builder for deeper specialization.
+                Select an unlocked node to continue learning. Recommended branch opportunities appear one at a time in the inspector.
               </p>
             </div>
             {selectedNode && (
@@ -555,7 +555,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
               <span className="inline-flex h-2 w-2 rounded-full bg-violet-400" /> Optional branch
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span className="inline-flex h-2 w-2 rounded-full bg-fuchsia-400" /> Suggested branch
+              <span className="inline-flex h-2 w-2 rounded-full bg-fuchsia-400" /> Recommended branch (active)
             </span>
           </div>
 
@@ -567,7 +567,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
             topicId={topicId}
             node={selectedNode}
             prerequisites={selectedPrerequisites}
-            branchSuggestions={selectedNode ? branchSuggestionsByNode[selectedNode.id] || [] : []}
+            branchSuggestions={selectedNode ? (branchSuggestionsByNode[selectedNode.id] || []).slice(0, 1) : []}
             branchSuggestionsLoading={selectedNode ? !!branchSuggestionLoadingByNode[selectedNode.id] : false}
             branchActionLoading={selectedNode ? !!branchActionLoadingByNode[selectedNode.id] : false}
             branchError={selectedNode ? branchErrorByNode[selectedNode.id] || '' : ''}

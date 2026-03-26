@@ -16,6 +16,7 @@ class TopicCreateRequest(BaseModel):
     name: str = Field(min_length=2, max_length=120)
     description: str = Field(default='', max_length=500)
     goal: str = Field(default='', max_length=500)
+    topic_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
     course_depth: Literal['light', 'standard', 'deep_dive'] = 'standard'
     starting_skill_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
     assessment_styles: list[
@@ -79,6 +80,10 @@ class TopicInitializationStatusResponse(BaseModel):
     topic_id: int
     status: Literal['queued', 'running', 'ready', 'preloading', 'completed', 'failed']
     current_step: str
+    stage_key: str = 'setup'
+    stage_label: str = 'Setting up your topic'
+    stage_index: int = 1
+    stage_total: int = 8
     progress: float = Field(ge=0.0, le=1.0)
     ready_for_entry: bool = False
     background_complete: bool = False
@@ -94,6 +99,21 @@ class TopicInitializationStatusResponse(BaseModel):
 class TopicInitializationResponse(BaseModel):
     topic: TopicResponse
     initialization: TopicInitializationStatusResponse
+
+
+class TopicPlausibilityCheckRequest(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    description: str = Field(default='', max_length=500)
+    goal: str = Field(default='', max_length=500)
+    topic_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
+
+
+class TopicPlausibilityCheckResponse(BaseModel):
+    status: Literal['pass', 'clarify', 'block'] = 'pass'
+    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    reason: str = ''
+    suggested_reframe: str = ''
+    suggested_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
 
 
 class SkillNodeResponse(BaseModel):
@@ -128,12 +148,12 @@ class SkillTreeResponse(BaseModel):
 
 class DeepDiveBranchRequest(BaseModel):
     focus: str = Field(default='', max_length=240)
-    branch_size: int = Field(default=3, ge=2, le=5)
+    branch_size: int = Field(default=3, ge=1, le=5)
     purpose: Literal['exploration', 'specialization', 'enrichment', 'remediation', 'assessment_prep', 'project'] = 'exploration'
 
 
 class BranchSuggestionGenerateRequest(BaseModel):
-    limit: int = Field(default=2, ge=1, le=3)
+    limit: int = Field(default=1, ge=1, le=1)
     trigger_event: Literal['manual', 'assessment_performance', 'completion', 'interest'] = 'manual'
 
 

@@ -3,6 +3,7 @@ export type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified
 export type NoteType = 'personal' | 'lesson' | 'summary' | 'reflection' | 'reminder';
 export type CourseDepth = 'light' | 'standard' | 'deep_dive';
 export type StartingSkillLevel = 'beginner' | 'intermediate' | 'advanced';
+export type TopicMode = 'factual' | 'fictional' | 'hypothetical' | 'creative';
 export type AssessmentStyle =
   | 'open_text'
   | 'short_answer'
@@ -69,6 +70,10 @@ export interface TopicInitializationStatus {
   topic_id: number;
   status: TopicInitializationStatusType;
   current_step: string;
+  stage_key: string;
+  stage_label: string;
+  stage_index: number;
+  stage_total: number;
   progress: number;
   ready_for_entry: boolean;
   background_complete: boolean;
@@ -84,6 +89,14 @@ export interface TopicInitializationStatus {
 export interface TopicInitializationResult {
   topic: Topic;
   initialization: TopicInitializationStatus;
+}
+
+export interface TopicPlausibilityCheck {
+  status: 'pass' | 'clarify' | 'block';
+  confidence: number;
+  reason: string;
+  suggested_reframe: string;
+  suggested_mode: TopicMode;
 }
 
 export interface SkillNode {

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
 from app.core.course_preferences import (
@@ -23,6 +24,7 @@ from app.services.llm import LLMService
 
 logger = logging.getLogger(__name__)
 MAX_PREREQUISITES_PER_NODE = 2
+MAX_PENDING_BRANCH_SUGGESTIONS = 1
 
 
 class SkillGraphAgent:
@@ -87,6 +89,58 @@ class SkillGraphAgent:
                 break
             selected.append(sibling)
         return selected[:MAX_PREREQUISITES_PER_NODE]
+
+    @staticmethod
+    def _build_progressive_branch_prereq_map(
+        nodes: list[SkillPlanNode],
+    ) -> dict[str, list[str]]:
+        """
+        Ensure every generated deep-dive branch reads like a real sub-path:
+        first node anchors to parent, subsequent nodes progress downward by
+        inheriting a prerequisite from the previous branch node.
+        """
+        if not nodes:
+            return {}
+
+        key_position = {node.key: idx for idx, node in enumerate(nodes)}
+        prereq_map: dict[str, list[str]] = {}
+
+        for index, node in enumerate(nodes):
+            limited = SkillGraphAgent._limit_branch_prerequisites(
+                current_key=node.key,
+                keys=node.prerequisites,
+                key_position=key_position,
+            )
+            sibling_prereqs = [key for key in limited if key != 'parent']
+            wants_parent = 'parent' in limited
+
+            if index == 0:
+                prereq_map[node.key] = ['parent']
+                continue
+
+            previous_key = nodes[index - 1].key
+            next_prereqs: list[str] = [previous_key]
+
+            if wants_parent and len(next_prereqs) < MAX_PREREQUISITES_PER_NODE:
+                next_prereqs.append('parent')
+
+            for candidate in sibling_prereqs:
+                if candidate == previous_key or candidate in next_prereqs:
+                    continue
+                if len(next_prereqs) >= MAX_PREREQUISITES_PER_NODE:
+                    break
+                next_prereqs.append(candidate)
+
+            prereq_map[node.key] = next_prereqs[:MAX_PREREQUISITES_PER_NODE]
+
+        return prereq_map
+
+    @staticmethod
+    def _resolve_effective_branch_size(*, requested_size: int, branch_purpose: str) -> int:
+        # Exploration branches intentionally start as a single lightweight node.
+        if branch_purpose == 'exploration':
+            return 1
+        return max(1, min(5, requested_size))
 
     async def create_skill_tree(self, db: Session, topic: Topic) -> list[SkillNode]:
         course_depth = normalize_course_depth(topic.course_depth)
@@ -218,6 +272,11 @@ class SkillGraphAgent:
         branch_origin: str = 'user_requested',
         branch_purpose: str = 'exploration',
     ) -> list[SkillNode]:
+        effective_branch_size = self._resolve_effective_branch_size(
+            requested_size=branch_size,
+            branch_purpose=branch_purpose,
+        )
+
         user_state = db.scalar(
             select(UserSkillState).where(
                 UserSkillState.user_id == user_id,
@@ -250,7 +309,7 @@ class SkillGraphAgent:
             f'Learner level at parent node: {learner_level}\n'
             f'User focus request: {focus or "None"}\n'
             f'Existing optional branch nodes under this parent: {existing_branch_names}\n\n'
-            f'Generate {branch_size} optional branch nodes.\n'
+            f'Generate {effective_branch_size} optional branch nodes.\n'
             'Requirements:\n'
             '- The branch must be clearly optional.\n'
             '- Keep scope tightly tied to the parent node.\n'
@@ -283,25 +342,21 @@ class SkillGraphAgent:
                 continue
             seen_keys.add(node.key)
             unique_nodes.append(node)
-            if len(unique_nodes) >= branch_size:
+            if len(unique_nodes) >= effective_branch_size:
                 break
 
-        if len(unique_nodes) < 2:
+        if len(unique_nodes) < 1:
+            raise ValueError('Deep-dive generation returned no unique optional nodes.')
+        if len(unique_nodes) < effective_branch_size:
             raise ValueError('Deep-dive generation returned too few unique optional nodes.')
 
-        key_position = {node.key: idx for idx, node in enumerate(unique_nodes)}
-        prereq_map: dict[str, list[str]] = {}
-        for node in unique_nodes:
-            prereq_map[node.key] = self._limit_branch_prerequisites(
-                current_key=node.key,
-                keys=node.prerequisites,
-                key_position=key_position,
-            )
+        prereq_map = self._build_progressive_branch_prereq_map(unique_nodes)
 
         key_to_node: dict[str, SkillNode] = {}
         created_nodes: list[SkillNode] = []
 
-        for node in unique_nodes:
+        parent_depth = parent_node.branch_depth or 0
+        for index, node in enumerate(unique_nodes):
             has_internal_prereq = any(item != 'parent' for item in prereq_map[node.key])
             status = SkillStatus.locked if has_internal_prereq else SkillStatus.available
             record = SkillNode(
@@ -309,7 +364,7 @@ class SkillGraphAgent:
                 node_kind='optional_branch',
                 branch_origin=branch_origin,
                 branch_purpose=branch_purpose,
-                branch_depth=max(1, (parent_node.branch_depth or 0) + 1),
+                branch_depth=max(1, parent_depth + index + 1),
                 branch_parent_skill_id=parent_node.id,
                 name=node.name,
                 description=node.description,
@@ -383,12 +438,17 @@ class SkillGraphAgent:
             db.refresh(node)
 
         logger.info(
-            'skill_graph.deep_dive_created topic_id=%s parent_skill_id=%s node_count=%s origin=%s purpose=%s',
+            (
+                'skill_graph.deep_dive_created topic_id=%s parent_skill_id=%s node_count=%s '
+                'origin=%s purpose=%s requested_size=%s effective_size=%s'
+            ),
             topic.id,
             parent_node.id,
             len(created_nodes),
             branch_origin,
             branch_purpose,
+            branch_size,
+            effective_branch_size,
         )
         return created_nodes
 
@@ -399,10 +459,11 @@ class SkillGraphAgent:
         topic: Topic,
         parent_node: SkillNode,
         user_id: int,
-        limit: int = 2,
+        limit: int = 1,
         trigger_event: str = 'manual',
     ) -> list[BranchSuggestion]:
-        limit = max(1, min(3, int(limit)))
+        _ = limit
+        limit = MAX_PENDING_BRANCH_SUGGESTIONS
 
         pending = db.scalars(
             select(BranchSuggestion).where(
@@ -411,8 +472,15 @@ class SkillGraphAgent:
                 BranchSuggestion.parent_skill_id == parent_node.id,
                 BranchSuggestion.status == 'pending',
             )
+            .order_by(desc(BranchSuggestion.created_at))
         ).all()
-        if len(pending) >= limit:
+        if len(pending) > limit:
+            for stale in pending[limit:]:
+                stale.status = 'rejected'
+                stale.updated_at = datetime.utcnow()
+            db.commit()
+            pending = pending[:limit]
+        if pending:
             return pending[:limit]
 
         learner_state = db.scalar(
@@ -434,7 +502,7 @@ class SkillGraphAgent:
             f'Parent description: {parent_node.description}\n'
             f'Learner level: {learner_level}\n'
             f'Trigger event: {trigger_event}\n'
-            f'Provide {limit} optional branch suggestions.\n'
+            f'Provide exactly {limit} optional branch suggestion.\n'
             'Each suggestion must include: title, focus, rationale, purpose.\n'
             'purpose must be one of: enrichment, remediation, specialization, exploration, assessment_prep, project.'
         )
@@ -518,9 +586,9 @@ class SkillGraphAgent:
                 BranchSuggestion.topic_id == topic.id,
                 BranchSuggestion.user_id == user_id,
                 BranchSuggestion.parent_skill_id == parent_node.id,
-                BranchSuggestion.purpose == purpose,
                 BranchSuggestion.status == 'pending',
             )
+            .order_by(desc(BranchSuggestion.created_at))
         )
         if existing_pending:
             return existing_pending

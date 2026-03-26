@@ -72,7 +72,7 @@ class DeepDivePlanNode(BaseModel):
 class DeepDiveBranchPlan(BaseModel):
     branch_title: str = Field(min_length=4, max_length=180)
     rationale: str = Field(min_length=20, max_length=400)
-    nodes: list[DeepDivePlanNode] = Field(min_length=2, max_length=6)
+    nodes: list[DeepDivePlanNode] = Field(min_length=1, max_length=6)
 
 
 class BranchSuggestionPlanItem(BaseModel):
@@ -83,7 +83,7 @@ class BranchSuggestionPlanItem(BaseModel):
 
 
 class BranchSuggestionPlan(BaseModel):
-    suggestions: list[BranchSuggestionPlanItem] = Field(min_length=1, max_length=4)
+    suggestions: list[BranchSuggestionPlanItem] = Field(min_length=1, max_length=1)
 
 
 class RecommendationChoice(BaseModel):
@@ -176,6 +176,13 @@ class TutorReplyPlan(BaseModel):
 class TopicRelevancePlan(BaseModel):
     relevance: Literal['relevant', 'related', 'unrelated']
     rationale: str = Field(min_length=10, max_length=280)
+
+
+class TopicPlausibilityPlan(BaseModel):
+    status: Literal['pass', 'clarify', 'block']
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(min_length=12, max_length=320)
+    suggested_reframe: str = Field(min_length=12, max_length=280)
 
 
 AssessmentQuestionTypeLiteral = Literal[

@@ -24,6 +24,8 @@ import {
   SkillTree,
   Topic,
   TopicInitializationResult,
+  TopicMode,
+  TopicPlausibilityCheck,
   TopicInitializationStatus,
   TopicProgress,
   TutorNoteSaveResult,
@@ -56,8 +58,35 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    const message = detail || `Request failed (${response.status})`;
+    let message = `Request failed (${response.status})`;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        const payload = await response.json();
+        const detail = payload?.detail;
+        if (typeof detail === 'string' && detail.trim()) {
+          message = detail;
+        } else if (detail && typeof detail === 'object') {
+          const nested = detail.message || detail.reason || detail.code;
+          if (typeof nested === 'string' && nested.trim()) {
+            message = nested;
+          } else {
+            message = JSON.stringify(detail);
+          }
+        } else if (typeof payload?.message === 'string' && payload.message.trim()) {
+          message = payload.message;
+        } else if (typeof payload?.error === 'string' && payload.error.trim()) {
+          message = payload.error;
+        }
+      } catch {
+        const detail = await response.text();
+        if (detail.trim()) message = detail;
+      }
+    } else {
+      const detail = await response.text();
+      if (detail.trim()) message = detail;
+    }
+
     if (response.status === 401) {
       throw new Error(`Unauthorized: ${message}`);
     }
@@ -137,6 +166,7 @@ export async function createTopic(input: {
   name: string;
   description?: string;
   goal?: string;
+  topic_mode?: TopicMode;
   course_depth?: CourseDepth;
   starting_skill_level?: StartingSkillLevel;
   assessment_styles?: AssessmentStyle[];
@@ -148,6 +178,7 @@ export async function createTopic(input: {
       name: input.name,
       description: input.description ?? '',
       goal: input.goal ?? '',
+      topic_mode: input.topic_mode ?? 'factual',
       course_depth: input.course_depth ?? 'standard',
       starting_skill_level: input.starting_skill_level ?? 'beginner',
       assessment_styles: input.assessment_styles ?? []
@@ -159,6 +190,7 @@ export async function createTopicAndInitialize(input: {
   name: string;
   description?: string;
   goal?: string;
+  topic_mode?: TopicMode;
   course_depth?: CourseDepth;
   starting_skill_level?: StartingSkillLevel;
   assessment_styles?: AssessmentStyle[];
@@ -170,10 +202,29 @@ export async function createTopicAndInitialize(input: {
       name: input.name,
       description: input.description ?? '',
       goal: input.goal ?? '',
+      topic_mode: input.topic_mode ?? 'factual',
       course_depth: input.course_depth ?? 'standard',
       starting_skill_level: input.starting_skill_level ?? 'beginner',
       assessment_styles: input.assessment_styles ?? []
     })
+  });
+}
+
+export async function checkTopicPlausibility(input: {
+  name: string;
+  description?: string;
+  goal?: string;
+  topic_mode?: TopicMode;
+}): Promise<TopicPlausibilityCheck> {
+  return request<TopicPlausibilityCheck>('/topics/plausibility-check', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: input.name,
+      description: input.description ?? '',
+      goal: input.goal ?? '',
+      topic_mode: input.topic_mode ?? 'factual',
+    }),
   });
 }
 
@@ -485,13 +536,15 @@ export async function createDeepDiveBranch(input: {
   branch_size?: number;
   purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project';
 }): Promise<SkillTree> {
+  const resolvedPurpose = input.purpose ?? 'exploration';
+  const resolvedBranchSize = input.branch_size ?? (resolvedPurpose === 'exploration' ? 1 : 3);
   return request<SkillTree>(`/skills/${input.skillId}/deep-dive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       focus: input.focus ?? '',
-      branch_size: input.branch_size ?? 3,
-      purpose: input.purpose ?? 'exploration'
+      branch_size: resolvedBranchSize,
+      purpose: resolvedPurpose
     })
   });
 }
@@ -515,7 +568,7 @@ export async function generateBranchSuggestions(input: {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      limit: input.limit ?? 2,
+      limit: input.limit ?? 1,
       trigger_event: input.trigger_event ?? 'manual',
     }),
   });
@@ -526,7 +579,7 @@ export async function acceptBranchSuggestion(input: {
   suggestionId: number;
   branch_size?: number;
 }): Promise<SkillTree> {
-  const query = `?branch_size=${input.branch_size ?? 3}`;
+  const query = input.branch_size ? `?branch_size=${input.branch_size}` : '';
   return request<SkillTree>(`/branch-suggestions/${input.suggestionId}/accept${query}`, {
     method: 'POST',
   });

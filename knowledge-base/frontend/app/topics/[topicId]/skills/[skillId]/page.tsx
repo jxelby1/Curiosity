@@ -436,7 +436,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            branchSuggestions: suggestions,
+            branchSuggestions: suggestions.slice(0, 1),
           },
         };
       });
@@ -457,7 +457,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     try {
       const suggestions = await generateBranchSuggestions({
         skillId: nodeId,
-        limit: 2,
+        limit: 1,
         trigger_event: 'manual',
       });
       setContentCache((prev) => {
@@ -466,7 +466,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            branchSuggestions: suggestions,
+            branchSuggestions: suggestions.slice(0, 1),
           },
         };
       });
@@ -485,7 +485,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     try {
       const nextTree = await acceptBranchSuggestion({
         suggestionId,
-        branch_size: 3,
       });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
@@ -497,7 +496,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            branchSuggestions: suggestions,
+            branchSuggestions: suggestions.slice(0, 1),
           },
         };
       });
@@ -522,7 +521,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           ...prev,
           [nodeId]: {
             ...nodeCache,
-            branchSuggestions: suggestions,
+            branchSuggestions: suggestions.slice(0, 1),
           },
         };
       });
@@ -742,7 +741,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       const nextTree = await createDeepDiveBranch({
         skillId: nodeId,
         focus: deepDiveFocus.trim() || undefined,
-        branch_size: 3,
+        branch_size: deepDivePurpose === 'exploration' ? 1 : 3,
         purpose: deepDivePurpose,
       });
       setTree(nextTree);
@@ -930,12 +929,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   <div className="flex items-start justify-between gap-2">
                     <p className="font-semibold leading-snug">{node.name}</p>
                     <div className="flex flex-wrap items-center gap-1">
-                  {node.node_kind === 'optional_branch' && (
-                        <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional</span>
+                      {node.node_kind === 'optional_branch' && (
+                        <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional path</span>
                       )}
                       {node.node_kind === 'optional_branch' && node.branch_origin !== 'core' && (
                         <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
-                          {node.branch_origin === 'system_suggested' ? 'Suggested' : 'Custom'}
+                          {node.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
                         </span>
                       )}
                       <span className={`badge border ${statusClasses(node.status)}`}>{node.status.replace('_', ' ')}</span>
@@ -991,11 +990,11 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
               <div className="flex items-center gap-2">
                 {selectedSkill.node_kind === 'optional_branch' && (
-                  <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional branch</span>
+                  <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional path</span>
                 )}
                 {selectedSkill.node_kind === 'optional_branch' && selectedSkill.branch_origin !== 'core' && (
                   <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
-                    {selectedSkill.branch_origin === 'system_suggested' ? 'System suggestion' : 'User created'}
+                    {selectedSkill.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
                   </span>
                 )}
                 <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
@@ -1154,18 +1153,18 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
               <section className="rounded-xl border border-black/10 bg-white p-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Suggested Side Branches</h3>
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Branch Opportunity</h3>
                   <button
                     type="button"
                     className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
                     onClick={handleGenerateBranchSuggestions}
                     disabled={branchSuggestionsLoading || branchSuggestionsActionLoading || isLocked}
                   >
-                    {branchSuggestionsLoading ? 'Generating...' : 'Refresh suggestions'}
+                    {branchSuggestionsLoading ? 'Generating...' : 'Refresh suggestion'}
                   </button>
                 </div>
                 <p className="muted mt-2 text-sm">
-                  Optional paths tailored to this node. Accept a suggestion to grow your tree with a focused offshoot.
+                  This recommendation is not part of your tree yet. Accept it to convert it into an active optional path.
                 </p>
                 {branchSuggestionsError && <p className="mt-2 text-sm text-red-700">{branchSuggestionsError}</p>}
                 <div className="mt-3 space-y-2">
@@ -1188,7 +1187,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
                           disabled={branchSuggestionsActionLoading}
                         >
-                          Accept branch
+                          Add branch
                         </button>
                         <button
                           type="button"
@@ -1196,14 +1195,14 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           onClick={() => handleRejectBranchSuggestion(suggestion.id)}
                           disabled={branchSuggestionsActionLoading}
                         >
-                          Dismiss
+                          Not now
                         </button>
                       </div>
                     </article>
                   ))}
                   {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
                     <p className="muted text-xs">
-                      No pending suggestions yet. Use “Refresh suggestions” or create your own optional branch above.
+                      No recommendation at the moment. Refresh to request one, or create your own optional branch above.
                     </p>
                   )}
                 </div>

@@ -30,7 +30,7 @@ def _apply_lightweight_migrations() -> None:
         'ALTER TABLE skill_nodes ADD COLUMN IF NOT EXISTS branch_parent_skill_id INTEGER NULL',
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS course_depth VARCHAR(30) DEFAULT 'standard'",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS starting_skill_level VARCHAR(30) DEFAULT 'beginner'",
-        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS allowed_assessment_styles JSON DEFAULT '[\"open_text\",\"short_answer\",\"multiple_choice\",\"flashcard\",\"scenario\",\"coding\",\"debugging\",\"code_completion\",\"code_interpretation\",\"math_problem\"]'::json",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS allowed_assessment_styles JSON DEFAULT '[\"short_answer\",\"multiple_choice\",\"flashcard\"]'::json",
         'ALTER TABLE documents ADD COLUMN IF NOT EXISTS note_id INTEGER NULL',
         "ALTER TABLE user_skill_states ADD COLUMN IF NOT EXISTS progress_state VARCHAR(40) DEFAULT 'not_started'",
         'ALTER TABLE user_skill_states ADD COLUMN IF NOT EXISTS force_unlocked BOOLEAN DEFAULT FALSE',
@@ -87,3 +87,8 @@ def _apply_lightweight_migrations() -> None:
     with engine.begin() as conn:
         for statement in statements:
             conn.execute(text(statement))
+        conn.execute(
+            text(
+                "ALTER TABLE topics ALTER COLUMN allowed_assessment_styles SET DEFAULT '[\"short_answer\",\"multiple_choice\",\"flashcard\"]'::json"
+            )
+        )
