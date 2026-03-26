@@ -518,16 +518,14 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
         </article>
       </section>
 
-      <section className="mb-7 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_340px]">
-        <article className="rounded-3xl border border-black/10 bg-[linear-gradient(165deg,rgba(255,255,255,0.94),rgba(241,249,236,0.9))] p-4 shadow-[0_20px_52px_rgba(16,19,33,0.14)] md:p-5">
-          <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+      <section className="mb-7 grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)] xl:grid-cols-[minmax(0,1.68fr)_minmax(340px,1fr)]">
+        <article className="rounded-3xl border border-black/10 bg-[linear-gradient(165deg,rgba(255,255,255,0.95),rgba(241,249,236,0.9))] p-4 shadow-[0_20px_52px_rgba(16,19,33,0.14)] md:p-5">
+          <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-[0.18em] text-black/58">Skill Constellation</p>
-              <p className="mt-1 text-sm text-black/66">
-                Follow the core trunk, then branch into optional offshoots as your interests evolve.
-              </p>
+              <p className="mt-1 text-sm text-black/66">Follow the core trunk and grow optional offshoot branches as your interests evolve.</p>
               <p className="mt-1 text-xs text-black/52">
-                Select a node and use <span className="font-semibold">Create branch</span> in the side panel to personalize your path.
+                Select any unlocked node to continue learning or open the branch builder for deeper specialization.
               </p>
             </div>
             {selectedNode && (
@@ -540,7 +538,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
             )}
           </div>
 
-          <div className="mb-4 flex flex-wrap items-center gap-3 text-[11px] uppercase tracking-[0.16em] text-black/60">
+          <div className="mb-3 flex flex-wrap items-center gap-2.5 text-[10px] uppercase tracking-[0.14em] text-black/58">
             <span className="inline-flex items-center gap-1.5">
               <span className="inline-flex h-2 w-2 rounded-full bg-zinc-400" /> Locked
             </span>
@@ -564,7 +562,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
           <PremiumSkillTree nodes={tree.nodes} selectedNodeId={selectedNodeId} onSelectNode={setSelectedNodeId} />
         </article>
 
-        <div className="lg:sticky lg:top-6">
+        <div className="lg:sticky lg:top-4">
           <SkillNodeInspector
             topicId={topicId}
             node={selectedNode}

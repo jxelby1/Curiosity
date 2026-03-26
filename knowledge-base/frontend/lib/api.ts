@@ -11,6 +11,7 @@ import {
   CourseDepth,
   ChatReply,
   DocumentItem,
+  ExerciseCompletionList,
   ExternalResource,
   ForgotPasswordResult,
   NoteType,
@@ -28,6 +29,7 @@ import {
   TutorNoteSaveResult,
   ResetPasswordResult,
   StartingSkillLevel,
+  TopicJournal,
   TopicRetentionLoop,
   UserProgressSummary
 } from '@/lib/types';
@@ -244,6 +246,10 @@ export async function listNotes(
   return data.notes;
 }
 
+export async function getTopicJournal(topicId: string | number): Promise<TopicJournal> {
+  return request<TopicJournal>(`/topics/${topicId}/journal`);
+}
+
 export async function createNote(input: {
   topic_id: number;
   title?: string;
@@ -338,6 +344,25 @@ export async function generateResource(input: {
 export async function getExternalResources(skillId: number): Promise<ExternalResource[]> {
   const data = await request<{ resources: ExternalResource[] }>(`/skills/${skillId}/resources/external`);
   return data.resources;
+}
+
+export async function getExerciseCompletions(skillId: number): Promise<ExerciseCompletionList> {
+  return request<ExerciseCompletionList>(`/skills/${skillId}/exercises/completions`);
+}
+
+export async function completeExercise(input: {
+  skillId: number;
+  exerciseIndex: number;
+  proofFile?: File | null;
+}): Promise<ExerciseCompletionList> {
+  const formData = new FormData();
+  if (input.proofFile) {
+    formData.append('proof', input.proofFile);
+  }
+  return request<ExerciseCompletionList>(`/skills/${input.skillId}/exercises/${input.exerciseIndex}/complete`, {
+    method: 'POST',
+    body: formData,
+  });
 }
 
 export async function generateAssessment(input: {

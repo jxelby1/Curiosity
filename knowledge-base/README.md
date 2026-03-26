@@ -139,6 +139,17 @@ Assessment moved from simple MCQ quiz to mixed-type evaluation.
 - Mastery updates are based on assessment performance (confidence input is not required in the user flow)
 - Reflection questions are recorded with attempts but excluded from grading and score calculations
 
+### Assessment readiness guardrail
+
+Assessment generation is now grounded to in-app taught material:
+
+- lesson/examples are ensured before assessment generation
+- assessment prompts include explicit taught-concept coverage context
+- non-reflection expected concepts are normalized to taught concepts
+- out-of-scope concept drift is repaired toward taught coverage
+
+Rule of thumb: a diligent learner should be able to pass from lesson + examples without external reading.
+
 ### Feedback returned
 
 - overall score
@@ -273,6 +284,23 @@ Current triggers include:
 
 Users can acknowledge milestones, and acknowledged events are hidden from celebration UI.
 
+## Exercise progress + topic project journal
+
+Exercises now use per-item completion tracking (not all-or-nothing):
+
+- each module is capped at 2 exercises
+- each exercise can be completed independently
+- optional proof upload (image/PDF) can be attached per exercise completion
+- module exercise progress is derived from per-exercise completions
+
+Notes now include a richer topic project journal view:
+
+- chronological record of notes
+- exercise completions (+ proof artifacts)
+- module completion events
+- assessment attempts/results
+- milestones
+
 ## Key APIs
 
 ### Topics / learning flow
@@ -287,6 +315,9 @@ Users can acknowledge milestones, and acknowledged events are hidden from celebr
 - `POST /api/topics/{topic_id}/skill-tree/generate`
 - `POST /api/skills/{skill_id}/resources/generate`
 - `GET /api/skills/{skill_id}/resources/external`
+- `GET /api/skills/{skill_id}/exercises/completions`
+- `POST /api/skills/{skill_id}/exercises/{exercise_index}/complete`
+- `GET /api/exercise-completions/{completion_id}/proof`
 - `GET /api/topics/{topic_id}/recommendations`
 - `POST /api/skills/{skill_id}/progress/update`
 - `POST /api/skills/{skill_id}/deep-dive`
@@ -299,6 +330,7 @@ Users can acknowledge milestones, and acknowledged events are hidden from celebr
 
 - `POST /api/topics/{topic_id}/chat`
 - `GET /api/topics/{topic_id}/notes`
+- `GET /api/topics/{topic_id}/journal`
 - `POST /api/topics/{topic_id}/notes`
 - `PUT /api/notes/{note_id}`
 - `DELETE /api/notes/{note_id}`

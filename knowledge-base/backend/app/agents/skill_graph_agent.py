@@ -22,6 +22,7 @@ from app.services.llm import LLMService
 
 
 logger = logging.getLogger(__name__)
+MAX_PREREQUISITES_PER_NODE = 2
 
 
 class SkillGraphAgent:
@@ -36,6 +37,56 @@ class SkillGraphAgent:
         if state.progress_state in ('learning', 'completed') or state.mastery >= 0.35:
             return 'intermediate'
         return 'beginner'
+
+    @staticmethod
+    def _limit_core_prerequisites(
+        current_key: str,
+        keys: list[str],
+        key_position: dict[str, int],
+    ) -> list[str]:
+        unique: list[str] = []
+        for key in keys:
+            normalized = key.strip().lower()
+            if (
+                not normalized
+                or normalized == current_key
+                or normalized not in key_position
+                or key_position[normalized] >= key_position[current_key]
+                or normalized in unique
+            ):
+                continue
+            unique.append(normalized)
+        unique.sort(key=lambda item: key_position[item], reverse=True)
+        return unique[:MAX_PREREQUISITES_PER_NODE]
+
+    @staticmethod
+    def _limit_branch_prerequisites(
+        current_key: str,
+        keys: list[str],
+        key_position: dict[str, int],
+    ) -> list[str]:
+        wants_parent = any(item.strip().lower() == 'parent' for item in keys)
+        siblings: list[str] = []
+        for key in keys:
+            normalized = key.strip().lower()
+            if (
+                normalized in ('', 'parent', current_key)
+                or normalized not in key_position
+                or key_position[normalized] >= key_position[current_key]
+                or normalized in siblings
+            ):
+                continue
+            siblings.append(normalized)
+        siblings.sort(key=lambda item: key_position[item], reverse=True)
+
+        selected: list[str] = []
+        if wants_parent:
+            selected.append('parent')
+        for sibling in siblings:
+            if len(selected) >= MAX_PREREQUISITES_PER_NODE:
+                break
+            selected.append(sibling)
+        return selected[:MAX_PREREQUISITES_PER_NODE]
 
     async def create_skill_tree(self, db: Session, topic: Topic) -> list[SkillNode]:
         course_depth = normalize_course_depth(topic.course_depth)
@@ -57,7 +108,8 @@ class SkillGraphAgent:
             f'Guidance: {level_guidance}\n\n'
             f'Create between {min_nodes} and {max_nodes} skill nodes. '
             'Each node needs key, name, description, difficulty (1-5), '
-            'and prerequisites (list of node keys).'
+            'and prerequisites (list of node keys). '
+            'Use at most 2 prerequisites per node, and prefer 0-1 unless absolutely needed.'
         )
 
         graph = await self.llm_service.generate_structured(
@@ -93,10 +145,15 @@ class SkillGraphAgent:
             )
             seen_keys.add(fallback_key)
 
+        key_position = {node.key: idx for idx, node in enumerate(unique_nodes)}
         prereq_map: dict[str, list[str]] = {}
         for node in unique_nodes:
             filtered_prereqs = [key for key in node.prerequisites if key in seen_keys and key != node.key]
-            prereq_map[node.key] = list(dict.fromkeys(filtered_prereqs))
+            prereq_map[node.key] = self._limit_core_prerequisites(
+                current_key=node.key,
+                keys=filtered_prereqs,
+                key_position=key_position,
+            )
 
         has_root = any(len(prereq_map[node.key]) == 0 for node in unique_nodes)
         if not has_root:
@@ -199,6 +256,7 @@ class SkillGraphAgent:
             '- Keep scope tightly tied to the parent node.\n'
             '- Use key, name, description, difficulty, prerequisites.\n'
             "- In prerequisites, use either sibling node keys or 'parent'.\n"
+            '- Use no more than 2 prerequisites per node (including parent).\n'
             '- Keep beginner learners on foundational depth, not advanced capstone tasks.\n'
             '- Avoid duplicate or overlapping node names.'
         )
@@ -231,14 +289,14 @@ class SkillGraphAgent:
         if len(unique_nodes) < 2:
             raise ValueError('Deep-dive generation returned too few unique optional nodes.')
 
+        key_position = {node.key: idx for idx, node in enumerate(unique_nodes)}
         prereq_map: dict[str, list[str]] = {}
         for node in unique_nodes:
-            filtered: list[str] = []
-            for key in node.prerequisites:
-                normalized = key.strip().lower()
-                if normalized == 'parent' or normalized in seen_keys:
-                    filtered.append(normalized)
-            prereq_map[node.key] = list(dict.fromkeys(filtered))
+            prereq_map[node.key] = self._limit_branch_prerequisites(
+                current_key=node.key,
+                keys=node.prerequisites,
+                key_position=key_position,
+            )
 
         key_to_node: dict[str, SkillNode] = {}
         created_nodes: list[SkillNode] = []

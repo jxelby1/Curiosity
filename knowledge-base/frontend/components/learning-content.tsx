@@ -110,7 +110,8 @@ export function parseExercisesContent(value: unknown): ExercisesShape | null {
         difficulty
       };
     })
-    .filter((item) => item.title && item.task);
+    .filter((item) => item.title && item.task)
+    .slice(0, 2);
 
   const result: ExercisesShape = {
     title: String(input.title || '').trim(),

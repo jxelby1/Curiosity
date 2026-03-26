@@ -24,6 +24,8 @@ from app.db.models import (
     AssessmentQuestion,
     AssessmentQuestionType,
     AssessmentResponse,
+    LearningResource,
+    ResourceType,
     SkillEdge,
     SkillNode,
     Topic,
@@ -94,6 +96,165 @@ class AssessmentAgent:
         for style in style_sequence:
             counts[style] = counts.get(style, 0) + 1
         return counts
+
+    def _active_generated_resource(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        topic_id: int,
+        skill_node_id: int,
+        resource_type: ResourceType,
+    ) -> LearningResource | None:
+        return db.scalar(
+            select(LearningResource)
+            .where(
+                LearningResource.user_id == user_id,
+                LearningResource.topic_id == topic_id,
+                LearningResource.skill_node_id == skill_node_id,
+                LearningResource.resource_type == resource_type,
+                LearningResource.is_active.is_(True),
+            )
+            .order_by(LearningResource.version.desc(), LearningResource.created_at.desc())
+        )
+
+    def _resource_payload(self, resource: LearningResource | None) -> dict[str, Any]:
+        if resource is None:
+            return {}
+        if isinstance(resource.content_json, dict):
+            return resource.content_json
+        content = (resource.content or '').strip()
+        if not content:
+            return {}
+        try:
+            parsed = json.loads(content)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            return {}
+
+    def _normalize_concept(self, value: str) -> str:
+        lowered = value.strip().lower().replace('_', ' ').replace('-', ' ')
+        lowered = re.sub(r'[^a-z0-9 ]+', '', lowered)
+        return ' '.join(lowered.split())
+
+    def _dedupe_concepts(self, concepts: list[str], *, max_items: int = 20) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for concept in concepts:
+            cleaned = str(concept or '').strip()
+            if not cleaned:
+                continue
+            normalized = self._normalize_concept(cleaned)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(cleaned[:140])
+            if len(deduped) >= max_items:
+                break
+        return deduped
+
+    def _extract_taught_concepts(
+        self,
+        *,
+        lesson_payload: dict[str, Any],
+        examples_payload: dict[str, Any],
+        skill_node: SkillNode,
+    ) -> list[str]:
+        concepts: list[str] = [skill_node.name]
+
+        key_concepts = lesson_payload.get('key_concepts')
+        if isinstance(key_concepts, list):
+            for item in key_concepts:
+                if not isinstance(item, dict):
+                    continue
+                term = str(item.get('term') or '').strip()
+                if term:
+                    concepts.append(term)
+
+        learning_objectives = lesson_payload.get('learning_objectives')
+        if isinstance(learning_objectives, list):
+            concepts.extend(str(item).strip() for item in learning_objectives if str(item).strip())
+
+        takeaways = lesson_payload.get('takeaways')
+        if isinstance(takeaways, list):
+            concepts.extend(str(item).strip() for item in takeaways if str(item).strip())
+
+        examples = examples_payload.get('examples')
+        if isinstance(examples, list):
+            for item in examples:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get('name') or '').strip()
+                why = str(item.get('why_it_matters') or '').strip()
+                if name:
+                    concepts.append(name)
+                if why:
+                    concepts.extend(self._extract_concepts_from_text(why, max_items=2))
+
+        deduped = self._dedupe_concepts(concepts, max_items=24)
+        return deduped or [skill_node.name]
+
+    def _teaching_context(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        topic: Topic,
+        skill_node: SkillNode,
+    ) -> tuple[list[str], str]:
+        try:
+            lesson_resource = self._active_generated_resource(
+                db,
+                user_id=user_id,
+                topic_id=topic.id,
+                skill_node_id=skill_node.id,
+                resource_type=ResourceType.generated_lesson,
+            )
+            examples_resource = self._active_generated_resource(
+                db,
+                user_id=user_id,
+                topic_id=topic.id,
+                skill_node_id=skill_node.id,
+                resource_type=ResourceType.generated_examples,
+            )
+            lesson_payload = self._resource_payload(lesson_resource)
+            examples_payload = self._resource_payload(examples_resource)
+            taught_concepts = self._extract_taught_concepts(
+                lesson_payload=lesson_payload,
+                examples_payload=examples_payload,
+                skill_node=skill_node,
+            )
+            context_text = '\n'.join(f'- {concept}' for concept in taught_concepts[:14])
+            return taught_concepts, context_text
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                'assessment.teaching_context_unavailable topic_id=%s skill_id=%s error=%s',
+                topic.id,
+                skill_node.id,
+                exc,
+            )
+            fallback = [skill_node.name]
+            return fallback, f'- {skill_node.name}'
+
+    def _filter_to_taught_concepts(
+        self,
+        concepts: list[str],
+        *,
+        taught_concepts: list[str],
+    ) -> list[str]:
+        if not taught_concepts:
+            return self._dedupe_concepts(concepts, max_items=8)
+        taught_pairs = [(item, self._normalize_concept(item)) for item in taught_concepts if item.strip()]
+        filtered: list[str] = []
+        for concept in concepts:
+            normalized = self._normalize_concept(concept)
+            if not normalized:
+                continue
+            for taught_raw, taught_norm in taught_pairs:
+                if normalized in taught_norm or taught_norm in normalized:
+                    filtered.append(taught_raw)
+                    break
+        return self._dedupe_concepts(filtered, max_items=8)
 
     def _extract_concepts_from_text(self, text: str, *, max_items: int = 3) -> list[str]:
         if not text:
@@ -208,6 +369,7 @@ class AssessmentAgent:
         learner_level: str,
         question_count: int,
         style_sequence: list[str],
+        taught_concepts: list[str],
     ) -> dict[str, Any]:
         normalized = dict(payload)
         normalized['title'] = str(normalized.get('title') or f'{skill_node.name} Skill Assessment').strip()[:220]
@@ -294,15 +456,26 @@ class AssessmentAgent:
                 concepts = [item['concept'] for item in rubric[:3]]
                 repaired_missing_concepts += 1
 
+            concepts = self._filter_to_taught_concepts(concepts, taught_concepts=taught_concepts)
+
             if not concepts and question_type != 'reflection':
-                concept_seed = self._extract_concepts_from_text(
-                    f"{prompt} {skill_node.name} {skill_node.description}",
-                    max_items=3,
+                concept_seed = self._filter_to_taught_concepts(
+                    self._extract_concepts_from_text(
+                        f"{prompt} {skill_node.name} {skill_node.description}",
+                        max_items=3,
+                    ),
+                    taught_concepts=taught_concepts,
                 )
                 if not concept_seed:
-                    concept_seed = [skill_node.name.strip()[:80]]
+                    concept_seed = (taught_concepts[:3] or [skill_node.name.strip()[:80]])
                 concepts = concept_seed
                 repaired_missing_concepts += 1
+
+            if question_type != 'reflection' and concepts:
+                prompt_norm = self._normalize_concept(prompt)
+                anchor = self._normalize_concept(concepts[0])
+                if anchor and anchor not in prompt_norm:
+                    prompt = f'{prompt.rstrip()} Focus on: {concepts[0]}.'
 
             model_answer = str(raw_question.get('model_answer') or '').strip()
             if question_type == 'reflection' and len(model_answer) < 12:
@@ -393,7 +566,7 @@ class AssessmentAgent:
             idx = len(normalized_questions)
             fallback_style = expected_styles[idx]
             fallback_type = ASSESSMENT_STYLE_TO_QUESTION_TYPE[fallback_style]
-            concept = skill_node.name.strip()[:80]
+            concept = (taught_concepts[0] if taught_concepts else skill_node.name.strip()[:80])
             fallback_prompt = (
                 f'Question {idx + 1}: '
                 f'{"Choose the best option" if fallback_type == "multiple_choice" else "Respond briefly"} '
@@ -465,6 +638,8 @@ class AssessmentAgent:
         recommended_mix: dict[str, int],
         style_sequence: list[str],
         allowed_styles: list[str],
+        taught_concepts: list[str],
+        taught_context_text: str,
     ) -> tuple[AssessmentPlan, bool]:
         system_prompt = (
             'You are AssessmentAgent.\n'
@@ -486,6 +661,8 @@ class AssessmentAgent:
             f'Allowed assessment styles: {json.dumps(allowed_styles)}\\n'
             f'Recommended style mix: {json.dumps(recommended_mix)}\\n'
             f'Required style order to follow: {json.dumps(style_sequence)}\\n\\n'
+            'Taught concepts available in lesson/examples (assessment must stay inside this coverage):\\n'
+            f'{taught_context_text or "- " + skill_node.name}\\n\\n'
             'Output contract:\\n'
             '- Include fields: title, instructions, difficulty, target_level, questions.\\n'
             '- For every question include: id, assessment_style, question_type, prompt, model_answer, hints, difficulty, confidence_prompt.\\n'
@@ -497,6 +674,8 @@ class AssessmentAgent:
             '- multiple_choice must include exactly 4 choices and answer_index 0..3.\\n'
             '- model_answer must be a concrete high-quality answer for the exact question, never generic guidance.\\n'
             '- non-multiple-choice questions must include expected_concepts (>=1) and rubric criteria.\\n'
+            '- expected_concepts for non-reflection questions must come from taught concepts listed above.\\n'
+            '- Do not test concepts that are not explicitly taught in lesson/examples context above.\\n'
             '- Never return empty arrays for required conceptual fields.\\n'
             '- Keep question prompts concise and node-specific.\\n'
             '- Intro/foundation nodes must avoid advanced capstone asks.\\n\\n'
@@ -515,6 +694,7 @@ class AssessmentAgent:
                 learner_level=learner_level,
                 question_count=question_count,
                 style_sequence=style_sequence,
+                taught_concepts=taught_concepts,
             )
 
         try:
@@ -564,6 +744,7 @@ class AssessmentAgent:
                     learner_level=learner_level,
                     question_count=fallback_count,
                     style_sequence=style_sequence[:fallback_count],
+                    taught_concepts=taught_concepts,
                 ),
             )
             logger.warning(
@@ -594,6 +775,7 @@ class AssessmentAgent:
             learner_level=learner_level,
             question_count=max(4, min(question_count, 5)),
             style_sequence=style_sequence[: max(4, min(question_count, 5))],
+            taught_concepts=taught_concepts,
         )
         plan = AssessmentPlan.model_validate(deterministic)
         logger.warning(
@@ -723,6 +905,18 @@ class AssessmentAgent:
             allowed_styles,
             style_sequence,
         )
+        taught_concepts, taught_context_text = self._teaching_context(
+            db,
+            user_id=user_id,
+            topic=topic,
+            skill_node=skill_node,
+        )
+        logger.info(
+            'assessment.teaching_context topic_id=%s skill_id=%s concepts=%s',
+            topic.id,
+            skill_node.id,
+            len(taught_concepts),
+        )
 
         prerequisite_ids = db.scalars(
             select(SkillEdge.parent_skill_id).where(
@@ -749,6 +943,8 @@ class AssessmentAgent:
             recommended_mix=recommended_mix,
             style_sequence=style_sequence,
             allowed_styles=allowed_styles,
+            taught_concepts=taught_concepts,
+            taught_context_text=taught_context_text,
         )
 
         questions = plan.questions[:question_count]

@@ -186,6 +186,32 @@ class UserSkillState(Base):
     __table_args__ = (UniqueConstraint('user_id', 'skill_node_id', name='uq_user_skill_state'),)
 
 
+class ExerciseCompletion(Base):
+    __tablename__ = 'exercise_completions'
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey('users.id'), index=True)
+    topic_id: Mapped[int] = mapped_column(ForeignKey('topics.id'), index=True)
+    skill_node_id: Mapped[int] = mapped_column(ForeignKey('skill_nodes.id'), index=True)
+    resource_id: Mapped[int | None] = mapped_column(ForeignKey('learning_resources.id'), nullable=True, index=True)
+    exercise_index: Mapped[int] = mapped_column(Integer, default=0)
+    exercise_title: Mapped[str] = mapped_column(String(180), default='')
+    completed_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, index=True)
+    proof_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    proof_content_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    proof_storage_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    proof_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            'user_id',
+            'skill_node_id',
+            'exercise_index',
+            name='uq_exercise_completion_user_skill_index',
+        ),
+    )
+
+
 class Document(Base):
     __tablename__ = 'documents'
 

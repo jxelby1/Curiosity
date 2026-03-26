@@ -196,6 +196,28 @@ export interface Resource {
   relevance_reason: string;
 }
 
+export interface ExerciseCompletion {
+  id: number;
+  topic_id: number;
+  skill_node_id: number;
+  resource_id: number | null;
+  exercise_index: number;
+  exercise_title: string;
+  completed_at: string;
+  proof_filename: string | null;
+  proof_content_type: string | null;
+  proof_size_bytes: number | null;
+  proof_url: string | null;
+}
+
+export interface ExerciseCompletionList {
+  skill_node_id: number;
+  total_exercises: number;
+  completed_count: number;
+  completion_ratio: number;
+  completions: ExerciseCompletion[];
+}
+
 export interface ExternalResource {
   id: number;
   title: string;
@@ -431,6 +453,23 @@ export interface TopicRetentionLoop {
   activity_days_last_14: number;
   latest_activity_at: string | null;
   dev_unlock_enabled: boolean;
+}
+
+export interface TopicJournalEntry {
+  id: string;
+  entry_type: 'note' | 'exercise' | 'module' | 'assessment' | 'milestone';
+  title: string;
+  description: string;
+  skill_node_id: number | null;
+  skill_name: string | null;
+  occurred_at: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface TopicJournal {
+  topic_id: number;
+  topic_name: string;
+  entries: TopicJournalEntry[];
 }
 
 export interface UserTopicProgressSummary {

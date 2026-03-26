@@ -7,17 +7,44 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from app.core.course_preferences import ASSESSMENT_STYLE_TO_QUESTION_TYPE, ASSESSMENT_STYLE_VALUES
 
 
+def _normalize_prerequisite_keys(value: object) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, str):
+        raw_values = [value]
+    elif isinstance(value, list):
+        raw_values = value
+    else:
+        raw_values = [str(value)]
+
+    normalized: list[str] = []
+    for item in raw_values:
+        token = str(item).strip().lower().replace(' ', '_').replace('-', '_')
+        if not token or token in normalized:
+            continue
+        normalized.append(token)
+        if len(normalized) >= 2:
+            break
+    return normalized
+
+
 class SkillPlanNode(BaseModel):
     key: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(min_length=10, max_length=600)
     difficulty: int = Field(ge=1, le=5)
-    prerequisites: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list, max_length=2)
 
     @field_validator('key')
     @classmethod
     def normalize_key(cls, value: str) -> str:
         return value.strip().lower().replace(' ', '_').replace('-', '_')
+
+    @field_validator('prerequisites', mode='before')
+    @classmethod
+    def normalize_prerequisites(cls, value: object) -> list[str]:
+        return _normalize_prerequisite_keys(value)
 
 
 class SkillGraphPlan(BaseModel):
@@ -29,12 +56,17 @@ class DeepDivePlanNode(BaseModel):
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(min_length=10, max_length=600)
     difficulty: int = Field(ge=1, le=5)
-    prerequisites: list[str] = Field(default_factory=list)
+    prerequisites: list[str] = Field(default_factory=list, max_length=2)
 
     @field_validator('key')
     @classmethod
     def normalize_key(cls, value: str) -> str:
         return value.strip().lower().replace(' ', '_').replace('-', '_')
+
+    @field_validator('prerequisites', mode='before')
+    @classmethod
+    def normalize_prerequisites(cls, value: object) -> list[str]:
+        return _normalize_prerequisite_keys(value)
 
 
 class DeepDiveBranchPlan(BaseModel):
@@ -130,7 +162,7 @@ class ExercisePlanItem(BaseModel):
 class ExercisesPlan(BaseModel):
     title: str = Field(min_length=4, max_length=180)
     intro: str = Field(min_length=20, max_length=420)
-    exercises: list[ExercisePlanItem] = Field(min_length=2, max_length=8)
+    exercises: list[ExercisePlanItem] = Field(min_length=2, max_length=2)
 
 
 class TutorReplyPlan(BaseModel):

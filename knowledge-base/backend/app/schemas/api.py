@@ -303,6 +303,28 @@ class ResourceResponse(BaseModel):
     relevance_reason: str
 
 
+class ExerciseCompletionResponse(BaseModel):
+    id: int
+    topic_id: int
+    skill_node_id: int
+    resource_id: int | None = None
+    exercise_index: int
+    exercise_title: str
+    completed_at: datetime
+    proof_filename: str | None = None
+    proof_content_type: str | None = None
+    proof_size_bytes: int | None = None
+    proof_url: str | None = None
+
+
+class ExerciseCompletionListResponse(BaseModel):
+    skill_node_id: int
+    total_exercises: int
+    completed_count: int
+    completion_ratio: float
+    completions: list[ExerciseCompletionResponse] = Field(default_factory=list)
+
+
 class ExternalResourceItem(BaseModel):
     id: int
     title: str
@@ -489,6 +511,23 @@ class AssessmentAttemptResponse(BaseModel):
     recommended_follow_up: str
     feedback: list[AssessmentQuestionFeedbackResponse]
     created_at: datetime
+
+
+class TopicJournalEntryResponse(BaseModel):
+    id: str
+    entry_type: Literal['note', 'exercise', 'module', 'assessment', 'milestone']
+    title: str
+    description: str
+    skill_node_id: int | None = None
+    skill_name: str | None = None
+    occurred_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TopicJournalResponse(BaseModel):
+    topic_id: int
+    topic_name: str
+    entries: list[TopicJournalEntryResponse] = Field(default_factory=list)
 
 
 class TopicProgressNode(BaseModel):

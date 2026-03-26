@@ -109,6 +109,115 @@ class ResourceAgent:
         )
         return any(pattern in lowered for pattern in patterns)
 
+    def _exercise_signature(self, title: str, task: str) -> str:
+        compact = f'{title.strip().lower()}::{task.strip().lower()}'
+        compact = compact.replace('\n', ' ')
+        return ' '.join(compact.split())
+
+    def _normalize_exercise_collection(self, structured_content: dict[str, Any]) -> dict[str, Any]:
+        exercises = structured_content.get('exercises')
+        if not isinstance(exercises, list):
+            return structured_content
+
+        normalized: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for raw in exercises:
+            if not isinstance(raw, dict):
+                continue
+            title = str(raw.get('title') or '').strip()
+            task = str(raw.get('task') or '').strip()
+            if not title or not task:
+                continue
+            signature = self._exercise_signature(title, task)
+            if signature in seen:
+                continue
+            seen.add(signature)
+            difficulty_raw = str(raw.get('difficulty') or 'medium').strip().lower()
+            difficulty = difficulty_raw if difficulty_raw in {'easy', 'medium', 'hard'} else 'medium'
+            hints_raw = raw.get('hints')
+            hints = (
+                [str(item).strip() for item in hints_raw if str(item).strip()]
+                if isinstance(hints_raw, list)
+                else []
+            )[:4]
+            if not hints:
+                hints = ['Break the task into one small focused step.', 'Validate one result before moving on.']
+            expected_outcome = str(raw.get('expected_outcome') or '').strip()
+            if not expected_outcome:
+                expected_outcome = 'You complete one focused attempt and identify one concrete improvement.'
+
+            normalized.append(
+                {
+                    'title': title[:120],
+                    'task': task[:500],
+                    'hints': hints,
+                    'expected_outcome': expected_outcome[:300],
+                    'difficulty': difficulty,
+                }
+            )
+
+        if len(normalized) > 2:
+            selected: list[dict[str, Any]] = []
+            used_indexes: set[int] = set()
+            for target in ('easy', 'medium', 'hard'):
+                for idx, item in enumerate(normalized):
+                    if idx in used_indexes or item.get('difficulty') != target:
+                        continue
+                    selected.append(item)
+                    used_indexes.add(idx)
+                    break
+                if len(selected) >= 2:
+                    break
+            if len(selected) < 2:
+                for idx, item in enumerate(normalized):
+                    if idx in used_indexes:
+                        continue
+                    selected.append(item)
+                    used_indexes.add(idx)
+                    if len(selected) >= 2:
+                        break
+            normalized = selected[:2]
+
+        if len(normalized) == 1:
+            first = normalized[0]
+            normalized.append(
+                {
+                    'title': f'{first["title"]} (variation)'[:120],
+                    'task': (
+                        f'{first["task"]}\n\nVariation: repeat with one controlled change and compare outcomes.'
+                    )[:500],
+                    'hints': (
+                        list(first.get('hints') or [])[:2]
+                        + ['Change only one variable so you can compare results clearly.']
+                    )[:4],
+                    'expected_outcome': (
+                        str(first.get('expected_outcome') or '')
+                        + ' You can explain the difference between attempt A and attempt B.'
+                    )[:300],
+                    'difficulty': first.get('difficulty') if first.get('difficulty') in {'easy', 'medium', 'hard'} else 'medium',
+                }
+            )
+        elif len(normalized) == 0:
+            normalized = [
+                {
+                    'title': 'Focused practice drill',
+                    'task': 'Complete one short focused practice attempt on the core concept.',
+                    'hints': ['Keep scope narrow.', 'Check one outcome at the end.'],
+                    'expected_outcome': 'You can explain one thing that improved after this drill.',
+                    'difficulty': 'easy',
+                },
+                {
+                    'title': 'Apply and compare',
+                    'task': 'Run a second attempt with one controlled change and compare results.',
+                    'hints': ['Change one variable only.', 'Write down the before/after difference.'],
+                    'expected_outcome': 'You can describe which change improved the outcome and why.',
+                    'difficulty': 'medium',
+                },
+            ]
+
+        structured_content['exercises'] = normalized[:2]
+        return structured_content
+
     def _enforce_foundation_scope(
         self,
         *,
@@ -463,6 +572,8 @@ class ResourceAgent:
                 structured_content=structured_content,
                 skill_name=skill_node.name,
             )
+        if kind == 'exercises':
+            structured_content = self._normalize_exercise_collection(structured_content)
         content = json.dumps(structured_content, indent=2)
         summary = structured_content.get('summary') or structured_content.get('intro') or content[:240]
 

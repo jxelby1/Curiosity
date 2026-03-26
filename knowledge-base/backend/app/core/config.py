@@ -48,6 +48,8 @@ class Settings(BaseSettings):
     embedding_dimensions: int = 1536
     retrieval_top_k: int = 5
     max_note_chunk_chars: int = 900
+    exercise_proof_storage_dir: str = './data/exercise-proofs'
+    exercise_proof_max_mb: int = 8
 
     search_provider: Literal['serper'] = 'serper'
     search_api_key: str = Field(default='')

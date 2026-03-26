@@ -6,6 +6,7 @@ import {
   createNote,
   deleteDocument,
   deleteNote,
+  getTopicJournal,
   getSkillTree,
   listDocuments,
   listNotes,
@@ -13,7 +14,7 @@ import {
   uploadFileNote
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
-import { DocumentItem, NoteType, PersonalNote, SkillTree } from '@/lib/types';
+import { DocumentItem, NoteType, PersonalNote, SkillTree, TopicJournalEntry } from '@/lib/types';
 import { TopicHeader } from '@/components/topic-header';
 import { NotesWorkspaceSkeleton } from '@/components/page-skeletons';
 
@@ -34,6 +35,8 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [tree, setTree] = useState<SkillTree | null>(cachedTree);
   const [notes, setNotes] = useState<PersonalNote[]>([]);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
+  const [journalEntries, setJournalEntries] = useState<TopicJournalEntry[]>([]);
+  const [activeView, setActiveView] = useState<'journal' | 'notes' | 'documents'>('journal');
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -48,6 +51,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [loadingTree, setLoadingTree] = useState(!cachedTree);
   const [loadingNotes, setLoadingNotes] = useState(true);
   const [loadingDocuments, setLoadingDocuments] = useState(true);
+  const [loadingJournal, setLoadingJournal] = useState(true);
   const [savingNote, setSavingNote] = useState(false);
   const [uploadingDocument, setUploadingDocument] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
@@ -99,11 +103,24 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     }
   }, [topicId]);
 
+  const loadJournal = useCallback(async () => {
+    setLoadingJournal(true);
+    try {
+      const journal = await getTopicJournal(topicId);
+      setJournalEntries(journal.entries || []);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load project journal');
+    } finally {
+      setLoadingJournal(false);
+    }
+  }, [topicId]);
+
   useEffect(() => {
     loadTree();
     loadNotes();
     loadDocuments();
-  }, [loadDocuments, loadNotes, loadTree]);
+    loadJournal();
+  }, [loadDocuments, loadJournal, loadNotes, loadTree]);
 
   useEffect(() => {
     if (!selectedNote) return;
@@ -119,6 +136,14 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody('');
     setNoteType('personal');
     setLinkedSkillId('');
+  }
+
+  function journalEntryLabel(entry: TopicJournalEntry): string {
+    if (entry.entry_type === 'exercise') return 'Exercise';
+    if (entry.entry_type === 'assessment') return 'Assessment';
+    if (entry.entry_type === 'module') return 'Module';
+    if (entry.entry_type === 'milestone') return 'Milestone';
+    return 'Note';
   }
 
   async function onSaveNote(event: FormEvent<HTMLFormElement>) {
@@ -149,6 +174,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
         setSelectedNoteId(created.id);
       }
       await loadNotes();
+      await loadJournal();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save note');
     } finally {
@@ -164,6 +190,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       await deleteNote(selectedNoteId);
       resetEditorForNewNote();
       await loadNotes();
+      await loadJournal();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete note');
     } finally {
@@ -181,6 +208,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       await uploadFileNote(topicId, uploadFile);
       setUploadFile(null);
       await loadDocuments();
+      await loadJournal();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to upload document');
     } finally {
@@ -199,6 +227,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     try {
       await deleteDocument(topicId, document.id);
       await loadDocuments();
+      await loadJournal();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete document');
     } finally {
@@ -220,146 +249,239 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     <main className="mx-auto max-w-7xl p-6 md:p-10">
       <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Personal notes and learning materials" />
 
-      <section className="grid gap-6 xl:grid-cols-[0.95fr_1.25fr_0.95fr]">
-        <article className="panel p-5">
-          <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-lg font-semibold">My Notes</h2>
-            <button className="text-xs underline underline-offset-4" onClick={resetEditorForNewNote}>
-              New note
-            </button>
-          </div>
+      <div className="mb-4 flex flex-wrap gap-2">
+        <button
+          type="button"
+          className={`rounded-md border px-3 py-1.5 text-sm ${
+            activeView === 'journal' ? 'border-ink bg-ink text-white' : 'border-black/15 bg-white text-black'
+          }`}
+          onClick={() => setActiveView('journal')}
+        >
+          Project journal
+        </button>
+        <button
+          type="button"
+          className={`rounded-md border px-3 py-1.5 text-sm ${
+            activeView === 'notes' ? 'border-ink bg-ink text-white' : 'border-black/15 bg-white text-black'
+          }`}
+          onClick={() => setActiveView('notes')}
+        >
+          Notes editor
+        </button>
+        <button
+          type="button"
+          className={`rounded-md border px-3 py-1.5 text-sm ${
+            activeView === 'documents' ? 'border-ink bg-ink text-white' : 'border-black/15 bg-white text-black'
+          }`}
+          onClick={() => setActiveView('documents')}
+        >
+          Source documents
+        </button>
+      </div>
 
-          <div className="flex gap-2">
-            <input
-              value={searchInput}
-              onChange={(event) => setSearchInput(event.target.value)}
-              onBlur={() => setSearchQuery(searchInput.trim())}
-              className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-              placeholder="Search notes..."
-            />
+      {activeView === 'journal' && (
+        <section className="panel p-5">
+          <div className="mb-3 flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Topic project book</h2>
+              <p className="muted mt-1 text-sm">
+                A chronological record of notes, exercise completions, assessments, milestones, and artifacts.
+              </p>
+            </div>
             <button
-              className="rounded-lg border border-black/15 bg-white px-3 py-2 text-xs"
-              onClick={() => setSearchQuery(searchInput.trim())}
               type="button"
+              className="rounded-md border border-black/15 bg-white px-3 py-1.5 text-xs"
+              onClick={loadJournal}
             >
-              Apply
+              Refresh
             </button>
           </div>
 
-          <div className="mt-3 space-y-2">
-            {loadingNotes && notes.length === 0 && (
+          <div className="space-y-3">
+            {loadingJournal && journalEntries.length === 0 && (
               <>
-                <div className="skeleton h-14 w-full" />
-                <div className="skeleton h-14 w-full" />
+                <div className="skeleton h-16 w-full" />
+                <div className="skeleton h-16 w-full" />
               </>
             )}
-            {notes.map((note) => (
-              <button
-                key={note.id}
-                className={`w-full rounded-lg border p-3 text-left text-sm ${
-                  selectedNoteId === note.id ? 'border-ink bg-paper/70' : 'border-black/10 bg-white'
-                }`}
-                onClick={() => setSelectedNoteId(note.id)}
-                type="button"
-              >
-                <p className="font-semibold">{note.title}</p>
-                <p className="muted mt-1 line-clamp-2 text-xs">{note.body}</p>
-                <div className="mt-2 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1">
-                    <span className="badge">{note.note_type}</span>
-                    <span className="badge">{note.source_type.replace('_', ' ')}</span>
+            {journalEntries.map((entry) => (
+              <article key={entry.id} className="rounded-lg border border-black/10 bg-white p-4">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <p className="text-sm font-semibold">{entry.title}</p>
+                    <p className="muted mt-1 text-xs">
+                      {journalEntryLabel(entry)}
+                      {entry.skill_name ? ` · ${entry.skill_name}` : ''}
+                    </p>
                   </div>
-                  <span className="text-[11px] text-black/60">{new Date(note.updated_at).toLocaleDateString()}</span>
+                  <span className="text-[11px] text-black/60">{new Date(entry.occurred_at).toLocaleString()}</span>
                 </div>
-                {note.tags.length > 0 && (
-                  <p className="mt-2 text-[11px] text-black/60">Tags: {note.tags.join(', ')}</p>
+                <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
+                {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
+                  <a
+                    href={
+                      (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api').replace(/\/api\/?$/, '') +
+                      String(entry.metadata.proof_url)
+                    }
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
+                  >
+                    View artifact
+                  </a>
                 )}
-              </button>
+              </article>
             ))}
-            {!loadingNotes && notes.length === 0 && (
+            {!loadingJournal && journalEntries.length === 0 && (
               <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
-                No notes yet. Create your first learning note.
+                Your journal will populate as you write notes, complete exercises, and submit assessments.
               </p>
             )}
           </div>
-        </article>
+        </section>
+      )}
 
-        <article className="panel p-5">
-          <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit Note' : 'Create Note'}</h2>
-          <p className="muted mt-1 text-sm">Personal notes are user-owned and only used in chat when you opt in.</p>
-
-          <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-              placeholder="Title (optional)"
-              maxLength={NOTE_TITLE_MAX}
-            />
-            <p className="text-right text-xs text-black/60">{title.length}/{NOTE_TITLE_MAX}</p>
-
-            <div className="grid gap-2 md:grid-cols-2">
-              <select
-                value={noteType}
-                onChange={(event) => setNoteType(event.target.value as NoteType)}
-                className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-              >
-                {NOTE_TYPE_OPTIONS.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {item.label}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={linkedSkillId}
-                onChange={(event) => setLinkedSkillId(event.target.value)}
-                className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-              >
-                <option value="">All skills (topic-level)</option>
-                {tree.nodes.map((node) => (
-                  <option key={node.id} value={node.id}>
-                    {node.name}
-                  </option>
-                ))}
-              </select>
+      {activeView === 'notes' && (
+        <section className="grid gap-6 xl:grid-cols-[0.95fr_1.25fr]">
+          <article className="panel p-5">
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-lg font-semibold">My Notes</h2>
+              <button className="text-xs underline underline-offset-4" onClick={resetEditorForNewNote}>
+                New note
+              </button>
             </div>
 
-            <textarea
-              value={body}
-              onChange={(event) => setBody(event.target.value)}
-              className="min-h-[260px] w-full rounded-lg border border-black/15 bg-white p-3 text-sm"
-              placeholder="Write notes, takeaways, reflections, reminders, or summaries..."
-              maxLength={NOTE_BODY_MAX}
-            />
-            <p className="text-right text-xs text-black/60">{body.length}/{NOTE_BODY_MAX}</p>
-
-            <div className="flex flex-wrap gap-2">
-              <button className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60" disabled={savingNote}>
-                {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create note'}
+            <div className="flex gap-2">
+              <input
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.target.value)}
+                onBlur={() => setSearchQuery(searchInput.trim())}
+                className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                placeholder="Search notes..."
+              />
+              <button
+                className="rounded-lg border border-black/15 bg-white px-3 py-2 text-xs"
+                onClick={() => setSearchQuery(searchInput.trim())}
+                type="button"
+              >
+                Apply
               </button>
-              {selectedNoteId && (
+            </div>
+
+            <div className="mt-3 space-y-2">
+              {loadingNotes && notes.length === 0 && (
+                <>
+                  <div className="skeleton h-14 w-full" />
+                  <div className="skeleton h-14 w-full" />
+                </>
+              )}
+              {notes.map((note) => (
                 <button
-                  className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm text-red-700 disabled:opacity-60"
-                  onClick={onDeleteNote}
-                  disabled={savingNote}
+                  key={note.id}
+                  className={`w-full rounded-lg border p-3 text-left text-sm ${
+                    selectedNoteId === note.id ? 'border-ink bg-paper/70' : 'border-black/10 bg-white'
+                  }`}
+                  onClick={() => setSelectedNoteId(note.id)}
                   type="button"
                 >
-                  Delete note
+                  <p className="font-semibold">{note.title}</p>
+                  <p className="muted mt-1 line-clamp-2 text-xs">{note.body}</p>
+                  <div className="mt-2 flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1">
+                      <span className="badge">{note.note_type}</span>
+                      <span className="badge">{note.source_type.replace('_', ' ')}</span>
+                    </div>
+                    <span className="text-[11px] text-black/60">{new Date(note.updated_at).toLocaleDateString()}</span>
+                  </div>
                 </button>
+              ))}
+              {!loadingNotes && notes.length === 0 && (
+                <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
+                  No notes yet. Create your first learning note.
+                </p>
               )}
             </div>
-          </form>
-        </article>
+          </article>
 
-        <article className="panel p-5">
+          <article className="panel p-5">
+            <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit Note' : 'Create Note'}</h2>
+            <p className="muted mt-1 text-sm">Use notes for takeaways, reflections, and reminders tied to this topic.</p>
+
+            <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
+              <input
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                placeholder="Title (optional)"
+                maxLength={NOTE_TITLE_MAX}
+              />
+              <p className="text-right text-xs text-black/60">{title.length}/{NOTE_TITLE_MAX}</p>
+
+              <div className="grid gap-2 md:grid-cols-2">
+                <select
+                  value={noteType}
+                  onChange={(event) => setNoteType(event.target.value as NoteType)}
+                  className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                >
+                  {NOTE_TYPE_OPTIONS.map((item) => (
+                    <option key={item.value} value={item.value}>
+                      {item.label}
+                    </option>
+                  ))}
+                </select>
+
+                <select
+                  value={linkedSkillId}
+                  onChange={(event) => setLinkedSkillId(event.target.value)}
+                  className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                >
+                  <option value="">All skills (topic-level)</option>
+                  {tree.nodes.map((node) => (
+                    <option key={node.id} value={node.id}>
+                      {node.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <textarea
+                value={body}
+                onChange={(event) => setBody(event.target.value)}
+                className="min-h-[260px] w-full rounded-lg border border-black/15 bg-white p-3 text-sm"
+                placeholder="Write notes, takeaways, reflections, reminders, or summaries..."
+                maxLength={NOTE_BODY_MAX}
+              />
+              <p className="text-right text-xs text-black/60">{body.length}/{NOTE_BODY_MAX}</p>
+
+              <div className="flex flex-wrap gap-2">
+                <button className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60" disabled={savingNote}>
+                  {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create note'}
+                </button>
+                {selectedNoteId && (
+                  <button
+                    className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm text-red-700 disabled:opacity-60"
+                    onClick={onDeleteNote}
+                    disabled={savingNote}
+                    type="button"
+                  >
+                    Delete note
+                  </button>
+                )}
+              </div>
+            </form>
+          </article>
+        </section>
+      )}
+
+      {activeView === 'documents' && (
+        <section className="panel p-5">
           <div className="flex items-center justify-between gap-3">
             <h2 className="text-lg font-semibold">Source Documents</h2>
             <span className="badge">Optional</span>
           </div>
           <p className="muted mt-1 text-sm">
-            Source documents are reference material (docs, PDFs, markdown) for retrieval-grounded tutoring and generation.
-            Your personal notes are separate, and you can use this app without uploading source documents.
+            Source documents are reference material for retrieval-grounded tutoring and generation. Personal notes and
+            project-journal records remain separate.
           </p>
 
           <form className="mt-4 space-y-3" onSubmit={onUploadDocument}>
@@ -408,8 +530,8 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
               </p>
             )}
           </div>
-        </article>
-      </section>
+        </section>
+      )}
 
       {error && <p className="mt-4 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}
     </main>

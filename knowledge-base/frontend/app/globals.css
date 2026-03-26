@@ -100,3 +100,21 @@ body {
     transform: scale(1.035);
   }
 }
+
+.garden-tree-sway {
+  transform-origin: 50% 78%;
+  animation: garden-tree-sway 6.5s ease-in-out infinite;
+}
+
+@keyframes garden-tree-sway {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  25% {
+    transform: rotate(-1.3deg);
+  }
+  75% {
+    transform: rotate(1.2deg);
+  }
+}

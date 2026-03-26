@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
+from pathlib import Path
 from statistics import mean
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
+from fastapi.responses import FileResponse
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
@@ -36,7 +40,9 @@ from app.db.models import (
     BranchSuggestion,
     Document,
     DocumentChunk,
+    ExerciseCompletion,
     LearningResource,
+    ResourceType,
     MilestoneEvent,
     Note,
     Recommendation,
@@ -72,6 +78,8 @@ from app.schemas.api import (
     DocumentItemResponse,
     DocumentListResponse,
     DocumentUploadResponse,
+    ExerciseCompletionListResponse,
+    ExerciseCompletionResponse,
     ExternalResourceItem,
     ExternalResourceResponse,
     GenerateResourceRequest,
@@ -94,6 +102,8 @@ from app.schemas.api import (
     TopicCreateRequest,
     TopicInitializationResponse,
     TopicInitializationStatusResponse,
+    TopicJournalEntryResponse,
+    TopicJournalResponse,
     TopicListResponse,
     TopicReminderResponse,
     TopicRetentionLoopResponse,
@@ -269,6 +279,181 @@ def _get_document_or_404(db: Session, topic_id: int, document_id: int, user_id: 
     if not document:
         raise HTTPException(status_code=404, detail='Document not found')
     return document
+
+
+def _active_generated_resource(
+    db: Session,
+    *,
+    user_id: int,
+    skill_node_id: int,
+    resource_type: ResourceType,
+) -> LearningResource | None:
+    return db.scalar(
+        select(LearningResource)
+        .where(
+            LearningResource.user_id == user_id,
+            LearningResource.skill_node_id == skill_node_id,
+            LearningResource.resource_type == resource_type,
+            LearningResource.is_active.is_(True),
+        )
+        .order_by(LearningResource.version.desc(), LearningResource.created_at.desc())
+    )
+
+
+def _resource_payload(resource: LearningResource | None) -> dict:
+    if resource is None:
+        return {}
+    if isinstance(resource.content_json, dict):
+        return resource.content_json
+    content = (resource.content or '').strip()
+    if not content:
+        return {}
+    try:
+        parsed = json.loads(content)
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _exercise_items_for_skill(
+    db: Session,
+    *,
+    user_id: int,
+    skill_id: int,
+) -> tuple[LearningResource | None, list[dict]]:
+    resource = _active_generated_resource(
+        db,
+        user_id=user_id,
+        skill_node_id=skill_id,
+        resource_type=ResourceType.generated_exercises,
+    )
+    payload = _resource_payload(resource)
+    items_raw = payload.get('exercises')
+    if not isinstance(items_raw, list):
+        return resource, []
+    items: list[dict] = []
+    for item in items_raw[:2]:
+        if not isinstance(item, dict):
+            continue
+        title = str(item.get('title') or '').strip()
+        task = str(item.get('task') or '').strip()
+        if not title or not task:
+            continue
+        items.append(item)
+    return resource, items
+
+
+def _exercise_completion_to_response(completion: ExerciseCompletion) -> ExerciseCompletionResponse:
+    proof_url = f'/api/exercise-completions/{completion.id}/proof' if completion.proof_storage_path else None
+    return ExerciseCompletionResponse(
+        id=completion.id,
+        topic_id=completion.topic_id,
+        skill_node_id=completion.skill_node_id,
+        resource_id=completion.resource_id,
+        exercise_index=completion.exercise_index,
+        exercise_title=completion.exercise_title,
+        completed_at=completion.completed_at,
+        proof_filename=completion.proof_filename,
+        proof_content_type=completion.proof_content_type,
+        proof_size_bytes=completion.proof_size_bytes,
+        proof_url=proof_url,
+    )
+
+
+def _exercise_proof_base_dir() -> Path:
+    base = Path(settings.exercise_proof_storage_dir).expanduser()
+    if not base.is_absolute():
+        base = Path.cwd() / base
+    return base
+
+
+def _exercise_completion_snapshot(
+    db: Session,
+    *,
+    user_id: int,
+    skill: SkillNode,
+) -> ExerciseCompletionListResponse:
+    resource, exercise_items = _exercise_items_for_skill(
+        db,
+        user_id=user_id,
+        skill_id=skill.id,
+    )
+    title_by_index = {
+        idx: str(item.get('title') or f'Exercise {idx + 1}').strip()
+        for idx, item in enumerate(exercise_items)
+    }
+    rows = db.scalars(
+        select(ExerciseCompletion)
+        .where(
+            ExerciseCompletion.user_id == user_id,
+            ExerciseCompletion.skill_node_id == skill.id,
+        )
+        .order_by(ExerciseCompletion.exercise_index.asc(), ExerciseCompletion.completed_at.desc())
+    ).all()
+    completions: list[ExerciseCompletionResponse] = []
+    completed_indexes: set[int] = set()
+    for row in rows:
+        if row.exercise_index < 0 or row.exercise_index >= max(len(exercise_items), 1):
+            continue
+        completed_indexes.add(row.exercise_index)
+        if title_by_index.get(row.exercise_index) and not row.exercise_title:
+            row.exercise_title = title_by_index[row.exercise_index]
+        completions.append(_exercise_completion_to_response(row))
+    total_exercises = min(2, len(exercise_items))
+    completed_count = min(total_exercises, len(completed_indexes))
+    completion_ratio = (completed_count / total_exercises) if total_exercises > 0 else 0.0
+    if rows:
+        db.commit()
+    return ExerciseCompletionListResponse(
+        skill_node_id=skill.id,
+        total_exercises=total_exercises,
+        completed_count=completed_count,
+        completion_ratio=round(completion_ratio, 3),
+        completions=completions,
+    )
+
+
+async def _ensure_assessment_source_material(
+    db: Session,
+    *,
+    user_id: int,
+    topic: Topic,
+    skill: SkillNode,
+) -> None:
+    lesson = _active_generated_resource(
+        db,
+        user_id=user_id,
+        skill_node_id=skill.id,
+        resource_type=ResourceType.generated_lesson,
+    )
+    examples = _active_generated_resource(
+        db,
+        user_id=user_id,
+        skill_node_id=skill.id,
+        resource_type=ResourceType.generated_examples,
+    )
+    if lesson and examples:
+        return
+
+    if lesson is None:
+        await resource_agent.generate_material(
+            db,
+            user_id=user_id,
+            topic=topic,
+            skill_node=skill,
+            kind='lesson',
+            regenerate=False,
+        )
+    if examples is None:
+        await resource_agent.generate_material(
+            db,
+            user_id=user_id,
+            topic=topic,
+            skill_node=skill,
+            kind='examples',
+            regenerate=False,
+        )
+        profile_agent.record_generated_content(db, user_id, skill, 'examples')
 
 
 def _normalize_tags(tags: list[str] | None) -> list[str]:
@@ -652,6 +837,184 @@ def _milestone_to_response(event: MilestoneEvent) -> MilestoneEventResponse:
     )
 
 
+def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> TopicJournalResponse:
+    skill_map = {
+        node.id: node.name
+        for node in db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
+    }
+    entries: list[TopicJournalEntryResponse] = []
+
+    notes = db.scalars(
+        select(Note)
+        .where(Note.topic_id == topic.id, Note.user_id == user_id)
+        .order_by(Note.updated_at.desc())
+        .limit(160)
+    ).all()
+    for note in notes:
+        snippet = (note.body or '').strip().replace('\n', ' ')
+        snippet = snippet[:180] + ('…' if len(snippet) > 180 else '')
+        entries.append(
+            TopicJournalEntryResponse(
+                id=f'note-{note.id}',
+                entry_type='note',
+                title=note.title or 'Untitled note',
+                description=snippet or 'Personal note updated.',
+                skill_node_id=note.skill_node_id,
+                skill_name=skill_map.get(note.skill_node_id) if note.skill_node_id else None,
+                occurred_at=note.updated_at,
+                metadata={
+                    'note_type': note.note_type.value,
+                    'source_type': note.source_type,
+                    'tags': note.tags or [],
+                },
+            )
+        )
+
+    exercise_completions = db.scalars(
+        select(ExerciseCompletion)
+        .where(
+            ExerciseCompletion.topic_id == topic.id,
+            ExerciseCompletion.user_id == user_id,
+        )
+        .order_by(ExerciseCompletion.completed_at.desc())
+        .limit(160)
+    ).all()
+    for completion in exercise_completions:
+        has_proof = bool(completion.proof_storage_path)
+        entries.append(
+            TopicJournalEntryResponse(
+                id=f'exercise-{completion.id}',
+                entry_type='exercise',
+                title=f'Completed exercise {completion.exercise_index + 1}: {completion.exercise_title}',
+                description=(
+                    'Exercise completion recorded with proof artifact.'
+                    if has_proof
+                    else 'Exercise completion recorded.'
+                ),
+                skill_node_id=completion.skill_node_id,
+                skill_name=skill_map.get(completion.skill_node_id),
+                occurred_at=completion.completed_at,
+                metadata={
+                    'exercise_index': completion.exercise_index,
+                    'proof_uploaded': has_proof,
+                    'proof_filename': completion.proof_filename,
+                    'proof_url': f'/api/exercise-completions/{completion.id}/proof' if has_proof else None,
+                },
+            )
+        )
+
+    states = db.scalars(
+        select(UserSkillState)
+        .join(SkillNode, UserSkillState.skill_node_id == SkillNode.id)
+        .where(UserSkillState.user_id == user_id, SkillNode.topic_id == topic.id)
+    ).all()
+    for state in states:
+        skill_name = skill_map.get(state.skill_node_id)
+        if state.lesson_completed_at:
+            entries.append(
+                TopicJournalEntryResponse(
+                    id=f'module-lesson-{state.skill_node_id}',
+                    entry_type='module',
+                    title=f'Lesson completed: {skill_name or "Skill"}',
+                    description='You completed the lesson content for this node.',
+                    skill_node_id=state.skill_node_id,
+                    skill_name=skill_name,
+                    occurred_at=state.lesson_completed_at,
+                    metadata={'event': 'lesson_completed'},
+                )
+            )
+        if state.exercises_completed_at:
+            entries.append(
+                TopicJournalEntryResponse(
+                    id=f'module-exercises-{state.skill_node_id}',
+                    entry_type='module',
+                    title=f'Exercise milestone reached: {skill_name or "Skill"}',
+                    description='You completed at least one exercise for this node.',
+                    skill_node_id=state.skill_node_id,
+                    skill_name=skill_name,
+                    occurred_at=state.exercises_completed_at,
+                    metadata={'event': 'exercise_progress'},
+                )
+            )
+        if state.quiz_taken_at:
+            entries.append(
+                TopicJournalEntryResponse(
+                    id=f'module-assessment-{state.skill_node_id}',
+                    entry_type='module',
+                    title=f'Assessment attempted: {skill_name or "Skill"}',
+                    description='Assessment activity was recorded for this node.',
+                    skill_node_id=state.skill_node_id,
+                    skill_name=skill_name,
+                    occurred_at=state.quiz_taken_at,
+                    metadata={'event': 'assessment_activity'},
+                )
+            )
+
+    assessment_ids = db.scalars(
+        select(Assessment.id).where(Assessment.topic_id == topic.id, Assessment.user_id == user_id)
+    ).all()
+    if assessment_ids:
+        attempts = db.scalars(
+            select(AssessmentAttempt)
+            .where(AssessmentAttempt.assessment_id.in_(assessment_ids))
+            .order_by(AssessmentAttempt.created_at.desc())
+            .limit(160)
+        ).all()
+        assessment_skill_map = {
+            row.id: row.skill_node_id
+            for row in db.scalars(select(Assessment).where(Assessment.id.in_(assessment_ids))).all()
+        }
+        for attempt in attempts:
+            skill_id = assessment_skill_map.get(attempt.assessment_id)
+            score_pct = int(round(float(attempt.score or 0.0) * 100))
+            mode_label = 'Practice mode' if attempt.practice_mode else 'Mastery attempt'
+            entries.append(
+                TopicJournalEntryResponse(
+                    id=f'assessment-attempt-{attempt.id}',
+                    entry_type='assessment',
+                    title=f'Assessment result: {score_pct}% ({mode_label})',
+                    description=(attempt.review_next or '').strip()[:220] or 'Assessment feedback recorded.',
+                    skill_node_id=skill_id,
+                    skill_name=skill_map.get(skill_id) if skill_id else None,
+                    occurred_at=attempt.created_at,
+                    metadata={
+                        'score': round(float(attempt.score or 0.0), 3),
+                        'practice_mode': bool(attempt.practice_mode),
+                        'mastery_eligible': bool(attempt.mastery_eligible),
+                    },
+                )
+            )
+
+    milestones = db.scalars(
+        select(MilestoneEvent)
+        .where(MilestoneEvent.topic_id == topic.id, MilestoneEvent.user_id == user_id)
+        .order_by(MilestoneEvent.created_at.desc())
+        .limit(80)
+    ).all()
+    for milestone in milestones:
+        entries.append(
+            TopicJournalEntryResponse(
+                id=f'milestone-{milestone.id}',
+                entry_type='milestone',
+                title=milestone.title,
+                description=milestone.message,
+                skill_node_id=milestone.skill_node_id,
+                skill_name=skill_map.get(milestone.skill_node_id) if milestone.skill_node_id else None,
+                occurred_at=milestone.created_at,
+                metadata={
+                    'milestone_type': milestone.milestone_type,
+                },
+            )
+        )
+
+    entries.sort(key=lambda item: item.occurred_at, reverse=True)
+    return TopicJournalResponse(
+        topic_id=topic.id,
+        topic_name=topic.name,
+        entries=entries[:240],
+    )
+
+
 def _assessment_to_response(
     db: Session,
     *,
@@ -934,6 +1297,18 @@ def delete_topic(
     )
     db.execute(delete(Document).where(Document.topic_id == topic_id, Document.user_id == current_user.id))
     db.execute(delete(Note).where(Note.topic_id == topic_id, Note.user_id == current_user.id))
+    exercise_completions = db.scalars(
+        select(ExerciseCompletion).where(
+            ExerciseCompletion.topic_id == topic_id,
+            ExerciseCompletion.user_id == current_user.id,
+        )
+    ).all()
+    for completion in exercise_completions:
+        if completion.proof_storage_path:
+            proof_path = Path(completion.proof_storage_path)
+            if proof_path.exists():
+                proof_path.unlink(missing_ok=True)
+    db.execute(delete(ExerciseCompletion).where(ExerciseCompletion.topic_id == topic_id, ExerciseCompletion.user_id == current_user.id))
     db.execute(delete(LearningResource).where(LearningResource.topic_id == topic_id))
     db.execute(delete(Assessment).where(Assessment.id.in_(assessment_ids_subquery)))
     db.execute(
@@ -1109,6 +1484,19 @@ def list_notes(
     notes = db.scalars(stmt.order_by(Note.updated_at.desc())).all()
 
     return NoteListResponse(notes=[_note_to_response(note) for note in notes])
+
+
+@router.get('/topics/{topic_id}/journal', response_model=TopicJournalResponse)
+def get_topic_journal(
+    topic_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> TopicJournalResponse:
+    topic = _get_topic_or_404(db, topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
+    return _topic_journal_response(db, topic=topic, user_id=current_user.id)
 
 
 @router.post('/topics/{topic_id}/notes', response_model=NoteResponse, status_code=status.HTTP_201_CREATED)
@@ -1540,6 +1928,168 @@ async def external_resources(
     )
 
 
+@router.get('/skills/{skill_id}/exercises/completions', response_model=ExerciseCompletionListResponse)
+def list_exercise_completions(
+    skill_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> ExerciseCompletionListResponse:
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Skill node not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    return _exercise_completion_snapshot(db, user_id=current_user.id, skill=skill)
+
+
+@router.post('/skills/{skill_id}/exercises/{exercise_index}/complete', response_model=ExerciseCompletionListResponse)
+async def complete_exercise(
+    skill_id: int,
+    exercise_index: int,
+    current_user: CurrentUser,
+    proof: UploadFile | None = File(default=None),
+    db: Session = Depends(get_db),
+) -> ExerciseCompletionListResponse:
+    if exercise_index < 0:
+        raise HTTPException(status_code=400, detail='exercise_index must be 0 or greater.')
+
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Skill node not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+
+    resource, exercise_items = _exercise_items_for_skill(
+        db,
+        user_id=current_user.id,
+        skill_id=skill.id,
+    )
+    if resource is None or not exercise_items:
+        raise HTTPException(
+            status_code=409,
+            detail='Generate exercises for this node first.',
+        )
+    if exercise_index >= len(exercise_items):
+        raise HTTPException(
+            status_code=400,
+            detail=f'Exercise index {exercise_index} is out of range for this node.',
+        )
+
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    now = datetime.utcnow()
+    title = str(exercise_items[exercise_index].get('title') or f'Exercise {exercise_index + 1}')[:180]
+    completion = db.scalar(
+        select(ExerciseCompletion).where(
+            ExerciseCompletion.user_id == current_user.id,
+            ExerciseCompletion.skill_node_id == skill.id,
+            ExerciseCompletion.exercise_index == exercise_index,
+        )
+    )
+    if completion is None:
+        completion = ExerciseCompletion(
+            user_id=current_user.id,
+            topic_id=topic.id,
+            skill_node_id=skill.id,
+            resource_id=resource.id,
+            exercise_index=exercise_index,
+            exercise_title=title,
+            completed_at=now,
+        )
+        db.add(completion)
+        db.flush()
+    else:
+        completion.resource_id = resource.id
+        completion.exercise_title = title
+        completion.completed_at = now
+
+    if proof is not None:
+        content_type = (proof.content_type or '').strip().lower()
+        if not (content_type.startswith('image/') or content_type == 'application/pdf'):
+            raise HTTPException(status_code=400, detail='Only image or PDF proof uploads are supported.')
+        data = await proof.read()
+        if not data:
+            raise HTTPException(status_code=400, detail='Uploaded proof file is empty.')
+        max_bytes = max(1, int(settings.exercise_proof_max_mb)) * 1024 * 1024
+        if len(data) > max_bytes:
+            raise HTTPException(
+                status_code=400,
+                detail=f'Proof upload is limited to {int(settings.exercise_proof_max_mb)}MB.',
+            )
+
+        suffix = Path(proof.filename or '').suffix.lower()
+        if not suffix:
+            suffix = '.pdf' if content_type == 'application/pdf' else '.png'
+
+        base_dir = _exercise_proof_base_dir() / f'user-{current_user.id}' / f'topic-{topic.id}' / f'skill-{skill.id}'
+        base_dir.mkdir(parents=True, exist_ok=True)
+        file_path = base_dir / f'exercise-{exercise_index + 1}-{uuid4().hex}{suffix}'
+        file_path.write_bytes(data)
+
+        if completion.proof_storage_path and completion.proof_storage_path != str(file_path):
+            old_path = Path(completion.proof_storage_path)
+            if old_path.exists():
+                old_path.unlink(missing_ok=True)
+
+        completion.proof_filename = proof.filename or file_path.name
+        completion.proof_content_type = content_type or 'application/octet-stream'
+        completion.proof_storage_path = str(file_path)
+        completion.proof_size_bytes = len(data)
+
+    db.commit()
+    db.refresh(completion)
+
+    state = _get_or_create_state_for_skill(db, user_id=current_user.id, skill=skill)
+    if state.exercises_completed_at is None:
+        profile_agent.apply_progress_event(
+            db,
+            user_id=current_user.id,
+            skill_node=skill,
+            action='complete_exercises',
+        )
+    else:
+        state.last_activity_at = now
+        db.commit()
+
+    _invalidate_recommendations(db, topic.id, current_user.id)
+    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+    return _exercise_completion_snapshot(db, user_id=current_user.id, skill=skill)
+
+
+@router.get('/exercise-completions/{completion_id}/proof')
+def get_exercise_completion_proof(
+    completion_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> FileResponse:
+    completion = db.scalar(
+        select(ExerciseCompletion).where(
+            ExerciseCompletion.id == completion_id,
+            ExerciseCompletion.user_id == current_user.id,
+        )
+    )
+    if completion is None:
+        raise HTTPException(status_code=404, detail='Exercise completion not found')
+    if not completion.proof_storage_path:
+        raise HTTPException(status_code=404, detail='No proof file exists for this completion.')
+
+    proof_path = Path(completion.proof_storage_path)
+    if not proof_path.exists():
+        raise HTTPException(status_code=404, detail='Proof file is missing from storage.')
+    return FileResponse(
+        path=proof_path,
+        media_type=completion.proof_content_type or 'application/octet-stream',
+        filename=completion.proof_filename or proof_path.name,
+    )
+
+
 @router.post('/assessments/generate', response_model=AssessmentDetailResponse)
 async def generate_assessment(
     payload: AssessmentGenerateRequest,
@@ -1554,6 +2104,16 @@ async def generate_assessment(
     if skill.topic_id != topic.id:
         raise HTTPException(status_code=400, detail='skill_node_id does not belong to this topic')
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    try:
+        await _ensure_assessment_source_material(
+            db,
+            user_id=current_user.id,
+            topic=topic,
+            skill=skill,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
     question_count = payload.question_count
     if question_count is None:
         question_count = assessment_question_count_for_depth(normalize_course_depth(topic.course_depth))
@@ -1599,6 +2159,15 @@ async def generate_quiz_compat(
     if topic.user_id != current_user.id:
         raise HTTPException(status_code=404, detail='Topic not found')
     _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+    try:
+        await _ensure_assessment_source_material(
+            db,
+            user_id=current_user.id,
+            topic=topic,
+            skill=skill,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
 
     try:
         assessment, source = await assessment_agent.generate_assessment(

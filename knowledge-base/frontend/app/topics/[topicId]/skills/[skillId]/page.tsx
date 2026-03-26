@@ -6,7 +6,9 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   acceptBranchSuggestion,
+  completeExercise,
   createDeepDiveBranch,
+  getExerciseCompletions,
   forceUnlockSkill,
   generateAssessment,
   generateBranchSuggestions,
@@ -27,6 +29,7 @@ import {
   AssessmentStyle,
   AssessmentResponseInput,
   AssessmentSubmissionResult,
+  ExerciseCompletionList,
   ExternalResource,
   BranchSuggestion,
   RecommendationItem,
@@ -51,6 +54,7 @@ type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 
 type NodeCache = {
   resources: Partial<Record<ResourceKind, Resource>>;
+  exerciseCompletions?: ExerciseCompletionList;
   assessment?: Assessment;
   assessmentResult?: AssessmentSubmissionResult;
   revealedAnswers?: AssessmentAnswerReveal[];
@@ -94,6 +98,14 @@ function sourceCopy(source: 'stored' | 'generated' | 'regenerated'): string {
   if (source === 'stored') return 'Loaded from saved content';
   if (source === 'generated') return 'Generated and saved';
   return 'Regenerated and saved';
+}
+
+function resolveBackendUrl(path: string | null | undefined): string | null {
+  if (!path) return null;
+  if (path.startsWith('http://') || path.startsWith('https://')) return path;
+  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+  const origin = apiBase.replace(/\/api\/?$/, '');
+  return `${origin}${path.startsWith('/') ? path : `/${path}`}`;
 }
 
 function questionTypeLabel(questionType: Assessment['questions'][number]['question_type']): string {
@@ -168,6 +180,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [assessmentDraftsByNode, setAssessmentDraftsByNode] = useState<
     Record<number, Record<number, AssessmentDraft>>
   >({});
+  const [exerciseProofFilesByNode, setExerciseProofFilesByNode] = useState<Record<number, Record<number, File | null>>>(
+    {}
+  );
   const [loadingByKey, setLoadingByKey] = useState<Record<string, boolean>>({});
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
@@ -257,6 +272,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
     if (activeTab === 'overview') {
       void ensureBranchSuggestions();
+      void ensureExerciseCompletions();
       return;
     }
     if (activeTab === 'lesson') {
@@ -269,6 +285,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
     if (activeTab === 'exercises') {
       void ensureResource('exercises');
+      void ensureExerciseCompletions();
       return;
     }
     if (activeTab === 'resources') {
@@ -326,11 +343,48 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           }
         };
       });
+      if (kind === 'exercises') {
+        await ensureExerciseCompletions(true);
+      }
       await loadTree(false);
     } catch (err) {
       setErrorState(kind, err instanceof Error ? err.message : `Failed to load ${kind}`, nodeId);
     } finally {
       setLoadingState(kind, false, nodeId);
+    }
+  }
+
+  async function ensureExerciseCompletions(force = false) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      return;
+    }
+    const existing = contentCache[nodeId]?.exerciseCompletions;
+    if (existing && !force) return;
+
+    setLoadingState('exercise-completions', true, nodeId);
+    setErrorState('exercise-completions', '', nodeId);
+    try {
+      const snapshot = await getExerciseCompletions(nodeId);
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            exerciseCompletions: snapshot,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState(
+        'exercise-completions',
+        err instanceof Error ? err.message : 'Failed to load exercise progress',
+        nodeId
+      );
+    } finally {
+      setLoadingState('exercise-completions', false, nodeId);
     }
   }
 
@@ -724,6 +778,62 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }));
   }
 
+  function updateExerciseProofFile(exerciseIndex: number, file: File | null) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setExerciseProofFilesByNode((prev) => ({
+      ...prev,
+      [nodeId]: {
+        ...(prev[nodeId] || {}),
+        [exerciseIndex]: file
+      }
+    }));
+  }
+
+  async function handleCompleteExercise(exerciseIndex: number) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState(
+        'exercise-completions',
+        selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.',
+        nodeId
+      );
+      return;
+    }
+    const proofFile = exerciseProofFilesByNode[nodeId]?.[exerciseIndex] || null;
+    const loadingKey = `exercise-complete-${exerciseIndex}`;
+    setLoadingState(loadingKey, true, nodeId);
+    setErrorState('exercise-completions', '', nodeId);
+    try {
+      const snapshot = await completeExercise({
+        skillId: nodeId,
+        exerciseIndex,
+        proofFile,
+      });
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            exerciseCompletions: snapshot,
+          },
+        };
+      });
+      updateExerciseProofFile(exerciseIndex, null);
+      await refreshTopicData(true);
+    } catch (err) {
+      setErrorState(
+        'exercise-completions',
+        err instanceof Error ? err.message : 'Failed to save exercise completion',
+        nodeId
+      );
+    } finally {
+      setLoadingState(loadingKey, false, nodeId);
+    }
+  }
+
   if (!tree && loadingTree) return <SkillWorkspaceSkeleton />;
 
   if (!tree || !selectedSkill) {
@@ -744,6 +854,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const lessonLoading = !!loadingByKey[keyFor('lesson', activeNodeId)];
   const examplesLoading = !!loadingByKey[keyFor('examples', activeNodeId)];
   const exercisesLoading = !!loadingByKey[keyFor('exercises', activeNodeId)];
+  const exerciseCompletionsLoading = !!loadingByKey[keyFor('exercise-completions', activeNodeId)];
   const assessmentLoading = !!loadingByKey[keyFor('quiz', activeNodeId)];
   const assessmentSubmitLoading = !!loadingByKey[keyFor('quiz-submit', activeNodeId)];
   const assessmentRevealLoading = !!loadingByKey[keyFor('quiz-reveal', activeNodeId)];
@@ -753,10 +864,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const branchSuggestionsLoading = !!loadingByKey[keyFor('branch-suggestions', activeNodeId)];
   const branchSuggestionsActionLoading = !!loadingByKey[keyFor('branch-suggestions-action', activeNodeId)];
   const branchSuggestionsError = errorByKey[keyFor('branch-suggestions', activeNodeId)] || '';
+  const exerciseCompletionsError = errorByKey[keyFor('exercise-completions', activeNodeId)] || '';
 
   const lessonResource = currentNodeCache?.resources?.lesson;
   const examplesResource = currentNodeCache?.resources?.examples;
   const exercisesResource = currentNodeCache?.resources?.exercises;
+  const exerciseCompletions = currentNodeCache?.exerciseCompletions;
   const externalResources = currentNodeCache?.externalResources || [];
   const assessment = currentNodeCache?.assessment;
   const assessmentResult = currentNodeCache?.assessmentResult;
@@ -768,12 +881,20 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const lesson = parseLessonContent(lessonResource?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
   const exercises = parseExercisesContent(exercisesResource?.structured_content);
-
   const lessonComplete = selectedSkill.lesson_completed;
   const exercisesComplete = selectedSkill.exercises_completed;
   const quizTaken = selectedSkill.quiz_taken;
   const isVerified = selectedSkill.progress_state === 'verified';
   const isLocked = selectedSkill.status === 'locked';
+  const completionByExerciseIndex = new Map(
+    (exerciseCompletions?.completions || []).map((item) => [item.exercise_index, item])
+  );
+  const exerciseProgressSummary =
+    exerciseCompletions && exerciseCompletions.total_exercises > 0
+      ? `${exerciseCompletions.completed_count}/${exerciseCompletions.total_exercises} completed`
+      : exercisesComplete
+        ? 'Recorded'
+        : 'Not started';
   const bestQuizScorePct =
     typeof selectedSkill.best_quiz_score === 'number' ? Math.round(selectedSkill.best_quiz_score * 100) : null;
 
@@ -934,7 +1055,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Progress Checklist</h3>
                 <ul className="mt-3 space-y-2">
                   <ProgressChecklistItem label="Lesson completed" complete={lessonComplete} />
-                  <ProgressChecklistItem label="Exercises completed" complete={exercisesComplete} />
+                  <ProgressChecklistItem
+                    label={`Exercises progress (${exerciseProgressSummary})`}
+                    complete={Boolean(exerciseCompletions && exerciseCompletions.completed_count > 0)}
+                  />
                   <ProgressChecklistItem label="Assessment taken" complete={quizTaken} />
                   <ProgressChecklistItem label="Node verified (score at least 70%)" complete={isVerified} />
                 </ul>
@@ -952,10 +1076,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   </button>
                   <button
                     className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-50"
-                    onClick={() => handleProgressUpdate('complete_exercises')}
-                    disabled={progressLoading || selectedSkill.status === 'locked' || !lessonComplete || exercisesComplete}
+                    onClick={() => onTabChange('exercises')}
+                    disabled={selectedSkill.status === 'locked'}
                   >
-                    {exercisesComplete ? 'Exercises completed' : 'Mark exercises complete'}
+                    Open exercises
                   </button>
                   <button
                     className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-50"
@@ -966,7 +1090,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     Open assessment
                   </button>
                 </div>
-                {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then complete exercises, then pass the assessment.</p>}
+                {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then work through at least one exercise before assessment.</p>}
+                {exerciseCompletions && exerciseCompletions.total_exercises > 0 && (
+                  <p className="muted mt-1 text-xs">
+                    Exercises are tracked individually. Complete one or both based on your learning focus.
+                  </p>
+                )}
                 {isLocked && (
                   <div className="mt-3 space-y-2">
                     <p className="text-xs text-red-700">
@@ -1152,6 +1281,100 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <div className="rounded-xl border border-black/10 bg-white p-4 text-sm">
                   Structured exercises format was invalid. Regenerate to refresh the saved content.
                 </div>
+              )}
+
+              {exerciseCompletionsLoading && (
+                <p className="rounded-md border border-black/10 bg-white p-3 text-sm">Loading exercise progress...</p>
+              )}
+              {exerciseCompletionsError && (
+                <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{exerciseCompletionsError}</p>
+              )}
+
+              {exercises && exercises.exercises.length > 0 && (
+                <section className="rounded-xl border border-black/10 bg-white p-4">
+                  <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Exercise Progress</h3>
+                    <span className="badge">
+                      {exerciseCompletions?.completed_count ?? 0}/{exerciseCompletions?.total_exercises ?? exercises.exercises.length} completed
+                    </span>
+                  </div>
+                  <div className="space-y-3">
+                    {exercises.exercises.map((exercise, index) => {
+                      const completion = completionByExerciseIndex.get(index);
+                      const pendingFile = exerciseProofFilesByNode[activeNodeId]?.[index] || null;
+                      const proofHref = resolveBackendUrl(completion?.proof_url);
+                      const completeLoading = !!loadingByKey[keyFor(`exercise-complete-${index}`, activeNodeId)];
+                      return (
+                        <article key={`${exercise.title}-${index}`} className="rounded-lg border border-black/10 bg-paper/40 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-semibold">
+                                Exercise {index + 1}: {exercise.title}
+                              </p>
+                              {completion ? (
+                                <p className="mt-1 text-xs text-emerald-800">
+                                  Completed {new Date(completion.completed_at).toLocaleString()}
+                                </p>
+                              ) : (
+                                <p className="mt-1 text-xs text-black/60">Not completed yet</p>
+                              )}
+                            </div>
+                            <span
+                              className={`rounded-full border px-2 py-1 text-[11px] ${
+                                completion
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                                  : 'border-black/15 bg-white text-black/70'
+                              }`}
+                            >
+                              {completion ? 'Completed' : 'Pending'}
+                            </span>
+                          </div>
+
+                          <div className="mt-3 grid gap-2 md:grid-cols-[1fr_auto] md:items-center">
+                            <input
+                              type="file"
+                              accept="image/*,.pdf"
+                              className="text-xs"
+                              onChange={(event) => updateExerciseProofFile(index, event.target.files?.[0] || null)}
+                            />
+                            <button
+                              type="button"
+                              className="rounded-md border border-black/20 bg-white px-3 py-2 text-xs disabled:opacity-60"
+                              onClick={() => handleCompleteExercise(index)}
+                              disabled={completeLoading}
+                            >
+                              {completeLoading
+                                ? 'Saving...'
+                                : pendingFile
+                                  ? completion
+                                    ? 'Update completion + proof'
+                                    : 'Complete with proof'
+                                  : completion
+                                    ? 'Update completion'
+                                    : 'Mark complete'}
+                            </button>
+                          </div>
+
+                          {pendingFile && (
+                            <p className="mt-2 text-xs text-black/60">
+                              Selected proof: {pendingFile.name}
+                            </p>
+                          )}
+                          {proofHref && (
+                            <a
+                              href={proofHref}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
+                            >
+                              View uploaded proof
+                            </a>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </section>
               )}
             </div>
           )}
