@@ -5,13 +5,20 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 
 import { useAuth } from '@/components/auth-provider';
-import { checkTopicPlausibility, createTopicAndInitialize, getMyProgressSummary, listTopics } from '@/lib/api';
+import {
+  checkTopicPlausibility,
+  createTopicAndInitialize,
+  getMyProgressSummary,
+  listTopics,
+  upgradeMyAccountToDev,
+} from '@/lib/api';
 import {
   ASSESSMENT_STYLE_OPTIONS,
   COURSE_DEPTH_OPTIONS,
   DEFAULT_ASSESSMENT_STYLES,
   STARTING_SKILL_LEVEL_OPTIONS,
 } from '@/lib/course-options';
+import { formatDisplayTag } from '@/lib/display-format';
 import { AssessmentStyle, CourseDepth, StartingSkillLevel, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
 
 const TOPIC_NAME_MAX = 120;
@@ -33,7 +40,7 @@ function stageLabel(stage: number): string {
 
 export function TopicsDashboard() {
   const router = useRouter();
-  const { user } = useAuth();
+  const { user, refreshUser } = useAuth();
 
   const [topics, setTopics] = useState<Topic[]>([]);
   const [progressSummary, setProgressSummary] = useState<UserProgressSummary | null>(null);
@@ -50,6 +57,8 @@ export function TopicsDashboard() {
   const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
   const [plausibilityPrompt, setPlausibilityPrompt] = useState<TopicPlausibilityCheck | null>(null);
   const [creating, setCreating] = useState(false);
+  const [upgradingDev, setUpgradingDev] = useState(false);
+  const [devUpgradeMessage, setDevUpgradeMessage] = useState('');
 
   const topicById = useMemo(() => {
     const map = new Map<number, Topic>();
@@ -166,6 +175,20 @@ export function TopicsDashboard() {
     await runTopicCreation();
   }
 
+  async function onUpgradeToDev() {
+    setUpgradingDev(true);
+    setDevUpgradeMessage('');
+    try {
+      await upgradeMyAccountToDev();
+      await refreshUser();
+      setDevUpgradeMessage('Developer tools enabled for this account.');
+    } catch (err) {
+      setDevUpgradeMessage(err instanceof Error ? err.message : 'Unable to enable developer tools.');
+    } finally {
+      setUpgradingDev(false);
+    }
+  }
+
   return (
     <main className="mx-auto w-full max-w-7xl p-6 md:p-10">
       <section className="relative overflow-hidden rounded-2xl border border-black/10 bg-gradient-to-br from-[#eef4ff] via-[#f8f7f2] to-[#eef7ed] p-6 md:p-8">
@@ -201,7 +224,25 @@ export function TopicsDashboard() {
               <Link href="/garden" className="rounded-lg border border-black/20 bg-white/90 px-4 py-2 text-sm">
                 View garden
               </Link>
+              {!user?.dev_tools_enabled && (
+                <button
+                  type="button"
+                  onClick={onUpgradeToDev}
+                  className="rounded-lg border border-fuchsia-300 bg-fuchsia-50 px-4 py-2 text-sm text-fuchsia-900 disabled:opacity-60"
+                  disabled={upgradingDev}
+                >
+                  {upgradingDev ? 'Enabling dev tools...' : 'Enable dev tools (local)'}
+                </button>
+              )}
+              {user?.dev_tools_enabled && (
+                <span className="rounded-lg border border-fuchsia-300 bg-fuchsia-50 px-3 py-2 text-xs text-fuchsia-900">
+                  Dev tools enabled
+                </span>
+              )}
             </div>
+            {devUpgradeMessage && (
+              <p className="mt-2 text-xs text-black/70">{devUpgradeMessage}</p>
+            )}
           </div>
 
           <article className="rounded-xl border border-black/10 bg-white/80 p-4 backdrop-blur-sm">
@@ -275,13 +316,6 @@ export function TopicsDashboard() {
                   <p className="mt-1 text-xs text-black/70">Complete nodes, unlock branches, and grow your garden.</p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={() => document.getElementById('create-topic-form')?.scrollIntoView({ behavior: 'smooth' })}
-                className="mt-4 rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white"
-              >
-                Create your first topic
-              </button>
             </article>
           )}
 
@@ -315,7 +349,7 @@ export function TopicsDashboard() {
                       </p>
                       {topic && (
                         <p className="text-xs text-black/60">
-                          {topic.course_depth.replace('_', ' ')} · {topic.starting_skill_level} · {topic.assessment_styles.length} assessment styles
+                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {topic.assessment_styles.length} Assessment Styles
                         </p>
                       )}
                     </div>

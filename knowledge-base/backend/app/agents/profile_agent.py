@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.course_preferences import normalize_starting_skill_level, starting_level_mastery_floor
 from app.db.models import DocumentChunk, SkillEdge, SkillNode, SkillStatus, Topic, User, UserSkillState
+from app.services.skill_tree_graph import build_normalized_skill_graph
 
 
 logger = logging.getLogger(__name__)
@@ -113,12 +114,13 @@ class ProfileAgent:
     def recompute_unlocks(self, db: Session, user_id: int, topic_id: int) -> None:
         nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic_id)).all()
         edges = db.scalars(select(SkillEdge).where(SkillEdge.topic_id == topic_id)).all()
-
-        prereq_map: dict[int, list[int]] = {}
-        for edge in edges:
-            if edge.edge_type != 'prerequisite':
-                continue
-            prereq_map.setdefault(edge.child_skill_id, []).append(edge.parent_skill_id)
+        normalized = build_normalized_skill_graph(
+            nodes=nodes,
+            edges=edges,
+            include_edge_types={'prerequisite'},
+            max_non_core_prereqs=2,
+        )
+        prereq_map = normalized.prereq_map
 
         state_map: dict[int, UserSkillState] = {}
         for node in nodes:
@@ -274,6 +276,57 @@ class ProfileAgent:
             mastery_delta=mastery_delta,
             confidence_signal=score,
         )
+
+    def apply_dev_complete_node(
+        self,
+        db: Session,
+        *,
+        user_id: int,
+        skill_node: SkillNode,
+    ) -> UserSkillState:
+        state = db.scalar(
+            select(UserSkillState).where(
+                UserSkillState.user_id == user_id,
+                UserSkillState.skill_node_id == skill_node.id,
+            )
+        )
+        if not state:
+            self.ensure_states_for_topic(db, user_id, skill_node.topic_id)
+            state = db.scalar(
+                select(UserSkillState).where(
+                    UserSkillState.user_id == user_id,
+                    UserSkillState.skill_node_id == skill_node.id,
+                )
+            )
+        if not state:
+            raise RuntimeError('Unable to load user skill state for developer completion.')
+
+        now = datetime.utcnow()
+        state.force_unlocked = True
+        state.lesson_completed_at = state.lesson_completed_at or now
+        state.exercises_completed_at = state.exercises_completed_at or now
+        state.last_activity_at = now
+        db.commit()
+        db.refresh(state)
+
+        target_mastery_floor = 0.92
+        mastery_delta = max(0.0, target_mastery_floor - float(state.mastery))
+        updated = self.apply_assessment_result(
+            db,
+            user_id=user_id,
+            skill_node=skill_node,
+            score=1.0,
+            mastery_delta=mastery_delta,
+            confidence_signal=1.0,
+        )
+        logger.info(
+            'profile.dev_complete_applied user_id=%s skill_id=%s mastery=%.3f progress_state=%s',
+            user_id,
+            skill_node.id,
+            updated.mastery,
+            updated.progress_state,
+        )
+        return updated
 
     def apply_assessment_result(
         self,

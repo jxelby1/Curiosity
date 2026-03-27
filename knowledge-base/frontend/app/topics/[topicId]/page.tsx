@@ -25,6 +25,7 @@ import {
   writeRecommendationCache,
   writeSkillTreeCache,
 } from '@/lib/cache';
+import { formatDisplayTag } from '@/lib/display-format';
 import { BranchSuggestion, RecommendationItem, SkillNode, SkillTree, TopicActionItem, TopicRetentionLoop } from '@/lib/types';
 import { TopicOverviewSkeleton } from '@/components/page-skeletons';
 import { PremiumSkillTree } from '@/components/skill-tree/premium-skill-tree';
@@ -248,7 +249,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
       const nextTree = await createDeepDiveBranch({
         skillId,
         focus: input.focus,
-        branch_size: input.purpose === 'exploration' ? 1 : 3,
+        branch_size: 1,
         purpose: input.purpose,
       });
       setTree(nextTree);
@@ -377,12 +378,10 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="badge border border-black/15 bg-white">Growth Stage {retention?.tree_stage || 1}</span>
-            <span className="badge border border-black/15 bg-white">
-              {tree.topic.course_depth === 'deep_dive' ? 'Deep dive course' : tree.topic.course_depth === 'light' ? 'Light course' : 'Standard course'}
-            </span>
-            <span className="badge border border-black/15 bg-white">{tree.topic.starting_skill_level} start</span>
-            {retention && <span className="badge border border-black/15 bg-white">{retention.cadence === 'daily' ? 'Daily plan' : 'Weekly plan'}</span>}
-            {!!retention?.streak_days && <span className="badge border border-black/15 bg-white">{retention.streak_days}-day streak</span>}
+            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.course_depth)} Course</span>
+            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.starting_skill_level)} Start</span>
+            {retention && <span className="badge border border-black/15 bg-white">{retention.cadence === 'daily' ? 'Daily Plan' : 'Weekly Plan'}</span>}
+            {!!retention?.streak_days && <span className="badge border border-black/15 bg-white">{retention.streak_days}-Day Streak</span>}
           </div>
         </div>
 

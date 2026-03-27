@@ -139,6 +139,12 @@ export async function getMe(): Promise<AuthUser> {
   return request<AuthUser>('/auth/me');
 }
 
+export async function upgradeMyAccountToDev(): Promise<AuthUser> {
+  return request<AuthUser>('/auth/me/upgrade-dev', {
+    method: 'POST',
+  });
+}
+
 export async function forgotPassword(email: string): Promise<ForgotPasswordResult> {
   return request<ForgotPasswordResult>('/auth/forgot-password', {
     method: 'POST',
@@ -530,6 +536,12 @@ export async function forceUnlockSkill(skillId: number): Promise<ProgressUpdateR
   });
 }
 
+export async function devCompleteSkill(skillId: number): Promise<ProgressUpdateResult> {
+  return request<ProgressUpdateResult>(`/skills/${skillId}/dev-complete`, {
+    method: 'POST',
+  });
+}
+
 export async function createDeepDiveBranch(input: {
   skillId: number;
   focus?: string;
@@ -537,7 +549,7 @@ export async function createDeepDiveBranch(input: {
   purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project';
 }): Promise<SkillTree> {
   const resolvedPurpose = input.purpose ?? 'exploration';
-  const resolvedBranchSize = input.branch_size ?? (resolvedPurpose === 'exploration' ? 1 : 3);
+  const resolvedBranchSize = input.branch_size ?? 1;
   return request<SkillTree>(`/skills/${input.skillId}/deep-dive`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -579,7 +591,7 @@ export async function acceptBranchSuggestion(input: {
   suggestionId: number;
   branch_size?: number;
 }): Promise<SkillTree> {
-  const query = input.branch_size ? `?branch_size=${input.branch_size}` : '';
+  const query = `?branch_size=${input.branch_size ?? 1}`;
   return request<SkillTree>(`/branch-suggestions/${input.suggestionId}/accept${query}`, {
     method: 'POST',
   });

@@ -148,7 +148,7 @@ class SkillTreeResponse(BaseModel):
 
 class DeepDiveBranchRequest(BaseModel):
     focus: str = Field(default='', max_length=240)
-    branch_size: int = Field(default=3, ge=1, le=5)
+    branch_size: int = Field(default=1, ge=1, le=5)
     purpose: Literal['exploration', 'specialization', 'enrichment', 'remediation', 'assessment_prep', 'project'] = 'exploration'
 
 

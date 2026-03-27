@@ -21,7 +21,7 @@ from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.agents.tutor_agent import TutorAgent
-from app.api.auth import CurrentUser
+from app.api.auth import CurrentUser, user_has_dev_tools
 from app.core.course_preferences import (
     assessment_question_count_for_depth,
     normalize_assessment_styles,
@@ -123,6 +123,7 @@ from app.services.llm import LLMService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 from app.services.retention import RetentionService
+from app.services.skill_tree_graph import build_normalized_skill_graph
 from app.services.topic_bootstrap import TopicBootstrapService
 from app.services.topic_plausibility import TopicPlausibilityService
 from app.utils.text import extract_text_from_upload
@@ -316,6 +317,26 @@ def _generate_note_title(body: str) -> str:
         return first_line[:80]
     words = cleaned.split()
     return ' '.join(words[:10])[:80] or 'Untitled note'
+
+
+def _markdown_to_plain_text(value: str) -> str:
+    text = (value or '').replace('\r\n', '\n').replace('\r', '\n')
+    text = text.replace('\\n', '\n').replace('\\t', '\t')
+    text = text.replace('\\*', '*').replace('\\_', '_').replace('\\`', '`')
+    text = text.replace('**', '').replace('__', '')
+    text = text.replace('*', '').replace('_', '')
+    text = text.replace('`', '')
+    lines = []
+    for line in text.split('\n'):
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        if trimmed.startswith('- '):
+            trimmed = trimmed[2:].strip()
+        elif trimmed.startswith('* '):
+            trimmed = trimmed[2:].strip()
+        lines.append(trimmed)
+    return ' '.join(lines).strip()
 
 
 def _get_topic_or_404(db: Session, topic_id: int) -> Topic:
@@ -696,156 +717,44 @@ def _assert_skill_unlocked_for_learning(db: Session, *, user_id: int, skill: Ski
 
 
 def _current_user_can_force_unlock(current_user: CurrentUser) -> bool:
-    if not settings.enable_dev_unlocks:
-        return False
-    if current_user.subscription_tier in {'dev', 'admin'}:
-        return True
-    if current_user.email.lower() in settings.dev_unlock_email_list:
-        return True
-    return False
+    return user_has_dev_tools(current_user)
 
 
 def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> SkillTreeResponse:
     nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
     edges = db.scalars(select(SkillEdge).where(SkillEdge.topic_id == topic.id)).all()
     node_map = {node.id: node for node in nodes}
+    normalized = build_normalized_skill_graph(
+        nodes=nodes,
+        edges=edges,
+        include_edge_types={'prerequisite', 'optional_branch'},
+        max_non_core_prereqs=2,
+    )
+    prereq_map = normalized.prereq_map
+    child_map = normalized.child_map
 
-    def _ordered_unique(items: list[int]) -> list[int]:
-        seen: set[int] = set()
-        ordered: list[int] = []
-        for value in items:
-            if value in seen:
-                continue
-            seen.add(value)
-            ordered.append(value)
-        return ordered
-
-    declared_prereq_map: dict[int, list[int]] = {node.id: [] for node in nodes}
-    for edge in edges:
-        if edge.edge_type not in {'prerequisite', 'optional_branch'}:
-            continue
-        if edge.child_skill_id not in node_map or edge.parent_skill_id not in node_map:
-            continue
-        if edge.parent_skill_id == edge.child_skill_id:
-            continue
-        declared_prereq_map[edge.child_skill_id].append(edge.parent_skill_id)
-    declared_prereq_map = {
-        node_id: _ordered_unique(parent_ids)
-        for node_id, parent_ids in declared_prereq_map.items()
-    }
-
-    core_nodes = [node for node in nodes if node.node_kind == 'core']
-    core_nodes_sorted = sorted(core_nodes, key=lambda item: (item.difficulty, item.id))
-    core_index = {node.id: index for index, node in enumerate(core_nodes_sorted)}
-    core_ids = set(core_index.keys())
-
-    explicit_core_parent_map: dict[int, list[int]] = {}
-    for node in core_nodes_sorted:
-        explicit_core_parent_map[node.id] = [
-            parent_id
-            for parent_id in declared_prereq_map.get(node.id, [])
-            if parent_id in core_ids and core_index[parent_id] < core_index[node.id]
-        ]
-
-    explicit_roots = [
-        node
-        for node in core_nodes_sorted
-        if len(explicit_core_parent_map.get(node.id, [])) == 0
-    ]
-    root_core = explicit_roots[0] if explicit_roots else (core_nodes_sorted[0] if core_nodes_sorted else None)
-
-    prereq_map: dict[int, list[int]] = {}
-    orphan_repairs: list[dict[str, object]] = []
-    for node in nodes:
-        declared_parents = declared_prereq_map.get(node.id, [])
-        if node.node_kind != 'core':
-            prereq_map[node.id] = declared_parents[:2]
-            continue
-
-        if root_core and node.id == root_core.id:
-            prereq_map[node.id] = []
-            continue
-
-        valid_declared_core_parents = explicit_core_parent_map.get(node.id, [])
-        if valid_declared_core_parents:
-            chosen_parent = max(valid_declared_core_parents, key=lambda parent_id: core_index[parent_id])
-            prereq_map[node.id] = [chosen_parent]
-            continue
-
-        chosen_parent: int | None = None
-        reason: str = 'missing'
-        idx = core_index.get(node.id)
-        if idx is not None and idx > 0:
-            chosen_parent = core_nodes_sorted[idx - 1].id
-            reason = 'sequential_core_repair'
-        elif root_core and root_core.id != node.id:
-            chosen_parent = root_core.id
-            reason = 'root_core_repair'
-
-        if chosen_parent is None:
-            prereq_map[node.id] = []
-            orphan_repairs.append(
-                {
-                    'node_id': node.id,
-                    'node_title': node.name,
-                    'is_core_path': True,
-                    'declared_parent_ids': declared_parents,
-                    'repaired_parent_id': None,
-                    'repair_succeeded': False,
-                    'reason': reason,
-                }
-            )
-            continue
-
-        prereq_map[node.id] = [chosen_parent]
-        orphan_repairs.append(
-            {
-                'node_id': node.id,
-                'node_title': node.name,
-                'is_core_path': True,
-                'declared_parent_ids': declared_parents,
-                'repaired_parent_id': chosen_parent,
-                'repair_succeeded': True,
-                'reason': reason,
-            }
-        )
-
-    child_map: dict[int, list[int]] = {}
-    for child_id, parent_ids in prereq_map.items():
-        for parent_id in parent_ids:
-            child_map.setdefault(parent_id, []).append(child_id)
-    child_map = {
-        parent_id: _ordered_unique(child_ids)
-        for parent_id, child_ids in child_map.items()
-    }
-
-    core_nodes_without_parent = [
-        node.id
-        for node in core_nodes_sorted
-        if not prereq_map.get(node.id)
-    ]
-    if len(core_nodes_without_parent) > 1:
+    if len(normalized.core_nodes_without_parent) > 1:
         logger.error(
             'skill_tree.graph.core_integrity_violation topic_id=%s root_candidates=%s',
             topic.id,
-            core_nodes_without_parent,
+            normalized.core_nodes_without_parent,
         )
-    for repair in orphan_repairs:
-        if repair['repair_succeeded']:
+    for repair in normalized.repairs:
+        if repair.repair_succeeded:
             logger.warning(
                 'skill_tree.graph.orphan_core_node topic_id=%s node_id=%s repaired_parent_id=%s reason=%s',
                 topic.id,
-                repair['node_id'],
-                repair['repaired_parent_id'],
-                repair['reason'],
+                repair.node_id,
+                repair.repaired_parent_id,
+                repair.reason,
             )
         else:
             logger.error(
                 'skill_tree.graph.orphan_core_node topic_id=%s node_id=%s repair_failed reason=%s declared_parents=%s',
                 topic.id,
-                repair['node_id'],
-                repair['reason'],
-                repair['declared_parent_ids'],
+                repair.node_id,
+                repair.reason,
+                repair.declared_parent_ids,
             )
 
     state_map: dict[int, UserSkillState] = {}
@@ -1053,24 +962,44 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         .limit(160)
     ).all()
     for note in notes:
-        snippet = (note.body or '').strip().replace('\n', ' ')
+        snippet = _markdown_to_plain_text(note.body or '')
         snippet = snippet[:180] + ('…' if len(snippet) > 180 else '')
+        note_title = note.title or 'Untitled note'
         entries.append(
             TopicJournalEntryResponse(
-                id=f'note-{note.id}',
+                id=f'note-created-{note.id}',
                 entry_type='note',
-                title=note.title or 'Untitled note',
-                description=snippet or 'Personal note updated.',
+                title=f'Added a new note: {note_title}',
+                description=snippet or 'Started a new note.',
                 skill_node_id=note.skill_node_id,
                 skill_name=skill_map.get(note.skill_node_id) if note.skill_node_id else None,
-                occurred_at=note.updated_at,
+                occurred_at=note.created_at,
                 metadata={
+                    'note_event': 'created',
                     'note_type': note.note_type.value,
                     'source_type': note.source_type,
                     'tags': note.tags or [],
                 },
             )
         )
+        if (note.updated_at - note.created_at).total_seconds() >= 1:
+            entries.append(
+                TopicJournalEntryResponse(
+                    id=f'note-updated-{note.id}',
+                    entry_type='note',
+                    title=f'Updated note: {note_title}',
+                    description=snippet or 'Personal note updated.',
+                    skill_node_id=note.skill_node_id,
+                    skill_name=skill_map.get(note.skill_node_id) if note.skill_node_id else None,
+                    occurred_at=note.updated_at,
+                    metadata={
+                        'note_event': 'updated',
+                        'note_type': note.note_type.value,
+                        'source_type': note.source_type,
+                        'tags': note.tags or [],
+                    },
+                )
+            )
 
     exercise_completions = db.scalars(
         select(ExerciseCompletion)
@@ -2791,6 +2720,46 @@ async def force_unlock_skill(
     )
 
 
+@router.post('/skills/{skill_id}/dev-complete', response_model=MasteryUpdateResponse)
+async def dev_complete_skill(
+    skill_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> MasteryUpdateResponse:
+    if not _current_user_can_force_unlock(current_user):
+        raise HTTPException(status_code=403, detail='Dev tools are not enabled for this account.')
+
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Skill node not found')
+
+    unlocked_before = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    state = profile_agent.apply_dev_complete_node(
+        db,
+        user_id=current_user.id,
+        skill_node=skill,
+    )
+
+    _invalidate_recommendations(db, topic.id, current_user.id)
+    unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
+    newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
+    if newly_unlocked_ids:
+        topic_bootstrap_service.prepare_unlocked_nodes(
+            topic_id=topic.id,
+            user_id=current_user.id,
+            node_ids=newly_unlocked_ids,
+        )
+    _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
+
+    return MasteryUpdateResponse(
+        skill_node_id=skill_id,
+        mastery=round(state.mastery, 3),
+        status=state.status,
+        progress_state=state.progress_state,  # type: ignore[arg-type]
+    )
+
+
 @router.get('/topics/{topic_id}/progress', response_model=TopicProgressResponse)
 def get_topic_progress(
     topic_id: int,
@@ -3111,7 +3080,7 @@ async def generate_branch_suggestions(
 async def accept_branch_suggestion(
     suggestion_id: int,
     current_user: CurrentUser,
-    branch_size: int = Query(default=3, ge=1, le=5),
+    branch_size: int = Query(default=1, ge=1, le=5),
     db: Session = Depends(get_db),
 ) -> SkillTreeResponse:
     suggestion = db.scalar(

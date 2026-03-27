@@ -14,7 +14,9 @@ import {
   uploadFileNote
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
+import { formatDisplayTag } from '@/lib/display-format';
 import { DocumentItem, NoteType, PersonalNote, SkillTree, TopicJournalEntry } from '@/lib/types';
+import { MarkdownContent, markdownToPlainText } from '@/components/markdown-content';
 import { TopicHeader } from '@/components/topic-header';
 import { NotesWorkspaceSkeleton } from '@/components/page-skeletons';
 
@@ -45,6 +47,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [body, setBody] = useState('');
   const [noteType, setNoteType] = useState<NoteType>('personal');
   const [linkedSkillId, setLinkedSkillId] = useState<string>('');
+  const [isEditingNote, setIsEditingNote] = useState(false);
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
@@ -81,6 +84,9 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       setNotes(noteData);
       if (noteData.length === 0) {
         setSelectedNoteId(null);
+        setIsEditingNote(true);
+      } else if (selectedNoteId === null && !isEditingNote) {
+        setSelectedNoteId(noteData[0].id);
       } else if (selectedNoteId && !noteData.some((note) => note.id === selectedNoteId)) {
         setSelectedNoteId(noteData[0].id);
       }
@@ -89,7 +95,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     } finally {
       setLoadingNotes(false);
     }
-  }, [searchQuery, selectedNoteId, topicId]);
+  }, [isEditingNote, searchQuery, selectedNoteId, topicId]);
 
   const loadDocuments = useCallback(async () => {
     setLoadingDocuments(true);
@@ -128,6 +134,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody(selectedNote.body);
     setNoteType(selectedNote.note_type);
     setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+    setIsEditingNote(false);
   }, [selectedNote]);
 
   function resetEditorForNewNote() {
@@ -136,9 +143,33 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody('');
     setNoteType('personal');
     setLinkedSkillId('');
+    setIsEditingNote(true);
+  }
+
+  function beginEditingSelectedNote() {
+    if (!selectedNote) return;
+    setTitle(selectedNote.title);
+    setBody(selectedNote.body);
+    setNoteType(selectedNote.note_type);
+    setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+    setIsEditingNote(true);
+  }
+
+  function cancelEditingSelectedNote() {
+    if (selectedNote) {
+      setTitle(selectedNote.title);
+      setBody(selectedNote.body);
+      setNoteType(selectedNote.note_type);
+      setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+      setIsEditingNote(false);
+      return;
+    }
+    resetEditorForNewNote();
   }
 
   function journalEntryLabel(entry: TopicJournalEntry): string {
+    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'created') return 'Note created';
+    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'updated') return 'Note updated';
     if (entry.entry_type === 'exercise') return 'Exercise';
     if (entry.entry_type === 'assessment') return 'Assessment';
     if (entry.entry_type === 'module') return 'Module';
@@ -175,6 +206,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       }
       await loadNotes();
       await loadJournal();
+      setIsEditingNote(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to save note');
     } finally {
@@ -381,15 +413,18 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                   className={`w-full rounded-lg border p-3 text-left text-sm ${
                     selectedNoteId === note.id ? 'border-ink bg-paper/70' : 'border-black/10 bg-white'
                   }`}
-                  onClick={() => setSelectedNoteId(note.id)}
+                  onClick={() => {
+                    setSelectedNoteId(note.id);
+                    setIsEditingNote(false);
+                  }}
                   type="button"
                 >
                   <p className="font-semibold">{note.title}</p>
-                  <p className="muted mt-1 line-clamp-2 text-xs">{note.body}</p>
+                  <p className="muted mt-1 line-clamp-2 text-xs">{markdownToPlainText(note.body)}</p>
                   <div className="mt-2 flex items-center justify-between gap-2">
                     <div className="flex items-center gap-1">
-                      <span className="badge">{note.note_type}</span>
-                      <span className="badge">{note.source_type.replace('_', ' ')}</span>
+                      <span className="badge">{formatDisplayTag(note.note_type)}</span>
+                      <span className="badge">{formatDisplayTag(note.source_type)}</span>
                     </div>
                     <span className="text-[11px] text-black/60">{new Date(note.updated_at).toLocaleDateString()}</span>
                   </div>
@@ -404,71 +439,116 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           </article>
 
           <article className="panel p-5">
-            <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit Note' : 'Create Note'}</h2>
-            <p className="muted mt-1 text-sm">Use notes for takeaways, reflections, and reminders tied to this topic.</p>
+            {selectedNote && !isEditingNote ? (
+              <>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">{selectedNote.title || 'Untitled note'}</h2>
+                    <p className="muted mt-1 text-sm">
+                      {formatDisplayTag(selectedNote.note_type)} · {new Date(selectedNote.updated_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      className="rounded-lg border border-black/20 bg-white px-3 py-1.5 text-sm"
+                      onClick={beginEditingSelectedNote}
+                    >
+                      Edit note
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-red-300 bg-white px-3 py-1.5 text-sm text-red-700 disabled:opacity-60"
+                      onClick={onDeleteNote}
+                      disabled={savingNote}
+                    >
+                      Delete note
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-4 rounded-xl border border-black/10 bg-white p-4">
+                  <MarkdownContent markdown={selectedNote.body} />
+                </div>
+              </>
+            ) : (
+              <>
+                <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit Note' : 'Create Note'}</h2>
+                <p className="muted mt-1 text-sm">Use notes for takeaways, reflections, and reminders tied to this topic.</p>
 
-            <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
-              <input
-                value={title}
-                onChange={(event) => setTitle(event.target.value)}
-                className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                placeholder="Title (optional)"
-                maxLength={NOTE_TITLE_MAX}
-              />
-              <p className="text-right text-xs text-black/60">{title.length}/{NOTE_TITLE_MAX}</p>
+                <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
+                  <input
+                    value={title}
+                    onChange={(event) => setTitle(event.target.value)}
+                    className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                    placeholder="Title (optional)"
+                    maxLength={NOTE_TITLE_MAX}
+                  />
+                  <p className="text-right text-xs text-black/60">{title.length}/{NOTE_TITLE_MAX}</p>
 
-              <div className="grid gap-2 md:grid-cols-2">
-                <select
-                  value={noteType}
-                  onChange={(event) => setNoteType(event.target.value as NoteType)}
-                  className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                >
-                  {NOTE_TYPE_OPTIONS.map((item) => (
-                    <option key={item.value} value={item.value}>
-                      {item.label}
-                    </option>
-                  ))}
-                </select>
+                  <div className="grid gap-2 md:grid-cols-2">
+                    <select
+                      value={noteType}
+                      onChange={(event) => setNoteType(event.target.value as NoteType)}
+                      className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                    >
+                      {NOTE_TYPE_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
 
-                <select
-                  value={linkedSkillId}
-                  onChange={(event) => setLinkedSkillId(event.target.value)}
-                  className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                >
-                  <option value="">All skills (topic-level)</option>
-                  {tree.nodes.map((node) => (
-                    <option key={node.id} value={node.id}>
-                      {node.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+                    <select
+                      value={linkedSkillId}
+                      onChange={(event) => setLinkedSkillId(event.target.value)}
+                      className="rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
+                    >
+                      <option value="">All skills (topic-level)</option>
+                      {tree.nodes.map((node) => (
+                        <option key={node.id} value={node.id}>
+                          {node.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
 
-              <textarea
-                value={body}
-                onChange={(event) => setBody(event.target.value)}
-                className="min-h-[260px] w-full rounded-lg border border-black/15 bg-white p-3 text-sm"
-                placeholder="Write notes, takeaways, reflections, reminders, or summaries..."
-                maxLength={NOTE_BODY_MAX}
-              />
-              <p className="text-right text-xs text-black/60">{body.length}/{NOTE_BODY_MAX}</p>
+                  <textarea
+                    value={body}
+                    onChange={(event) => setBody(event.target.value)}
+                    className="min-h-[260px] w-full rounded-lg border border-black/15 bg-white p-3 text-sm"
+                    placeholder="Write notes, takeaways, reflections, reminders, or summaries..."
+                    maxLength={NOTE_BODY_MAX}
+                  />
+                  <p className="text-right text-xs text-black/60">{body.length}/{NOTE_BODY_MAX}</p>
 
-              <div className="flex flex-wrap gap-2">
-                <button className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60" disabled={savingNote}>
-                  {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create note'}
-                </button>
-                {selectedNoteId && (
-                  <button
-                    className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm text-red-700 disabled:opacity-60"
-                    onClick={onDeleteNote}
-                    disabled={savingNote}
-                    type="button"
-                  >
-                    Delete note
-                  </button>
-                )}
-              </div>
-            </form>
+                  <div className="flex flex-wrap gap-2">
+                    <button className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60" disabled={savingNote}>
+                      {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create note'}
+                    </button>
+                    {selectedNoteId && (
+                      <>
+                        <button
+                          className="rounded-lg border border-black/20 bg-white px-4 py-2 text-sm"
+                          onClick={cancelEditingSelectedNote}
+                          disabled={savingNote}
+                          type="button"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm text-red-700 disabled:opacity-60"
+                          onClick={onDeleteNote}
+                          disabled={savingNote}
+                          type="button"
+                        >
+                          Delete note
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </form>
+              </>
+            )}
           </article>
         </section>
       )}

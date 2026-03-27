@@ -29,6 +29,7 @@ export interface AuthUser {
   display_name: string;
   onboarding_state: string;
   subscription_tier: string;
+  dev_tools_enabled: boolean;
   xp: number;
   level: number;
   preferences: Record<string, unknown>;

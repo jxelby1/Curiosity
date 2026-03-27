@@ -25,6 +25,7 @@ from app.services.llm import LLMService
 logger = logging.getLogger(__name__)
 MAX_PREREQUISITES_PER_NODE = 2
 MAX_PENDING_BRANCH_SUGGESTIONS = 1
+DEFAULT_OPTIONAL_BRANCH_NODE_COUNT = 1
 
 
 class SkillGraphAgent:
@@ -137,10 +138,10 @@ class SkillGraphAgent:
 
     @staticmethod
     def _resolve_effective_branch_size(*, requested_size: int, branch_purpose: str) -> int:
-        # Exploration branches intentionally start as a single lightweight node.
-        if branch_purpose == 'exploration':
-            return 1
-        return max(1, min(5, requested_size))
+        # Optional branch creation is intentionally lightweight for now.
+        # Keep exactly one immediately available node regardless of purpose.
+        _ = requested_size, branch_purpose
+        return DEFAULT_OPTIONAL_BRANCH_NODE_COUNT
 
     async def create_skill_tree(self, db: Session, topic: Topic) -> list[SkillNode]:
         course_depth = normalize_course_depth(topic.course_depth)

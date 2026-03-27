@@ -8,6 +8,7 @@ import {
   acceptBranchSuggestion,
   completeExercise,
   createDeepDiveBranch,
+  devCompleteSkill,
   getExerciseCompletions,
   forceUnlockSkill,
   generateAssessment,
@@ -23,6 +24,7 @@ import {
   updateProgress
 } from '@/lib/api';
 import { readRecommendationCache, readSkillTreeCache, writeRecommendationCache, writeSkillTreeCache } from '@/lib/cache';
+import { formatDisplayTag } from '@/lib/display-format';
 import {
   AssessmentAnswerReveal,
   Assessment,
@@ -45,6 +47,7 @@ import {
   parseExercisesContent,
   parseLessonContent
 } from '@/components/learning-content';
+import { useAuth } from '@/components/auth-provider';
 import { SkillWorkspaceSkeleton } from '@/components/page-skeletons';
 import { TopicHeader } from '@/components/topic-header';
 
@@ -76,7 +79,7 @@ function statusClasses(status: SkillNode['status']): string {
 }
 
 function progressStateLabel(state: ProgressState): string {
-  if (state === 'not_started') return 'Not started';
+  if (state === 'not_started') return 'Not Started';
   if (state === 'learning') return 'Learning';
   if (state === 'completed') return 'Completed';
   return 'Verified';
@@ -109,26 +112,26 @@ function resolveBackendUrl(path: string | null | undefined): string | null {
 }
 
 function questionTypeLabel(questionType: Assessment['questions'][number]['question_type']): string {
-  if (questionType === 'multiple_choice') return 'Multiple choice';
-  if (questionType === 'short_answer') return 'Short answer';
+  if (questionType === 'multiple_choice') return 'Multiple Choice';
+  if (questionType === 'short_answer') return 'Short Answer';
   if (questionType === 'explain') return 'Explain';
-  if (questionType === 'scenario') return 'Applied scenario';
-  if (questionType === 'error_spotting') return 'Error spotting';
+  if (questionType === 'scenario') return 'Applied Scenario';
+  if (questionType === 'error_spotting') return 'Error Spotting';
   return 'Reflection';
 }
 
 function assessmentStyleLabel(style: AssessmentStyle | string): string {
-  if (style === 'open_text') return 'Open text';
-  if (style === 'short_answer') return 'Short answer';
-  if (style === 'multiple_choice') return 'Multiple choice';
-  if (style === 'flashcard') return 'Flashcard recall';
-  if (style === 'scenario') return 'Scenario reasoning';
-  if (style === 'coding') return 'Coding assessment';
+  if (style === 'open_text') return 'Open Text';
+  if (style === 'short_answer') return 'Short Answer';
+  if (style === 'multiple_choice') return 'Multiple Choice';
+  if (style === 'flashcard') return 'Flashcard Recall';
+  if (style === 'scenario') return 'Scenario Reasoning';
+  if (style === 'coding') return 'Coding Assessment';
   if (style === 'debugging') return 'Debugging';
-  if (style === 'code_completion') return 'Code completion';
-  if (style === 'code_interpretation') return 'Code interpretation';
-  if (style === 'math_problem') return 'Math problem';
-  return style.replace(/_/g, ' ');
+  if (style === 'code_completion') return 'Code Completion';
+  if (style === 'code_interpretation') return 'Code Interpretation';
+  if (style === 'math_problem') return 'Math Problem';
+  return formatDisplayTag(style);
 }
 
 const tabs: Array<{ id: LearningTab; label: string }> = [
@@ -166,6 +169,7 @@ function ProgressChecklistItem({ label, complete }: { label: string; complete: b
 }
 
 export default function SkillWorkspacePage({ params }: { params: { topicId: string; skillId: string } }) {
+  const { user } = useAuth();
   const topicId = params.topicId;
   const routeSkillId = Number(params.skillId);
   const searchParams = useSearchParams();
@@ -727,6 +731,21 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  async function handleDevComplete() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    setLoadingState('dev-complete', true, nodeId);
+    setErrorState('dev-complete', '', nodeId);
+    try {
+      await devCompleteSkill(nodeId);
+      await refreshTopicData(true);
+    } catch (err) {
+      setErrorState('dev-complete', err instanceof Error ? err.message : 'Failed to complete node in dev mode', nodeId);
+    } finally {
+      setLoadingState('dev-complete', false, nodeId);
+    }
+  }
+
   async function handleDeepDive() {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
@@ -741,7 +760,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       const nextTree = await createDeepDiveBranch({
         skillId: nodeId,
         focus: deepDiveFocus.trim() || undefined,
-        branch_size: deepDivePurpose === 'exploration' ? 1 : 3,
+        branch_size: 1,
         purpose: deepDivePurpose,
       });
       setTree(nextTree);
@@ -849,6 +868,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const progressLoading = !!loadingByKey[keyFor('progress', activeNodeId)];
   const forceUnlockError = errorByKey[keyFor('force-unlock', activeNodeId)] || '';
   const forceUnlockLoading = !!loadingByKey[keyFor('force-unlock', activeNodeId)];
+  const devCompleteError = errorByKey[keyFor('dev-complete', activeNodeId)] || '';
+  const devCompleteLoading = !!loadingByKey[keyFor('dev-complete', activeNodeId)];
+  const canUseDevTools = !!user?.dev_tools_enabled;
 
   const lessonLoading = !!loadingByKey[keyFor('lesson', activeNodeId)];
   const examplesLoading = !!loadingByKey[keyFor('examples', activeNodeId)];
@@ -937,7 +959,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           {node.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
                         </span>
                       )}
-                      <span className={`badge border ${statusClasses(node.status)}`}>{node.status.replace('_', ' ')}</span>
+                      <span className={`badge border ${statusClasses(node.status)}`}>{formatDisplayTag(node.status)}</span>
                     </div>
                   </div>
                   <div className="mt-2 flex items-center justify-between gap-2">
@@ -1000,7 +1022,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
                   {progressStateLabel(selectedSkill.progress_state)}
                 </span>
-                <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{selectedSkill.status.replace('_', ' ')}</span>
+                <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
               </div>
             </div>
 
@@ -1095,7 +1117,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     Exercises are tracked individually. Complete one or both based on your learning focus.
                   </p>
                 )}
-                {isLocked && (
+                {isLocked && canUseDevTools && (
                   <div className="mt-3 space-y-2">
                     <p className="text-xs text-red-700">
                       This node is locked. Verify prerequisite nodes to unlock learning content.
@@ -1109,6 +1131,22 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                       {forceUnlockLoading ? 'Unlocking...' : 'Dev unlock (eligible accounts only)'}
                     </button>
                     {forceUnlockError && <p className="text-xs text-red-700">{forceUnlockError}</p>}
+                  </div>
+                )}
+                {canUseDevTools && (
+                  <div className="mt-3 space-y-2">
+                    <button
+                      type="button"
+                      className="rounded-md border border-fuchsia-300 bg-fuchsia-100 px-3 py-2 text-xs text-fuchsia-900 disabled:opacity-60"
+                      onClick={handleDevComplete}
+                      disabled={devCompleteLoading}
+                    >
+                      {devCompleteLoading ? 'Completing...' : 'Dev: Complete node'}
+                    </button>
+                    <p className="text-[11px] text-fuchsia-900/75">
+                      Simulates a completed node to test mastery progression and garden growth.
+                    </p>
+                    {devCompleteError && <p className="text-xs text-red-700">{devCompleteError}</p>}
                   </div>
                 )}
                 {progressError && <p className="mt-3 text-sm text-red-700">{progressError}</p>}
@@ -1176,7 +1214,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                           <p className="muted mt-1 text-xs">{suggestion.focus}</p>
                         </div>
                         <span className="badge border border-black/15 bg-white text-black/70">
-                          {suggestion.purpose.replace('_', ' ')}
+                          {formatDisplayTag(suggestion.purpose)}
                         </span>
                       </div>
                       <p className="muted mt-2 text-sm">{suggestion.rationale}</p>

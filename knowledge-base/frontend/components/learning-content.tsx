@@ -1,5 +1,7 @@
 'use client';
 
+import { formatDisplayTag } from '@/lib/display-format';
+
 type LessonShape = {
   title: string;
   summary: string;
@@ -227,7 +229,7 @@ export function ExercisesRenderer({ content }: { content: ExercisesShape }) {
           <article key={exercise.title} className="rounded-xl border border-black/10 bg-white p-5">
             <div className="mb-3 flex items-center justify-between gap-3">
               <h3 className="text-lg font-semibold">{exercise.title}</h3>
-              <span className="badge capitalize">{exercise.difficulty}</span>
+              <span className="badge">{formatDisplayTag(exercise.difficulty)}</span>
             </div>
 
             <div className="space-y-4 text-sm">

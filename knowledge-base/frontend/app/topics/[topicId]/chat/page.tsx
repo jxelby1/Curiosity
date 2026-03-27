@@ -10,6 +10,7 @@ import {
   saveTutorResponseToNotes
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
+import { formatDisplayTag } from '@/lib/display-format';
 import { PersonalNote, SkillTree, TutorStructuredAnswer } from '@/lib/types';
 import { AssistantMessage, UserMessage } from '@/components/chat-message';
 import { TopicHeader } from '@/components/topic-header';
@@ -243,7 +244,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                 type="button"
               >
                 <p className="font-semibold">{node.name}</p>
-                <p className="muted mt-1 text-xs">{node.status.replace('_', ' ')} · {node.progress_state.replace('_', ' ')}</p>
+                <p className="muted mt-1 text-xs">{formatDisplayTag(node.status)} · {formatDisplayTag(node.progress_state)}</p>
               </button>
             ))}
           </div>
