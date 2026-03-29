@@ -984,6 +984,18 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         for node in db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
     }
     entries: list[TopicJournalEntryResponse] = []
+    counts: dict[str, int] = {
+        'notes_created': 0,
+        'notes_updated': 0,
+        'lessons_completed': 0,
+        'exercises_completed': 0,
+        'artifacts_uploaded': 0,
+        'assessments_taken': 0,
+        'assessments_passed': 0,
+        'milestones_reached': 0,
+        'branches_accepted': 0,
+        'branches_rejected': 0,
+    }
 
     notes = db.scalars(
         select(Note)
@@ -1004,6 +1016,8 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 skill_node_id=note.skill_node_id,
                 skill_name=skill_map.get(note.skill_node_id) if note.skill_node_id else None,
                 occurred_at=note.created_at,
+                importance='medium',
+                evidence_strength='direct',
                 metadata={
                     'note_event': 'created',
                     'note_type': note.note_type.value,
@@ -1012,6 +1026,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 },
             )
         )
+        counts['notes_created'] += 1
         if (note.updated_at - note.created_at).total_seconds() >= 1:
             entries.append(
                 TopicJournalEntryResponse(
@@ -1022,6 +1037,8 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     skill_node_id=note.skill_node_id,
                     skill_name=skill_map.get(note.skill_node_id) if note.skill_node_id else None,
                     occurred_at=note.updated_at,
+                    importance='low',
+                    evidence_strength='contextual',
                     metadata={
                         'note_event': 'updated',
                         'note_type': note.note_type.value,
@@ -1030,6 +1047,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     },
                 )
             )
+            counts['notes_updated'] += 1
 
     exercise_completions = db.scalars(
         select(ExerciseCompletion)
@@ -1055,6 +1073,8 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 skill_node_id=completion.skill_node_id,
                 skill_name=skill_map.get(completion.skill_node_id),
                 occurred_at=completion.completed_at,
+                importance='high',
+                evidence_strength='direct',
                 metadata={
                     'exercise_index': completion.exercise_index,
                     'proof_uploaded': has_proof,
@@ -1063,6 +1083,9 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 },
             )
         )
+        counts['exercises_completed'] += 1
+        if has_proof:
+            counts['artifacts_uploaded'] += 1
 
     states = db.scalars(
         select(UserSkillState)
@@ -1081,9 +1104,12 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     skill_node_id=state.skill_node_id,
                     skill_name=skill_name,
                     occurred_at=state.lesson_completed_at,
+                    importance='high',
+                    evidence_strength='direct',
                     metadata={'event': 'lesson_completed'},
                 )
             )
+            counts['lessons_completed'] += 1
         if state.exercises_completed_at:
             entries.append(
                 TopicJournalEntryResponse(
@@ -1094,6 +1120,8 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     skill_node_id=state.skill_node_id,
                     skill_name=skill_name,
                     occurred_at=state.exercises_completed_at,
+                    importance='low',
+                    evidence_strength='derived',
                     metadata={'event': 'exercise_progress'},
                 )
             )
@@ -1107,6 +1135,8 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     skill_node_id=state.skill_node_id,
                     skill_name=skill_name,
                     occurred_at=state.quiz_taken_at,
+                    importance='low',
+                    evidence_strength='derived',
                     metadata={'event': 'assessment_activity'},
                 )
             )
@@ -1138,13 +1168,19 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     skill_node_id=skill_id,
                     skill_name=skill_map.get(skill_id) if skill_id else None,
                     occurred_at=attempt.created_at,
+                    importance='high',
+                    evidence_strength='direct',
                     metadata={
                         'score': round(float(attempt.score or 0.0), 3),
+                        'score_percent': score_pct,
                         'practice_mode': bool(attempt.practice_mode),
                         'mastery_eligible': bool(attempt.mastery_eligible),
                     },
                 )
             )
+            counts['assessments_taken'] += 1
+            if float(attempt.score or 0.0) >= 0.7:
+                counts['assessments_passed'] += 1
 
     milestones = db.scalars(
         select(MilestoneEvent)
@@ -1162,17 +1198,173 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 skill_node_id=milestone.skill_node_id,
                 skill_name=skill_map.get(milestone.skill_node_id) if milestone.skill_node_id else None,
                 occurred_at=milestone.created_at,
+                importance='high',
+                evidence_strength='derived',
                 metadata={
                     'milestone_type': milestone.milestone_type,
                 },
             )
         )
+        counts['milestones_reached'] += 1
 
-    entries.sort(key=lambda item: item.occurred_at, reverse=True)
+    branch_decisions = db.scalars(
+        select(BranchSuggestion)
+        .where(
+            BranchSuggestion.topic_id == topic.id,
+            BranchSuggestion.user_id == user_id,
+            BranchSuggestion.status.in_(['accepted', 'rejected']),
+        )
+        .order_by(desc(BranchSuggestion.updated_at))
+        .limit(120)
+    ).all()
+    for decision in branch_decisions:
+        parent_skill_name = skill_map.get(decision.parent_skill_id)
+        accepted = decision.status == 'accepted'
+        entries.append(
+            TopicJournalEntryResponse(
+                id=f'branch-{decision.id}-{decision.status}',
+                entry_type='branch',
+                title=(
+                    f'Accepted branch: {decision.title}'
+                    if accepted
+                    else f'Dismissed branch suggestion: {decision.title}'
+                ),
+                description=(
+                    decision.rationale
+                    or (
+                        f'Added an optional {decision.purpose} branch from {parent_skill_name or "the selected node"}.'
+                        if accepted
+                        else 'Kept focus on the core path for now.'
+                    )
+                )[:240],
+                skill_node_id=decision.parent_skill_id,
+                skill_name=parent_skill_name,
+                occurred_at=decision.updated_at,
+                importance='medium' if accepted else 'low',
+                evidence_strength='derived',
+                metadata={
+                    'branch_status': decision.status,
+                    'branch_purpose': decision.purpose,
+                    'branch_origin': decision.origin,
+                    'branch_focus': decision.focus,
+                    'accepted_branch_root_skill_id': decision.accepted_branch_root_skill_id,
+                },
+            )
+        )
+        if accepted:
+            counts['branches_accepted'] += 1
+        else:
+            counts['branches_rejected'] += 1
+
+    total_nodes = len(states)
+    verified_nodes = sum(1 for state in states if state.progress_state == 'verified')
+    mastery_values = [float(state.mastery or 0.0) for state in states]
+    mastery_average = round(mean(mastery_values), 3) if mastery_values else 0.0
+
+    evidence_entries_count = sum(1 for entry in entries if entry.evidence_strength == 'direct')
+    if evidence_entries_count == 0:
+        reflection_prompt = 'Capture one concrete takeaway after your next lesson to start your project memory.'
+    elif counts['assessments_taken'] == 0:
+        reflection_prompt = 'You have strong activity evidence. Add one verification step to confirm mastery.'
+    elif counts['branches_accepted'] > 0:
+        reflection_prompt = 'Review whether your accepted branch is helping your main goal and note one insight.'
+    else:
+        reflection_prompt = 'Write one short reflection linking your latest exercise or assessment to the next node.'
+
+    growth_signal_parts: list[str] = []
+    if counts['lessons_completed'] > 0:
+        growth_signal_parts.append(f"{counts['lessons_completed']} lessons completed")
+    if counts['exercises_completed'] > 0:
+        growth_signal_parts.append(f"{counts['exercises_completed']} exercises completed")
+    if counts['assessments_taken'] > 0:
+        growth_signal_parts.append(f"{counts['assessments_taken']} assessments taken")
+    if counts['artifacts_uploaded'] > 0:
+        growth_signal_parts.append(f"{counts['artifacts_uploaded']} artifacts uploaded")
+    growth_signal = ' · '.join(growth_signal_parts) if growth_signal_parts else 'Start your first evidence-backed learning step.'
+
+    importance_rank = {'high': 3, 'medium': 2, 'low': 1}
+    entries.sort(
+        key=lambda item: (item.occurred_at, importance_rank.get(item.importance, 1)),
+        reverse=True,
+    )
+    visible_entries = entries[:240]
+
+    chapters: list[dict[str, object]] = []
+    chapter_index: dict[str, int] = {}
+    now_date = datetime.utcnow().date()
+    for entry in visible_entries:
+        chapter_key = entry.occurred_at.date().isoformat()
+        if chapter_key not in chapter_index:
+            delta_days = (now_date - entry.occurred_at.date()).days
+            if delta_days == 0:
+                label = 'Today'
+            elif delta_days == 1:
+                label = 'Yesterday'
+            else:
+                label = entry.occurred_at.strftime('%b %d, %Y')
+            chapter_index[chapter_key] = len(chapters)
+            chapters.append(
+                {
+                    'id': f'chapter-{chapter_key}',
+                    'label': label,
+                    'started_at': entry.occurred_at,
+                    'ended_at': entry.occurred_at,
+                    'entry_count': 0,
+                    'evidence_count': 0,
+                    'focus': '',
+                    'top_entry': entry.title,
+                }
+            )
+        target = chapters[chapter_index[chapter_key]]
+        target['entry_count'] = int(target['entry_count']) + 1
+        if entry.evidence_strength == 'direct':
+            target['evidence_count'] = int(target['evidence_count']) + 1
+        if entry.occurred_at < target['started_at']:
+            target['started_at'] = entry.occurred_at
+        if entry.occurred_at > target['ended_at']:
+            target['ended_at'] = entry.occurred_at
+
+    chapter_responses = []
+    for chapter in chapters[:16]:
+        top_entry = str(chapter.get('top_entry') or '')
+        chapter_responses.append(
+            {
+                'id': str(chapter['id']),
+                'label': str(chapter['label']),
+                'started_at': chapter['started_at'],
+                'ended_at': chapter['ended_at'],
+                'entry_count': int(chapter['entry_count']),
+                'evidence_count': int(chapter['evidence_count']),
+                'focus': top_entry[:120] if top_entry else 'Progress updates',
+            }
+        )
+
+    latest_activity_at = visible_entries[0].occurred_at if visible_entries else None
     return TopicJournalResponse(
         topic_id=topic.id,
         topic_name=topic.name,
-        entries=entries[:240],
+        summary={
+            'total_entries': len(entries),
+            'evidence_entries': evidence_entries_count,
+            'notes_created': counts['notes_created'],
+            'notes_updated': counts['notes_updated'],
+            'lessons_completed': counts['lessons_completed'],
+            'exercises_completed': counts['exercises_completed'],
+            'artifacts_uploaded': counts['artifacts_uploaded'],
+            'assessments_taken': counts['assessments_taken'],
+            'assessments_passed': counts['assessments_passed'],
+            'milestones_reached': counts['milestones_reached'],
+            'branches_accepted': counts['branches_accepted'],
+            'branches_rejected': counts['branches_rejected'],
+            'verified_nodes': verified_nodes,
+            'total_nodes': total_nodes,
+            'mastery_average': mastery_average,
+            'latest_activity_at': latest_activity_at,
+            'reflection_prompt': reflection_prompt,
+            'growth_signal': growth_signal,
+        },
+        chapters=chapter_responses,
+        entries=visible_entries,
     )
 
 
@@ -2032,7 +2224,7 @@ async def get_recommendations(
     node_map = {node.id: node for node in db.scalars(select(SkillNode).where(SkillNode.topic_id == topic_id)).all()}
 
     payload: list[RecommendationItem] = []
-    for rec in records:
+    for rec in records[:1]:
         resource_mode = 'external' if rec.action_type == 'study_external' else 'generated'
         payload.append(
             RecommendationItem(

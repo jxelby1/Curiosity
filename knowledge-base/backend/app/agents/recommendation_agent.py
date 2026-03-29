@@ -20,7 +20,7 @@ class RecommendationAgent:
         self.llm_service = llm_service
         self.retrieval_service = retrieval_service
 
-    async def generate_recommendations(self, db: Session, topic: Topic, user_id: int, limit: int = 3) -> list[Recommendation]:
+    async def generate_recommendations(self, db: Session, topic: Topic, user_id: int, limit: int = 1) -> list[Recommendation]:
         nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
         edges = db.scalars(select(SkillEdge).where(SkillEdge.topic_id == topic.id)).all()
 

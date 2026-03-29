@@ -11,7 +11,6 @@ import {
   dismissTopicReminder,
   forceUnlockSkill,
   generateBranchSuggestions,
-  getRecommendations,
   getSkillTree,
   getTopicRetentionLoop,
   listBranchSuggestions,
@@ -20,21 +19,15 @@ import {
 } from '@/lib/api';
 import {
   invalidateTopicCache,
-  readRecommendationCache,
   readSkillTreeCache,
-  writeRecommendationCache,
   writeSkillTreeCache,
 } from '@/lib/cache';
 import { formatDisplayTag } from '@/lib/display-format';
-import { BranchSuggestion, RecommendationItem, SkillNode, SkillTree, TopicActionItem, TopicRetentionLoop } from '@/lib/types';
+import { BranchSuggestion, SkillNode, SkillTree, TopicRetentionLoop } from '@/lib/types';
+import { derivePrimaryTopicNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
 import { TopicOverviewSkeleton } from '@/components/page-skeletons';
 import { PremiumSkillTree } from '@/components/skill-tree/premium-skill-tree';
 import { SkillNodeInspector } from '@/components/skill-tree/skill-node-inspector';
-
-function actionHref(topicId: string, action: TopicActionItem): string {
-  if (!action.skill_node_id) return `/topics/${topicId}`;
-  return `/topics/${topicId}/skills/${action.skill_node_id}?tab=${action.tab}`;
-}
 
 function defaultSelectedNode(tree: SkillTree | null, retention: TopicRetentionLoop | null): number | null {
   if (!tree?.nodes?.length) return null;
@@ -78,10 +71,8 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
   const router = useRouter();
   const topicId = params.topicId;
   const cachedTree = readSkillTreeCache(topicId);
-  const cachedRecommendations = readRecommendationCache(topicId) || [];
 
   const [tree, setTree] = useState<SkillTree | null>(cachedTree);
-  const [recommendations, setRecommendations] = useState<RecommendationItem[]>(cachedRecommendations);
   const [retention, setRetention] = useState<TopicRetentionLoop | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<number | null>(defaultSelectedNode(cachedTree, null));
   const [branchSuggestionsByNode, setBranchSuggestionsByNode] = useState<Record<number, BranchSuggestion[]>>({});
@@ -89,7 +80,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
   const [branchActionLoadingByNode, setBranchActionLoadingByNode] = useState<Record<number, boolean>>({});
   const [branchErrorByNode, setBranchErrorByNode] = useState<Record<number, string>>({});
   const [loadingTree, setLoadingTree] = useState(!cachedTree);
-  const [loadingRecommendations, setLoadingRecommendations] = useState(cachedRecommendations.length === 0);
   const [loadingRetention, setLoadingRetention] = useState(true);
   const [forcingUnlock, setForcingUnlock] = useState(false);
 
@@ -114,22 +104,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     [topicId]
   );
 
-  const loadRecommendations = useCallback(
-    async (refresh = false) => {
-      setLoadingRecommendations(true);
-      try {
-        const recData = await getRecommendations(topicId, refresh);
-        setRecommendations(recData);
-        writeRecommendationCache(topicId, recData);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load recommendations');
-      } finally {
-        setLoadingRecommendations(false);
-      }
-    },
-    [topicId]
-  );
-
   const loadRetention = useCallback(async () => {
     setLoadingRetention(true);
     try {
@@ -144,9 +118,8 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
 
   useEffect(() => {
     loadTree();
-    loadRecommendations();
     loadRetention();
-  }, [loadTree, loadRecommendations, loadRetention]);
+  }, [loadTree, loadRetention]);
 
   useEffect(() => {
     setSelectedNodeId((prev) => {
@@ -173,27 +146,26 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     return (selectedNode.prerequisites || []).map((id) => map.get(id)).filter((item): item is SkillNode => !!item);
   }, [tree, selectedNode]);
 
-  const suggestedNode = useMemo(() => {
-    if (!tree?.nodes?.length) return null;
-    const fromActions = retention?.next_actions.find((item) => item.skill_node_id)?.skill_node_id;
-    if (fromActions) return tree.nodes.find((node) => node.id === fromActions) || null;
-    const fromRec = recommendations[0]?.skill_node_id;
-    if (fromRec) return tree.nodes.find((node) => node.id === fromRec) || null;
-    return tree.nodes.find((node) => node.status !== 'locked') || tree.nodes[0] || null;
-  }, [tree, recommendations, retention]);
+  const primaryNextStep = useMemo(
+    () =>
+      derivePrimaryTopicNextStep({
+        topicId,
+        retention,
+        recommendations: [],
+        tree,
+      }),
+    [retention, topicId, tree]
+  );
 
   const totalNodes = retention?.total_nodes ?? tree?.nodes.length ?? 0;
   const unlockedNodes = retention?.available_nodes ?? tree?.nodes.filter((node) => node.status !== 'locked').length ?? 0;
   const verifiedNodes = retention?.verified_nodes ?? tree?.nodes.filter((node) => node.progress_state === 'verified').length ?? 0;
   const masteryAvg = Math.round((retention?.mastery_average ?? 0) * 100);
 
-  async function refreshEverything(refreshRecommendations = false) {
+  async function refreshEverything() {
     setError('');
     await loadTree(true);
     await loadRetention();
-    if (refreshRecommendations) {
-      await loadRecommendations(true);
-    }
   }
 
   function setBranchLoading(skillId: number, value: boolean) {
@@ -254,7 +226,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
       });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
-      await loadRecommendations(true);
       await loadRetention();
       await ensureBranchSuggestions(skillId, true);
     } catch (err) {
@@ -271,7 +242,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
       const nextTree = await acceptBranchSuggestion({ suggestionId });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
-      await loadRecommendations(true);
       await loadRetention();
       await ensureBranchSuggestions(skillId, true);
     } catch (err) {
@@ -299,7 +269,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     setError('');
     try {
       await forceUnlockSkill(skillNodeId);
-      await refreshEverything(true);
+      await refreshEverything();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to force unlock node');
     } finally {
@@ -396,18 +366,16 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
           <Link href={`/topics/${topicId}/chat`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
             Tutor chat
           </Link>
-          {suggestedNode && (
-            <Link href={`/topics/${topicId}/skills/${suggestedNode.id}`} className="rounded-md bg-ink px-3 py-2 text-sm text-white">
-              Continue
-            </Link>
-          )}
-          <button
-            type="button"
-            className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
-            onClick={() => refreshEverything(true)}
-          >
-            Refresh
-          </button>
+          <Link href={primaryNextStep.href} className="rounded-md bg-ink px-3 py-2 text-sm text-white">
+            {primaryNextStep.label}
+          </Link>
+            <button
+              type="button"
+              className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              onClick={() => refreshEverything()}
+            >
+              Refresh
+            </button>
           <button
             type="button"
             className="rounded-md border border-red-300 bg-white px-3 py-2 text-sm text-red-700"
@@ -594,94 +562,47 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
         </div>
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-3">
+      <section className="grid gap-4 lg:grid-cols-[1.25fr_1fr]">
         <article className="panel p-5">
-          <h2 className="text-lg font-semibold">Next 3 actions</h2>
-          {loadingRetention ? (
-            <div className="mt-3 space-y-2">
-              <div className="skeleton h-12 w-full" />
-              <div className="skeleton h-12 w-full" />
-              <div className="skeleton h-12 w-full" />
-            </div>
-          ) : (
-            <div className="mt-3 space-y-2">
-              {(retention?.next_actions || []).map((item, index) => (
-                <Link key={`${item.action_type}-${index}`} href={actionHref(topicId, item)} className="block rounded-lg border border-black/10 bg-white p-3">
-                  <p className="text-sm font-semibold">{item.title}</p>
-                  <p className="muted mt-1 text-xs">{item.description}</p>
-                </Link>
-              ))}
-              {retention && retention.next_actions.length === 0 && <p className="muted text-sm">No immediate actions right now.</p>}
-            </div>
-          )}
-        </article>
-
-        <article className="panel p-5">
-          <h2 className="text-lg font-semibold">{retention?.cadence === 'weekly' ? 'This week plan' : 'Today plan'}</h2>
-          <p className="muted mt-2 text-sm">{retention?.plan_summary || 'Preparing your plan...'}</p>
-          <ol className="mt-3 space-y-2 text-sm">
-            {(retention?.learning_plan || []).map((item, index) => (
-              <li key={`${item.action_type}-${index}`} className="rounded-md border border-black/10 bg-white p-3">
-                <p className="font-semibold">
-                  {index + 1}. {item.title}
-                </p>
-                <p className="muted mt-1 text-xs">{item.description}</p>
-              </li>
-            ))}
-          </ol>
-        </article>
-
-        <article className="panel p-5">
-          <h2 className="text-lg font-semibold">Unlock anticipation</h2>
-          {retention?.unlock_anticipation ? (
-            <div className="mt-3 space-y-2">
-              <p className="font-semibold">
-                {retention.unlock_anticipation.skill_name} · {retention.unlock_anticipation.status_label}
-              </p>
-              <p className="muted text-sm">{retention.unlock_anticipation.why_locked}</p>
-              <ul className="space-y-1 text-sm">
-                {retention.unlock_anticipation.steps.map((step) => (
-                  <li key={step}>• {step}</li>
-                ))}
-              </ul>
-              {retention.unlock_anticipation.next_step_skill_node_id && (
-                <Link
-                  href={`/topics/${topicId}/skills/${retention.unlock_anticipation.next_step_skill_node_id}?tab=${retention.unlock_anticipation.next_step_tab}`}
-                  className="inline-flex rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
-                >
-                  Take next step
-                </Link>
-              )}
-            </div>
-          ) : (
-            <p className="muted mt-2 text-sm">No close unlock target yet.</p>
-          )}
-        </article>
-      </section>
-
-      <section className="mt-5 panel p-5">
-        <div className="mb-3 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">Recommendations</h2>
-          <button className="text-xs underline underline-offset-4" onClick={() => loadRecommendations(true)}>
-            Refresh
-          </button>
-        </div>
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-          {loadingRecommendations && recommendations.length === 0 && (
-            <>
-              <div className="skeleton h-20 w-full" />
-              <div className="skeleton h-20 w-full" />
-              <div className="skeleton h-20 w-full" />
-            </>
-          )}
-          {recommendations.map((rec) => (
-            <Link key={rec.skill_node_id} href={`/topics/${topicId}/skills/${rec.skill_node_id}`} className="rounded-lg border border-black/10 bg-white p-3">
-              <p className="text-sm font-semibold">{rec.skill_name}</p>
-              <p className="muted mt-1 text-xs">{rec.rationale}</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
+          <h2 className="mt-2 text-2xl font-semibold">{primaryNextStep.label}</h2>
+          <p className="muted mt-2 text-sm">{primaryNextStep.reason}</p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Link href={primaryNextStep.href} className="rounded-md bg-ink px-3 py-2 text-sm text-white">
+              Start now
             </Link>
-          ))}
-          {!loadingRecommendations && recommendations.length === 0 && <p className="muted text-sm">No recommendations yet.</p>}
-        </div>
+            <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+              Reflect in journal
+            </Link>
+          </div>
+          {retention?.plan_summary && <p className="mt-3 text-xs text-black/58">{retention.plan_summary}</p>}
+        </article>
+
+        <article className="panel p-5">
+          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Learning Loop</p>
+          <ol className="mt-3 space-y-2 text-sm">
+            {LEARNING_LOOP_LABELS.map((item, index) => {
+              const active = item.id === primaryNextStep.loopStep;
+              return (
+                <li
+                  key={item.id}
+                  className={`rounded-md border px-3 py-2 ${
+                    active ? 'border-ink bg-ink/5 text-black' : 'border-black/10 bg-white text-black/68'
+                  }`}
+                >
+                  <span className="mr-2 text-xs text-black/55">{index + 1}.</span>
+                  {item.label}
+                </li>
+              );
+            })}
+          </ol>
+          {retention?.unlock_anticipation && (
+            <div className="mt-4 rounded-md border border-black/10 bg-white p-3 text-xs text-black/68">
+              <p className="font-semibold">{retention.unlock_anticipation.skill_name}</p>
+              <p className="mt-1">{retention.unlock_anticipation.why_locked}</p>
+            </div>
+          )}
+        </article>
       </section>
 
       {error && <p className="mt-5 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}

@@ -493,18 +493,53 @@ export interface TopicRetentionLoop {
 
 export interface TopicJournalEntry {
   id: string;
-  entry_type: 'note' | 'exercise' | 'module' | 'assessment' | 'milestone';
+  entry_type: 'note' | 'exercise' | 'module' | 'assessment' | 'milestone' | 'branch';
   title: string;
   description: string;
   skill_node_id: number | null;
   skill_name: string | null;
   occurred_at: string;
+  importance: 'high' | 'medium' | 'low';
+  evidence_strength: 'direct' | 'derived' | 'contextual';
   metadata: Record<string, unknown>;
+}
+
+export interface TopicJournalChapter {
+  id: string;
+  label: string;
+  started_at: string;
+  ended_at: string;
+  entry_count: number;
+  evidence_count: number;
+  focus: string;
+}
+
+export interface TopicJournalSummary {
+  total_entries: number;
+  evidence_entries: number;
+  notes_created: number;
+  notes_updated: number;
+  lessons_completed: number;
+  exercises_completed: number;
+  artifacts_uploaded: number;
+  assessments_taken: number;
+  assessments_passed: number;
+  milestones_reached: number;
+  branches_accepted: number;
+  branches_rejected: number;
+  verified_nodes: number;
+  total_nodes: number;
+  mastery_average: number;
+  latest_activity_at: string | null;
+  reflection_prompt: string;
+  growth_signal: string;
 }
 
 export interface TopicJournal {
   topic_id: number;
   topic_name: string;
+  summary: TopicJournalSummary;
+  chapters: TopicJournalChapter[];
   entries: TopicJournalEntry[];
 }
 

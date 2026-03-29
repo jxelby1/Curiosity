@@ -558,18 +558,53 @@ class AssessmentAttemptResponse(BaseModel):
 
 class TopicJournalEntryResponse(BaseModel):
     id: str
-    entry_type: Literal['note', 'exercise', 'module', 'assessment', 'milestone']
+    entry_type: Literal['note', 'exercise', 'module', 'assessment', 'milestone', 'branch']
     title: str
     description: str
     skill_node_id: int | None = None
     skill_name: str | None = None
     occurred_at: datetime
+    importance: Literal['high', 'medium', 'low'] = 'medium'
+    evidence_strength: Literal['direct', 'derived', 'contextual'] = 'derived'
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class TopicJournalChapterResponse(BaseModel):
+    id: str
+    label: str
+    started_at: datetime
+    ended_at: datetime
+    entry_count: int
+    evidence_count: int
+    focus: str = ''
+
+
+class TopicJournalSummaryResponse(BaseModel):
+    total_entries: int = 0
+    evidence_entries: int = 0
+    notes_created: int = 0
+    notes_updated: int = 0
+    lessons_completed: int = 0
+    exercises_completed: int = 0
+    artifacts_uploaded: int = 0
+    assessments_taken: int = 0
+    assessments_passed: int = 0
+    milestones_reached: int = 0
+    branches_accepted: int = 0
+    branches_rejected: int = 0
+    verified_nodes: int = 0
+    total_nodes: int = 0
+    mastery_average: float = 0.0
+    latest_activity_at: datetime | None = None
+    reflection_prompt: str = ''
+    growth_signal: str = ''
 
 
 class TopicJournalResponse(BaseModel):
     topic_id: int
     topic_name: str
+    summary: TopicJournalSummaryResponse
+    chapters: list[TopicJournalChapterResponse] = Field(default_factory=list)
     entries: list[TopicJournalEntryResponse] = Field(default_factory=list)
 
 

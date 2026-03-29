@@ -15,7 +15,16 @@ import {
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
 import { formatDisplayTag } from '@/lib/display-format';
-import { DocumentItem, NoteType, PersonalNote, SkillTree, TopicJournalEntry } from '@/lib/types';
+import {
+  DocumentItem,
+  NoteType,
+  PersonalNote,
+  SkillTree,
+  TopicJournal,
+  TopicJournalChapter,
+  TopicJournalEntry,
+  TopicJournalSummary,
+} from '@/lib/types';
 import { MarkdownContent, markdownToPlainText } from '@/components/markdown-content';
 import { TopicHeader } from '@/components/topic-header';
 import { NotesWorkspaceSkeleton } from '@/components/page-skeletons';
@@ -39,6 +48,8 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [notes, setNotes] = useState<PersonalNote[]>([]);
   const [documents, setDocuments] = useState<DocumentItem[]>([]);
   const [journalEntries, setJournalEntries] = useState<TopicJournalEntry[]>([]);
+  const [journalChapters, setJournalChapters] = useState<TopicJournalChapter[]>([]);
+  const [journalSummary, setJournalSummary] = useState<TopicJournalSummary | null>(null);
   const [activeView, setActiveView] = useState<'journal' | 'notes' | 'documents'>('journal');
   const [searchInput, setSearchInput] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
@@ -65,6 +76,46 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     () => (selectedNoteId ? notes.find((note) => note.id === selectedNoteId) || null : null),
     [notes, selectedNoteId]
   );
+
+  const journalEntriesByChapter = useMemo(() => {
+    const chapterMap = new Map<string, TopicJournalEntry[]>();
+    for (const chapter of journalChapters) {
+      chapterMap.set(chapter.id, []);
+    }
+    for (const entry of journalEntries) {
+      const matchedChapter = journalChapters.find((chapter) => {
+        const started = new Date(chapter.started_at).getTime();
+        const ended = new Date(chapter.ended_at).getTime();
+        const occurred = new Date(entry.occurred_at).getTime();
+        return occurred >= started && occurred <= ended;
+      });
+      if (matchedChapter) {
+        chapterMap.get(matchedChapter.id)?.push(entry);
+      }
+    }
+
+    if (journalChapters.length === 0) {
+      return [
+        {
+          chapter: {
+            id: 'chapter-all',
+            label: 'All activity',
+            started_at: journalEntries[journalEntries.length - 1]?.occurred_at ?? new Date().toISOString(),
+            ended_at: journalEntries[0]?.occurred_at ?? new Date().toISOString(),
+            entry_count: journalEntries.length,
+            evidence_count: journalEntries.filter((entry) => entry.evidence_strength === 'direct').length,
+            focus: 'Learning activity',
+          },
+          entries: journalEntries,
+        },
+      ];
+    }
+
+    return journalChapters.map((chapter) => ({
+      chapter,
+      entries: chapterMap.get(chapter.id) || [],
+    }));
+  }, [journalChapters, journalEntries]);
 
   const loadTree = useCallback(async () => {
     try {
@@ -113,8 +164,10 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const loadJournal = useCallback(async () => {
     setLoadingJournal(true);
     try {
-      const journal = await getTopicJournal(topicId);
+      const journal: TopicJournal = await getTopicJournal(topicId);
       setJournalEntries(journal.entries || []);
+      setJournalChapters(journal.chapters || []);
+      setJournalSummary(journal.summary || null);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load project journal');
     } finally {
@@ -171,10 +224,11 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   function journalEntryLabel(entry: TopicJournalEntry): string {
     if (entry.entry_type === 'note' && entry.metadata?.note_event === 'created') return 'Note created';
     if (entry.entry_type === 'note' && entry.metadata?.note_event === 'updated') return 'Note updated';
-    if (entry.entry_type === 'exercise') return 'Exercise';
-    if (entry.entry_type === 'assessment') return 'Assessment';
-    if (entry.entry_type === 'module') return 'Module';
+    if (entry.entry_type === 'exercise') return 'Evidence';
+    if (entry.entry_type === 'assessment') return 'Verification';
+    if (entry.entry_type === 'module') return 'Progress';
     if (entry.entry_type === 'milestone') return 'Milestone';
+    if (entry.entry_type === 'branch') return 'Branch decision';
     return 'Note';
   }
 
@@ -318,7 +372,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
             <div>
               <h2 className="text-lg font-semibold">Topic project book</h2>
               <p className="muted mt-1 text-sm">
-                A chronological record of notes, exercise completions, assessments, milestones, and artifacts.
+                Your persistent learning memory: evidence, reflection, branch decisions, and milestone progress.
               </p>
             </div>
             <button
@@ -330,6 +384,48 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
             </button>
           </div>
 
+          {journalSummary && (
+            <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Evidence</p>
+                <p className="mt-1 text-lg font-semibold">
+                  {journalSummary.evidence_entries} / {journalSummary.total_entries}
+                </p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.exercises_completed} exercises · {journalSummary.artifacts_uploaded} artifacts
+                </p>
+              </article>
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Verification</p>
+                <p className="mt-1 text-lg font-semibold">{journalSummary.assessments_taken}</p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.assessments_passed} passed · {Math.round(journalSummary.mastery_average * 100)}% mastery
+                </p>
+              </article>
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Progress</p>
+                <p className="mt-1 text-lg font-semibold">
+                  {journalSummary.verified_nodes}/{journalSummary.total_nodes}
+                </p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.lessons_completed} lessons · {journalSummary.milestones_reached} milestones
+                </p>
+              </article>
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Branching</p>
+                <p className="mt-1 text-lg font-semibold">{journalSummary.branches_accepted}</p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.branches_rejected} dismissed · {journalSummary.notes_created} notes created
+                </p>
+              </article>
+              <article className="sm:col-span-2 lg:col-span-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-emerald-900/70">Reflection cue</p>
+                <p className="mt-1 text-sm text-emerald-900">{journalSummary.reflection_prompt}</p>
+                <p className="mt-1 text-xs text-emerald-900/75">{journalSummary.growth_signal}</p>
+              </article>
+            </div>
+          )}
+
           <div className="space-y-3">
             {loadingJournal && journalEntries.length === 0 && (
               <>
@@ -337,27 +433,57 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                 <div className="skeleton h-16 w-full" />
               </>
             )}
-            {journalEntries.map((entry) => (
-              <article key={entry.id} className="rounded-lg border border-black/10 bg-white p-4">
-                <div className="flex flex-wrap items-start justify-between gap-2">
+            {journalEntriesByChapter.map(({ chapter, entries }) => (
+              <section key={chapter.id} className="rounded-xl border border-black/10 bg-white/70 p-3">
+                <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
                   <div>
-                    <p className="text-sm font-semibold">{entry.title}</p>
-                    <p className="muted mt-1 text-xs">
-                      {journalEntryLabel(entry)}
-                      {entry.skill_name ? ` · ${entry.skill_name}` : ''}
+                    <p className="text-sm font-semibold">{chapter.label}</p>
+                    <p className="text-xs text-black/65">
+                      {chapter.entry_count} entries · {chapter.evidence_count} direct evidence · {chapter.focus}
                     </p>
                   </div>
-                  <span className="text-[11px] text-black/60">{new Date(entry.occurred_at).toLocaleString()}</span>
+                  <span className="text-[11px] text-black/55">
+                    {new Date(chapter.started_at).toLocaleDateString()}
+                  </span>
+                </header>
+                <div className="space-y-3">
+                  {entries.map((entry) => (
+                    <article key={entry.id} className="rounded-lg border border-black/10 bg-white p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <p className="text-sm font-semibold">{entry.title}</p>
+                          <p className="muted mt-1 text-xs">
+                            {journalEntryLabel(entry)}
+                            {entry.skill_name ? ` · ${entry.skill_name}` : ''}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span
+                            className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                              entry.evidence_strength === 'direct'
+                                ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                                : entry.evidence_strength === 'derived'
+                                ? 'border-amber-300 bg-amber-50 text-amber-800'
+                                : 'border-black/20 bg-black/[0.03] text-black/60'
+                            }`}
+                          >
+                            {formatDisplayTag(entry.evidence_strength)}
+                          </span>
+                          <span className="text-[11px] text-black/60">{new Date(entry.occurred_at).toLocaleString()}</span>
+                        </div>
+                      </div>
+                      <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
+                      {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
+                        <ProofArtifactViewer proofUrl={String(entry.metadata.proof_url)} />
+                      )}
+                    </article>
+                  ))}
                 </div>
-                <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
-                {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
-                  <ProofArtifactViewer proofUrl={String(entry.metadata.proof_url)} />
-                )}
-              </article>
+              </section>
             ))}
             {!loadingJournal && journalEntries.length === 0 && (
               <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
-                Your journal will populate as you write notes, complete exercises, and submit assessments.
+                Your project book will populate as you complete lessons, record notes, verify skills, and upload proof.
               </p>
             )}
           </div>

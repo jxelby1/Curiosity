@@ -63,9 +63,9 @@ export default function HomePage() {
 
         <section className="mt-12 grid gap-4 md:grid-cols-3">
           <article className="rounded-xl border border-black/10 bg-white p-4">
-            <p className="text-xs uppercase tracking-[0.12em] text-black/55">Personalized setup</p>
+            <p className="text-xs uppercase tracking-[0.12em] text-black/55">Simple first start</p>
             <p className="mt-2 text-sm text-black/75">
-              Choose course depth, starting level, and preferred assessment methods with sensible defaults.
+              Start with just a topic and goal. Advanced controls are available when you want finer tuning.
             </p>
           </article>
           <article className="rounded-xl border border-black/10 bg-white p-4">

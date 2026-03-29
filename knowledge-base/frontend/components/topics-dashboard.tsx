@@ -9,6 +9,7 @@ import {
   checkTopicPlausibility,
   createTopicAndInitialize,
   getMyProgressSummary,
+  getTopicRetentionLoop,
   listTopics,
   upgradeMyAccountToDev,
 } from '@/lib/api';
@@ -20,6 +21,7 @@ import {
   TECHNICAL_DEPTH_OPTIONS,
 } from '@/lib/course-options';
 import { formatDisplayTag } from '@/lib/display-format';
+import { derivePrimaryTopicNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
 import { AssessmentStyle, CourseDepth, StartingSkillLevel, TechnicalDepth, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
 
 const TOPIC_NAME_MAX = 120;
@@ -56,11 +58,14 @@ export function TopicsDashboard() {
   const [startingSkillLevel, setStartingSkillLevel] = useState<StartingSkillLevel>('beginner');
   const [technicalDepth, setTechnicalDepth] = useState<TechnicalDepth>('intermediate');
   const [assessmentStyles, setAssessmentStyles] = useState<AssessmentStyle[]>(DEFAULT_ASSESSMENT_STYLES);
+  const [advancedOptionsOpen, setAdvancedOptionsOpen] = useState(false);
   const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
   const [plausibilityPrompt, setPlausibilityPrompt] = useState<TopicPlausibilityCheck | null>(null);
   const [creating, setCreating] = useState(false);
   const [upgradingDev, setUpgradingDev] = useState(false);
   const [devUpgradeMessage, setDevUpgradeMessage] = useState('');
+  const [continueRetention, setContinueRetention] = useState<Awaited<ReturnType<typeof getTopicRetentionLoop>> | null>(null);
+  const [loadingContinueAction, setLoadingContinueAction] = useState(false);
 
   const topicById = useMemo(() => {
     const map = new Map<number, Topic>();
@@ -92,6 +97,52 @@ export function TopicsDashboard() {
     if (!rankedTopics.length) return null;
     return rankedTopics.find((item) => item.verified_nodes < item.total_nodes) || rankedTopics[0];
   }, [rankedTopics]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const topicId = continueTopic?.topic_id;
+    if (!topicId) {
+      setContinueRetention(null);
+      return;
+    }
+    setLoadingContinueAction(true);
+    void getTopicRetentionLoop(String(topicId))
+      .then((data) => {
+        if (!cancelled) setContinueRetention(data);
+      })
+      .catch(() => {
+        if (!cancelled) setContinueRetention(null);
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingContinueAction(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [continueTopic?.topic_id]);
+
+  const primaryNextStep = useMemo(() => {
+    if (!continueTopic) {
+      return {
+        label: 'Create your first topic',
+        reason: 'Start one topic to begin your learning loop.',
+        href: '#create-topic-form',
+        loopStep: 'learn' as const,
+      };
+    }
+    const resolved = derivePrimaryTopicNextStep({
+      topicId: String(continueTopic.topic_id),
+      retention: continueRetention,
+      recommendations: [],
+      tree: null,
+    });
+    return {
+      label: resolved.label,
+      reason: resolved.reason,
+      href: resolved.href,
+      loopStep: resolved.loopStep,
+    };
+  }, [continueRetention, continueTopic]);
 
   async function loadDashboard() {
     setLoading(true);
@@ -211,13 +262,34 @@ export function TopicsDashboard() {
             <p className="mt-3 max-w-2xl text-sm text-black/70 md:text-base">
               Pick up your momentum with clear next steps, balanced progression, and evolving topic trees.
             </p>
+            <div className="mt-4 rounded-xl border border-black/10 bg-white/80 p-3">
+              <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
+              <p className="mt-1 text-base font-semibold">{primaryNextStep.label}</p>
+              <p className="mt-1 text-sm text-black/68">
+                {loadingContinueAction ? 'Updating your next step…' : primaryNextStep.reason}
+              </p>
+              <ol className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
+                {LEARNING_LOOP_LABELS.map((item, index) => (
+                  <li
+                    key={item.id}
+                    className={`rounded-full border px-2 py-0.5 ${
+                      item.id === primaryNextStep.loopStep
+                        ? 'border-ink bg-ink/5 text-black'
+                        : 'border-black/15 bg-white text-black/58'
+                    }`}
+                  >
+                    {index + 1}. {item.label}
+                  </li>
+                ))}
+              </ol>
+            </div>
             <div className="mt-5 flex flex-wrap items-center gap-2">
               {continueTopic ? (
                 <Link
-                  href={`/topics/${continueTopic.topic_id}`}
+                  href={primaryNextStep.href}
                   className="rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white"
                 >
-                  Continue learning
+                  {primaryNextStep.label}
                 </Link>
               ) : (
                 <button
@@ -369,7 +441,9 @@ export function TopicsDashboard() {
 
         <article id="create-topic-form" className="panel p-6">
           <h2 className="mb-2 text-xl font-semibold">Create a new topic</h2>
-          <p className="muted mb-4 text-sm">Set the core goal, then optionally tune learning preferences.</p>
+          <p className="muted mb-4 text-sm">
+            Start with one clear learning goal. We&apos;ll prepare a strong default path and you can customize if needed.
+          </p>
           <form className="space-y-3" onSubmit={onCreateTopic}>
             <input
               value={name}
@@ -382,186 +456,230 @@ export function TopicsDashboard() {
             <p className="text-right text-xs text-black/60">{name.length}/{TOPIC_NAME_MAX}</p>
 
             <textarea
-              value={description}
-              onChange={(event) => setDescription(event.target.value)}
-              className="min-h-24 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="Short topic description"
-              maxLength={TOPIC_DESC_MAX}
-            />
-            <p className="text-right text-xs text-black/60">{description.length}/{TOPIC_DESC_MAX}</p>
-
-            <textarea
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
               className="min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="Outcome goal (optional)"
+              placeholder="What do you want to be able to do? (optional)"
               maxLength={TOPIC_GOAL_MAX}
             />
             <p className="text-right text-xs text-black/60">{goal.length}/{TOPIC_GOAL_MAX}</p>
 
-            <div className="rounded-xl border border-black/10 bg-white/70 p-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Topic framing</p>
-              <div className="mt-2 flex flex-wrap gap-2">
-                {[
-                  { value: 'factual', label: 'Factual' },
-                  { value: 'fictional', label: 'Fictional' },
-                  { value: 'hypothetical', label: 'Hypothetical' },
-                  { value: 'creative', label: 'Creative' },
-                ].map((item) => (
-                  <button
-                    key={item.value}
-                    type="button"
-                    onClick={() => {
-                      setTopicMode(item.value as TopicMode);
-                      setPlausibilityPrompt(null);
-                    }}
-                    className={`rounded-md border px-3 py-1.5 text-xs ${
-                      topicMode === item.value
-                        ? 'border-ink bg-white text-ink shadow-sm'
-                        : 'border-black/15 bg-white/70 text-black/70'
-                    }`}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              <p className="mt-2 text-xs text-black/60">
-                Keep factual for real-world topics. Use fictional or hypothetical framing for creative scenarios.
-              </p>
-            </div>
-
-            <div className="rounded-xl border border-black/10 bg-black/[0.02] p-3">
-              <h3 className="text-sm font-semibold">Learning preferences</h3>
-              <p className="muted mt-1 text-xs">Simple defaults work well. Expand only if you want to customize.</p>
-
-              <div className="mt-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Course depth</p>
-                <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                  {COURSE_DEPTH_OPTIONS.map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      onClick={() => setCourseDepth(item.value)}
-                      className={`rounded-md border p-2 text-left ${
-                        courseDepth === item.value
-                          ? 'border-ink bg-white shadow-sm'
-                          : 'border-black/10 bg-white/80'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold">{item.label}</p>
-                      <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                    </button>
-                  ))}
+            <div className="rounded-xl border border-black/10 bg-white/80 p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Quick start defaults</p>
+                  <p className="mt-1 text-sm text-black/75">
+                    Factual topic, standard course, beginner start, intermediate depth, and three core assessment methods.
+                  </p>
+                  <p className="mt-1 text-xs text-black/60">You can customize before creating if you want finer control.</p>
                 </div>
-              </div>
-
-              <div className="mt-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Starting skill level</p>
-                <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                  {STARTING_SKILL_LEVEL_OPTIONS.map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      onClick={() => setStartingSkillLevel(item.value)}
-                      className={`rounded-md border p-2 text-left ${
-                        startingSkillLevel === item.value
-                          ? 'border-ink bg-white shadow-sm'
-                          : 'border-black/10 bg-white/80'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold">{item.label}</p>
-                      <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              <div className="mt-3">
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Technical depth</p>
-                <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  {TECHNICAL_DEPTH_OPTIONS.map((item) => (
-                    <button
-                      key={item.value}
-                      type="button"
-                      onClick={() => setTechnicalDepth(item.value)}
-                      className={`rounded-md border p-2 text-left ${
-                        technicalDepth === item.value
-                          ? 'border-ink bg-white shadow-sm'
-                          : 'border-black/10 bg-white/80'
-                      }`}
-                    >
-                      <p className="text-sm font-semibold">{item.label}</p>
-                      <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                    </button>
-                  ))}
-                </div>
-                <p className="mt-2 text-xs text-black/60">
-                  Controls how rigorous lessons, examples, and assessments should be.
-                </p>
-              </div>
-
-              <div className="mt-3 rounded-lg border border-black/10 bg-white/75 p-2">
                 <button
                   type="button"
-                  className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left"
-                  onClick={() => setAssessmentPickerOpen((prev) => !prev)}
-                  aria-expanded={assessmentPickerOpen}
+                  onClick={() =>
+                    setAdvancedOptionsOpen((prev) => {
+                      const next = !prev;
+                      if (!next) setAssessmentPickerOpen(false);
+                      return next;
+                    })
+                  }
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs text-black/75"
+                  aria-expanded={advancedOptionsOpen}
                 >
-                  <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">
-                    Assessment methods
-                  </span>
-                  <span className="text-xs text-black/65">
-                    {assessmentStyles.length} selected · {assessmentPickerOpen ? 'Hide' : 'Customize'}
-                  </span>
+                  <svg
+                    aria-hidden="true"
+                    viewBox="0 0 20 20"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                  >
+                    <path d="M10 2.4v2.1M10 15.5v2.1M3.8 10h2.1M14.1 10h2.1M5.4 5.4l1.5 1.5M13.1 13.1l1.5 1.5M14.6 5.4l-1.5 1.5M6.9 13.1l-1.5 1.5" />
+                    <circle cx="10" cy="10" r="3.1" />
+                  </svg>
+                  {advancedOptionsOpen ? 'Hide settings' : 'Customize'}
                 </button>
-                <p className="px-2 pb-2 text-xs text-black/60">
-                  Default: short answer, multiple choice, flashcard.
-                </p>
-                {assessmentPickerOpen && (
-                  <div className="grid gap-2 px-2 pb-2 sm:grid-cols-2">
-                    {ASSESSMENT_STYLE_OPTIONS.map((item) => {
-                      const selected = assessmentStyles.includes(item.value);
-                      return (
-                        <button
-                          key={item.value}
-                          type="button"
-                          onClick={() =>
-                            setAssessmentStyles((prev) =>
-                              prev.includes(item.value)
-                                ? prev.filter((style) => style !== item.value)
-                                : [...prev, item.value]
-                            )
-                          }
-                          className={`rounded-md border p-2 text-left ${
-                            selected ? 'border-ink bg-white shadow-sm' : 'border-black/10 bg-white/80'
-                          }`}
-                        >
-                          <p className="text-sm font-semibold">{item.label}</p>
-                          <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                          <p className="mt-1 text-[10px] uppercase tracking-[0.12em] text-black/45">{item.category}</p>
-                        </button>
-                      );
-                    })}
-                    <div className="sm:col-span-2 flex flex-wrap gap-2">
-                      <button
-                        type="button"
-                        className="rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs"
-                        onClick={() => setAssessmentStyles(DEFAULT_ASSESSMENT_STYLES)}
-                      >
-                        Reset to defaults
-                      </button>
-                      <button
-                        type="button"
-                        className="rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs"
-                        onClick={() => setAssessmentStyles(ASSESSMENT_STYLE_OPTIONS.map((item) => item.value))}
-                      >
-                        Select all
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             </div>
+
+            {advancedOptionsOpen && (
+              <div className="rounded-xl border border-black/10 bg-black/[0.02] p-3">
+                <h3 className="text-sm font-semibold">Advanced options</h3>
+                <p className="muted mt-1 text-xs">
+                  Tune topic framing and learning controls. Defaults are optimized for a strong first run.
+                </p>
+
+                <div className="mt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Description</p>
+                  <textarea
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    className="mt-2 min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
+                    placeholder="Optional context for better curriculum targeting"
+                    maxLength={TOPIC_DESC_MAX}
+                  />
+                  <p className="mt-1 text-right text-xs text-black/60">{description.length}/{TOPIC_DESC_MAX}</p>
+                </div>
+
+                <div className="mt-3 rounded-xl border border-black/10 bg-white/70 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Topic framing</p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    {[
+                      { value: 'factual', label: 'Factual' },
+                      { value: 'fictional', label: 'Fictional' },
+                      { value: 'hypothetical', label: 'Hypothetical' },
+                      { value: 'creative', label: 'Creative' },
+                    ].map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => {
+                          setTopicMode(item.value as TopicMode);
+                          setPlausibilityPrompt(null);
+                        }}
+                        className={`rounded-md border px-3 py-1.5 text-xs ${
+                          topicMode === item.value
+                            ? 'border-ink bg-white text-ink shadow-sm'
+                            : 'border-black/15 bg-white/70 text-black/70'
+                        }`}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-black/60">
+                    Keep factual for real-world topics. Use fictional or hypothetical framing for creative scenarios.
+                  </p>
+                </div>
+
+                <div className="mt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Course depth</p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    {COURSE_DEPTH_OPTIONS.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setCourseDepth(item.value)}
+                        className={`rounded-md border p-2 text-left ${
+                          courseDepth === item.value
+                            ? 'border-ink bg-white shadow-sm'
+                            : 'border-black/10 bg-white/80'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">{item.label}</p>
+                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Starting skill level</p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    {STARTING_SKILL_LEVEL_OPTIONS.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setStartingSkillLevel(item.value)}
+                        className={`rounded-md border p-2 text-left ${
+                          startingSkillLevel === item.value
+                            ? 'border-ink bg-white shadow-sm'
+                            : 'border-black/10 bg-white/80'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">{item.label}</p>
+                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Technical depth</p>
+                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                    {TECHNICAL_DEPTH_OPTIONS.map((item) => (
+                      <button
+                        key={item.value}
+                        type="button"
+                        onClick={() => setTechnicalDepth(item.value)}
+                        className={`rounded-md border p-2 text-left ${
+                          technicalDepth === item.value
+                            ? 'border-ink bg-white shadow-sm'
+                            : 'border-black/10 bg-white/80'
+                        }`}
+                      >
+                        <p className="text-sm font-semibold">{item.label}</p>
+                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-xs text-black/60">
+                    Controls how rigorous lessons, examples, and assessments should be.
+                  </p>
+                </div>
+
+                <div className="mt-3 rounded-lg border border-black/10 bg-white/75 p-2">
+                  <button
+                    type="button"
+                    className="flex w-full items-center justify-between rounded-md px-2 py-2 text-left"
+                    onClick={() => setAssessmentPickerOpen((prev) => !prev)}
+                    aria-expanded={assessmentPickerOpen}
+                  >
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">
+                      Assessment methods
+                    </span>
+                    <span className="text-xs text-black/65">
+                      {assessmentStyles.length} selected · {assessmentPickerOpen ? 'Hide' : 'Customize'}
+                    </span>
+                  </button>
+                  <p className="px-2 pb-2 text-xs text-black/60">
+                    Default: short answer, multiple choice, flashcard.
+                  </p>
+                  {assessmentPickerOpen && (
+                    <div className="grid gap-2 px-2 pb-2 sm:grid-cols-2">
+                      {ASSESSMENT_STYLE_OPTIONS.map((item) => {
+                        const selected = assessmentStyles.includes(item.value);
+                        return (
+                          <button
+                            key={item.value}
+                            type="button"
+                            onClick={() =>
+                              setAssessmentStyles((prev) =>
+                                prev.includes(item.value)
+                                  ? prev.filter((style) => style !== item.value)
+                                  : [...prev, item.value]
+                              )
+                            }
+                            className={`rounded-md border p-2 text-left ${
+                              selected ? 'border-ink bg-white shadow-sm' : 'border-black/10 bg-white/80'
+                            }`}
+                          >
+                            <p className="text-sm font-semibold">{item.label}</p>
+                            <p className="mt-1 text-xs text-black/60">{item.description}</p>
+                            <p className="mt-1 text-[10px] uppercase tracking-[0.12em] text-black/45">{item.category}</p>
+                          </button>
+                        );
+                      })}
+                      <div className="sm:col-span-2 flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          className="rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs"
+                          onClick={() => setAssessmentStyles(DEFAULT_ASSESSMENT_STYLES)}
+                        >
+                          Reset to defaults
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs"
+                          onClick={() => setAssessmentStyles(ASSESSMENT_STYLE_OPTIONS.map((item) => item.value))}
+                        >
+                          Select all
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
 
             {plausibilityPrompt && (
               <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm">

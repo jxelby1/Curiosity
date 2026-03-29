@@ -17,15 +17,15 @@ import {
   generateResource,
   getExternalResources,
   listBranchSuggestions,
-  getRecommendations,
   getSkillTree,
   revealAssessmentAnswers,
   rejectBranchSuggestion,
   submitAssessment,
   updateProgress
 } from '@/lib/api';
-import { readRecommendationCache, readSkillTreeCache, writeRecommendationCache, writeSkillTreeCache } from '@/lib/cache';
+import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
 import { formatDisplayTag } from '@/lib/display-format';
+import { derivePrimaryNodeNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
 import {
   AssessmentAnswerReveal,
   Assessment,
@@ -36,7 +36,6 @@ import {
   ExerciseCompletionList,
   ExternalResource,
   BranchSuggestion,
-  RecommendationItem,
   Resource,
   SkillNode,
   SkillTree
@@ -195,10 +194,8 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const routeSkillId = Number(params.skillId);
   const searchParams = useSearchParams();
   const cachedTree = readSkillTreeCache(topicId);
-  const cachedRecommendations = readRecommendationCache(topicId) || [];
 
   const [tree, setTree] = useState<SkillTree | null>(cachedTree);
-  const [recommendations, setRecommendations] = useState<RecommendationItem[]>(cachedRecommendations);
   const [activeTab, setActiveTab] = useState<LearningTab>('overview');
 
   const [contentCache, setContentCache] = useState<Record<number, NodeCache>>({});
@@ -212,7 +209,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [errorByKey, setErrorByKey] = useState<Record<string, string>>({});
 
   const [loadingTree, setLoadingTree] = useState(!cachedTree);
-  const [loadingRecommendations, setLoadingRecommendations] = useState(cachedRecommendations.length === 0);
   const [deepDiveFocus, setDeepDiveFocus] = useState('');
   const [deepDivePurpose, setDeepDivePurpose] = useState<
     'exploration' | 'specialization' | 'enrichment' | 'remediation'
@@ -250,37 +246,17 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     [topicId]
   );
 
-  const loadRecommendations = useCallback(
-    async (refresh = false) => {
-      setLoadingRecommendations(true);
-      try {
-        const recs = await getRecommendations(topicId, refresh);
-        setRecommendations(recs);
-        writeRecommendationCache(topicId, recs);
-      } catch (err) {
-        setPageError(err instanceof Error ? err.message : 'Failed to load recommendations');
-      } finally {
-        setLoadingRecommendations(false);
-      }
-    },
-    [topicId]
-  );
-
   const refreshTopicData = useCallback(
-    async (refreshRecommendations = false) => {
+    async () => {
       setPageError('');
       await loadTree(false);
-      if (refreshRecommendations) {
-        await loadRecommendations(true);
-      }
     },
-    [loadRecommendations, loadTree]
+    [loadTree]
   );
 
   useEffect(() => {
     loadTree();
-    loadRecommendations();
-  }, [loadRecommendations, loadTree]);
+  }, [loadTree]);
 
   useEffect(() => {
     const requested = (searchParams.get('tab') || 'overview') as LearningTab;
@@ -548,7 +524,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       });
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
-      await loadRecommendations(true);
       const suggestions = await listBranchSuggestions(nodeId, 'pending');
       setContentCache((prev) => {
         const nodeCache = prev[nodeId] || { resources: {} };
@@ -741,7 +716,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           }
         };
       });
-      await refreshTopicData(true);
+      await refreshTopicData();
     } catch (err) {
       setErrorState('quiz', err instanceof Error ? err.message : 'Failed to submit assessment', nodeId);
     } finally {
@@ -764,7 +739,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         skillId: nodeId,
         action
       });
-      await refreshTopicData(true);
+      await refreshTopicData();
     } catch (err) {
       setErrorState('progress', err instanceof Error ? err.message : 'Failed to update progress', nodeId);
     } finally {
@@ -779,7 +754,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     setErrorState('force-unlock', '', nodeId);
     try {
       await forceUnlockSkill(nodeId);
-      await refreshTopicData(true);
+      await refreshTopicData();
     } catch (err) {
       setErrorState('force-unlock', err instanceof Error ? err.message : 'Failed to force unlock node', nodeId);
     } finally {
@@ -794,7 +769,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     setErrorState('dev-complete', '', nodeId);
     try {
       await devCompleteSkill(nodeId);
-      await refreshTopicData(true);
+      await refreshTopicData();
     } catch (err) {
       setErrorState('dev-complete', err instanceof Error ? err.message : 'Failed to complete node in dev mode', nodeId);
     } finally {
@@ -822,7 +797,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       setTree(nextTree);
       writeSkillTreeCache(topicId, nextTree);
       setDeepDiveFocus('');
-      await loadRecommendations(true);
     } catch (err) {
       setErrorState('deep-dive', err instanceof Error ? err.message : 'Failed to create deep-dive branch', nodeId);
     } finally {
@@ -896,7 +870,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         };
       });
       updateExerciseProofFile(exerciseIndex, null);
-      await refreshTopicData(true);
+      await refreshTopicData();
     } catch (err) {
       setErrorState(
         'exercise-completions',
@@ -978,6 +952,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         : 'Not started';
   const bestQuizScorePct =
     typeof selectedSkill.best_quiz_score === 'number' ? Math.round(selectedSkill.best_quiz_score * 100) : null;
+  const primaryNextStep = derivePrimaryNodeNextStep(topicId, selectedSkill);
 
   return (
     <main className="mx-auto max-w-7xl p-6 md:p-10">
@@ -988,7 +963,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
         rightSlot={
           <button
             className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
-            onClick={() => refreshTopicData(true)}
+            onClick={() => refreshTopicData()}
           >
             Refresh
           </button>
@@ -1037,21 +1012,31 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
           </article>
 
           <article className="panel p-4">
-            <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended next nodes</h3>
-            {loadingRecommendations && <p className="mt-2 text-xs text-black/60">Updating recommendations...</p>}
-            <div className="mt-3 space-y-2">
-              {recommendations.map((rec) => (
-                <Link
-                  key={rec.skill_node_id}
-                  href={`/topics/${topicId}/skills/${rec.skill_node_id}`}
-                  className="block rounded-lg border border-black/10 bg-white p-2 text-xs"
-                >
-                  <p className="font-semibold">{rec.skill_name}</p>
-                  <p className="muted mt-1">{rec.rationale}</p>
-                </Link>
-              ))}
-              {recommendations.length === 0 && <p className="muted text-xs">No recommendations available.</p>}
+            <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
+            <h3 className="mt-2 text-lg font-semibold">{primaryNextStep.label}</h3>
+            <p className="muted mt-1.5 text-sm">{primaryNextStep.reason}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link href={primaryNextStep.href} className="rounded-md bg-ink px-3 py-2 text-xs text-white">
+                Do this now
+              </Link>
+              <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-xs">
+                Reflect
+              </Link>
             </div>
+            <ol className="mt-3 space-y-1.5 text-xs">
+              {LEARNING_LOOP_LABELS.map((item, index) => (
+                <li
+                  key={item.id}
+                  className={`rounded-md border px-2 py-1 ${
+                    item.id === primaryNextStep.loopStep
+                      ? 'border-ink bg-ink/5 text-black'
+                      : 'border-black/10 bg-white text-black/64'
+                  }`}
+                >
+                  {index + 1}. {item.label}
+                </li>
+              ))}
+            </ol>
           </article>
         </aside>
 
@@ -1148,6 +1133,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
               <section className="rounded-xl border border-black/10 bg-white p-4">
                 <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Progress Actions</h3>
                 <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Link
+                    href={primaryNextStep.href}
+                    className="rounded-md bg-ink px-3 py-2 text-sm text-white"
+                  >
+                    {primaryNextStep.label}
+                  </Link>
                   <button
                     className="rounded-md bg-moss px-3 py-2 text-sm text-white disabled:opacity-50"
                     onClick={() => handleProgressUpdate('complete_lesson')}
@@ -1155,23 +1146,11 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   >
                     {lessonComplete ? 'Lesson completed' : 'Mark lesson complete'}
                   </button>
-                  <button
-                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-50"
-                    onClick={() => onTabChange('exercises')}
-                    disabled={selectedSkill.status === 'locked'}
-                  >
-                    Open exercises
-                  </button>
-                  <button
-                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-50"
-                    onClick={() => onTabChange('quiz')}
-                    disabled={selectedSkill.status === 'locked'}
-                    type="button"
-                  >
-                    Open assessment
-                  </button>
+                  <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm">
+                    Reflect in journal
+                  </Link>
                 </div>
-                {!lessonComplete && <p className="muted mt-3 text-xs">Complete the lesson first, then work through at least one exercise before assessment.</p>}
+                <p className="muted mt-3 text-xs">{primaryNextStep.reason}</p>
                 {exerciseCompletions && exerciseCompletions.total_exercises > 0 && (
                   <p className="muted mt-1 text-xs">
                     Exercises are tracked individually. Complete one or both based on your learning focus.
@@ -1304,10 +1283,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 </div>
               </section>
 
-              <section className="rounded-xl border border-black/10 bg-white p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Next Step</h3>
-                <p className="muted mt-2 text-sm leading-relaxed">{selectedSkill.recommended_next_action}</p>
-              </section>
             </div>
           )}
 
