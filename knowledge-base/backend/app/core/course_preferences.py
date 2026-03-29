@@ -43,9 +43,7 @@ ASSESSMENT_STYLE_VALUES: tuple[AssessmentStyle, ...] = (
 )
 
 DEFAULT_ASSESSMENT_STYLES: list[AssessmentStyle] = [
-    'short_answer',
     'multiple_choice',
-    'flashcard',
 ]
 DEFAULT_TECHNICAL_DEPTH: TechnicalDepth = 'intermediate'
 
