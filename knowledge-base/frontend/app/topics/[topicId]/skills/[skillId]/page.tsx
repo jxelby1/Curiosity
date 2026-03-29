@@ -56,6 +56,7 @@ import { ProofArtifactViewer } from '@/components/proof-artifact-viewer';
 import { TopicHeader } from '@/components/topic-header';
 
 type LearningTab = 'overview' | 'lesson' | 'deep_dive' | 'examples' | 'exercises' | 'quiz' | 'resources';
+type WorkspaceMode = 'focus' | 'detailed';
 type ResourceKind = 'lesson' | 'examples' | 'exercises';
 type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 
@@ -153,14 +154,14 @@ function assessmentStyleLabel(style: AssessmentStyle | string): string {
   return formatDisplayTag(style);
 }
 
-const tabs: Array<{ id: LearningTab; label: string }> = [
+const tabs: Array<{ id: LearningTab; label: string; focusVisible?: boolean }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'lesson', label: 'Lesson' },
-  { id: 'deep_dive', label: 'Deep Dive' },
-  { id: 'examples', label: 'Examples' },
+  { id: 'deep_dive', label: 'Deep Dive', focusVisible: false },
+  { id: 'examples', label: 'Examples', focusVisible: false },
   { id: 'exercises', label: 'Exercises' },
   { id: 'quiz', label: 'Assessment' },
-  { id: 'resources', label: 'Resources' }
+  { id: 'resources', label: 'Resources', focusVisible: false }
 ];
 
 function ContentMeta({ source, version }: { source: 'stored' | 'generated' | 'regenerated'; version: number }) {
@@ -194,9 +195,11 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const routeSkillId = Number(params.skillId);
   const searchParams = useSearchParams();
   const cachedTree = readSkillTreeCache(topicId);
+  const initialWorkspaceMode: WorkspaceMode = searchParams.get('mode') === 'detailed' ? 'detailed' : 'focus';
 
   const [tree, setTree] = useState<SkillTree | null>(cachedTree);
   const [activeTab, setActiveTab] = useState<LearningTab>('overview');
+  const [workspaceMode, setWorkspaceMode] = useState<WorkspaceMode>(initialWorkspaceMode);
 
   const [contentCache, setContentCache] = useState<Record<number, NodeCache>>({});
   const [assessmentDraftsByNode, setAssessmentDraftsByNode] = useState<
@@ -219,6 +222,11 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     if (!tree?.nodes?.length) return null;
     return tree.nodes.find((node) => node.id === routeSkillId) || null;
   }, [tree, routeSkillId]);
+
+  const visibleTabs = useMemo(() => {
+    if (workspaceMode === 'detailed') return tabs;
+    return tabs.filter((tab) => tab.focusVisible !== false);
+  }, [workspaceMode]);
 
   const currentNodeCache = useMemo(() => {
     if (!selectedSkill) return undefined;
@@ -260,12 +268,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
   useEffect(() => {
     const requested = (searchParams.get('tab') || 'overview') as LearningTab;
-    if (tabs.some((item) => item.id === requested)) {
+    if (visibleTabs.some((item) => item.id === requested)) {
       setActiveTab(requested);
       return;
     }
     setActiveTab('overview');
-  }, [routeSkillId, searchParams]);
+  }, [routeSkillId, searchParams, visibleTabs]);
 
   useEffect(() => {
     if (!selectedSkill) return;
@@ -953,6 +961,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const bestQuizScorePct =
     typeof selectedSkill.best_quiz_score === 'number' ? Math.round(selectedSkill.best_quiz_score * 100) : null;
   const primaryNextStep = derivePrimaryNodeNextStep(topicId, selectedSkill);
+  const isFocusMode = workspaceMode === 'focus';
 
   return (
     <main className="mx-auto max-w-7xl p-6 md:p-10">
@@ -972,44 +981,64 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
       <section className="grid gap-6 lg:grid-cols-[0.95fr_2fr]">
         <aside className="space-y-4">
-          <article className="panel p-4">
-            <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Skill Nodes</h2>
-            <div className="space-y-2">
-              {tree.nodes.map((node) => (
-                <Link
-                  key={node.id}
-                  href={`/topics/${topicId}/skills/${node.id}`}
-                  className={`block rounded-lg border p-3 text-sm transition ${
-                    node.id === activeNodeId ? 'border-ink bg-white' : 'border-black/10 bg-white/80'
-                  }`}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="font-semibold leading-snug">{node.name}</p>
-                    <div className="flex flex-wrap items-center gap-1">
-                      {node.node_kind === 'optional_branch' && (
-                        <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional path</span>
-                      )}
-                      {node.node_kind === 'optional_branch' && node.branch_origin !== 'core' && (
-                        <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
-                          {node.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
-                        </span>
-                      )}
-                      <span className={`badge border ${statusClasses(node.status)}`}>{formatDisplayTag(node.status)}</span>
+          {workspaceMode === 'detailed' ? (
+            <article className="panel p-4">
+              <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Skill Nodes</h2>
+              <div className="space-y-2">
+                {tree.nodes.map((node) => (
+                  <Link
+                    key={node.id}
+                    href={`/topics/${topicId}/skills/${node.id}`}
+                    className={`block rounded-lg border p-3 text-sm transition ${
+                      node.id === activeNodeId ? 'border-ink bg-white' : 'border-black/10 bg-white/80'
+                    }`}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="font-semibold leading-snug">{node.name}</p>
+                      <div className="flex flex-wrap items-center gap-1">
+                        {node.node_kind === 'optional_branch' && (
+                          <span className={`badge border ${nodeKindClasses(node.node_kind)}`}>Optional path</span>
+                        )}
+                        {node.node_kind === 'optional_branch' && node.branch_origin !== 'core' && (
+                          <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
+                            {node.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
+                          </span>
+                        )}
+                        <span className={`badge border ${statusClasses(node.status)}`}>{formatDisplayTag(node.status)}</span>
+                      </div>
                     </div>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between gap-2">
-                    <span className={`badge border ${progressStateClasses(node.progress_state)}`}>
-                      {progressStateLabel(node.progress_state)}
-                    </span>
-                    <span className="text-xs text-black/65">Difficulty {node.difficulty}</span>
-                  </div>
-                  {node.status === 'locked' && node.lock_reason && (
-                    <p className="mt-2 text-xs text-red-700">{node.lock_reason}</p>
-                  )}
-                </Link>
-              ))}
-            </div>
-          </article>
+                    <div className="mt-2 flex items-center justify-between gap-2">
+                      <span className={`badge border ${progressStateClasses(node.progress_state)}`}>
+                        {progressStateLabel(node.progress_state)}
+                      </span>
+                      <span className="text-xs text-black/65">Difficulty {node.difficulty}</span>
+                    </div>
+                    {node.status === 'locked' && node.lock_reason && (
+                      <p className="mt-2 text-xs text-red-700">{node.lock_reason}</p>
+                    )}
+                  </Link>
+                ))}
+              </div>
+            </article>
+          ) : (
+            <article className="panel p-4">
+              <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Focus Context</p>
+              <h2 className="mt-2 text-lg font-semibold">{selectedSkill.name}</h2>
+              <p className="muted mt-1 text-sm">Stay on this node until your next learning action is complete.</p>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
+                  {progressStateLabel(selectedSkill.progress_state)}
+                </span>
+                <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
+              </div>
+              <Link
+                href={`/topics/${topicId}`}
+                className="mt-3 inline-flex rounded-md border border-black/15 bg-white px-3 py-2 text-xs"
+              >
+                Open tree overview
+              </Link>
+            </article>
+          )}
 
           <article className="panel p-4">
             <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
@@ -1047,32 +1076,59 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <h2 className="text-2xl font-semibold leading-tight">{selectedSkill.name}</h2>
                 <p className="muted mt-2 max-w-3xl text-sm leading-relaxed">{selectedSkill.description}</p>
                 {selectedSkill.status === 'locked' && selectedSkill.lock_reason && (
-                <p className="mt-2 text-sm text-red-700">{selectedSkill.lock_reason}</p>
-              )}
-              {selectedSkill.force_unlocked && (
-                <p className="mt-2 inline-flex rounded-full border border-fuchsia-300 bg-fuchsia-100 px-3 py-1 text-xs text-fuchsia-900">
-                  Dev override active
-                </p>
-              )}
-            </div>
-              <div className="flex items-center gap-2">
-                {selectedSkill.node_kind === 'optional_branch' && (
-                  <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional path</span>
+                  <p className="mt-2 text-sm text-red-700">{selectedSkill.lock_reason}</p>
                 )}
-                {selectedSkill.node_kind === 'optional_branch' && selectedSkill.branch_origin !== 'core' && (
-                  <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
-                    {selectedSkill.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
+                {selectedSkill.force_unlocked && (
+                  <p className="mt-2 inline-flex rounded-full border border-fuchsia-300 bg-fuchsia-100 px-3 py-1 text-xs text-fuchsia-900">
+                    Dev override active
+                  </p>
+                )}
+              </div>
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-end gap-2">
+                  {selectedSkill.node_kind === 'optional_branch' && (
+                    <span className={`badge border ${nodeKindClasses(selectedSkill.node_kind)}`}>Optional path</span>
+                  )}
+                  {selectedSkill.node_kind === 'optional_branch' && selectedSkill.branch_origin !== 'core' && (
+                    <span className="badge border border-violet-300 bg-violet-50 text-violet-700">
+                      {selectedSkill.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
+                    </span>
+                  )}
+                  <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
+                    {progressStateLabel(selectedSkill.progress_state)}
                   </span>
-                )}
-                <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
-                  {progressStateLabel(selectedSkill.progress_state)}
-                </span>
-                <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
+                  <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
+                </div>
+                <div className="inline-flex rounded-full border border-black/15 bg-white p-1 text-xs">
+                  <button
+                    type="button"
+                    className={`rounded-full px-3 py-1 font-medium transition ${
+                      workspaceMode === 'focus' ? 'bg-ink text-white' : 'text-black/70 hover:bg-black/[0.04]'
+                    }`}
+                    onClick={() => setWorkspaceMode('focus')}
+                  >
+                    Focus mode
+                  </button>
+                  <button
+                    type="button"
+                    className={`rounded-full px-3 py-1 font-medium transition ${
+                      workspaceMode === 'detailed' ? 'bg-ink text-white' : 'text-black/70 hover:bg-black/[0.04]'
+                    }`}
+                    onClick={() => setWorkspaceMode('detailed')}
+                  >
+                    Detailed tools
+                  </button>
+                </div>
+                <p className="max-w-sm text-right text-[11px] text-black/58">
+                  {isFocusMode
+                    ? 'Focus mode keeps one clear next move front and center.'
+                    : 'Detailed tools shows branching, deep-dive, and developer controls.'}
+                </p>
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {tabs.map((tab) => (
+              {visibleTabs.map((tab) => (
                 <button
                   key={tab.id}
                   className={`rounded-md border px-3 py-1.5 text-sm transition ${
@@ -1139,16 +1195,18 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   >
                     {primaryNextStep.label}
                   </Link>
-                  <button
-                    className="rounded-md bg-moss px-3 py-2 text-sm text-white disabled:opacity-50"
-                    onClick={() => handleProgressUpdate('complete_lesson')}
-                    disabled={progressLoading || selectedSkill.status === 'locked' || lessonComplete}
-                  >
-                    {lessonComplete ? 'Lesson completed' : 'Mark lesson complete'}
-                  </button>
                   <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm">
                     Reflect in journal
                   </Link>
+                  {workspaceMode === 'detailed' && (
+                    <button
+                      className="rounded-md bg-moss px-3 py-2 text-sm text-white disabled:opacity-50"
+                      onClick={() => handleProgressUpdate('complete_lesson')}
+                      disabled={progressLoading || selectedSkill.status === 'locked' || lessonComplete}
+                    >
+                      {lessonComplete ? 'Lesson completed' : 'Mark lesson complete'}
+                    </button>
+                  )}
                 </div>
                 <p className="muted mt-3 text-xs">{primaryNextStep.reason}</p>
                 {exerciseCompletions && exerciseCompletions.total_exercises > 0 && (
@@ -1156,7 +1214,12 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     Exercises are tracked individually. Complete one or both based on your learning focus.
                   </p>
                 )}
-                {isLocked && canUseDevTools && (
+                {isFocusMode && (
+                  <p className="mt-2 text-xs text-black/58">
+                    Branching and developer controls are available in <span className="font-semibold">Detailed tools</span>.
+                  </p>
+                )}
+                {workspaceMode === 'detailed' && isLocked && canUseDevTools && (
                   <div className="mt-3 space-y-2">
                     <p className="text-xs text-red-700">
                       This node is locked. Verify prerequisite nodes to unlock learning content.
@@ -1172,7 +1235,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     {forceUnlockError && <p className="text-xs text-red-700">{forceUnlockError}</p>}
                   </div>
                 )}
-                {canUseDevTools && (
+                {workspaceMode === 'detailed' && canUseDevTools && (
                   <div className="mt-3 space-y-2">
                     <button
                       type="button"
@@ -1191,97 +1254,115 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 {progressError && <p className="mt-3 text-sm text-red-700">{progressError}</p>}
               </section>
 
-              <section className="rounded-xl border border-black/10 bg-white p-4">
-                <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Explore Further (Optional)</h3>
-                <p className="muted mt-2 text-sm">
-                  Create a side branch with optional modules if you want to go deeper on this node.
-                </p>
-                <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-center">
-                  <input
-                    value={deepDiveFocus}
-                    onChange={(event) => setDeepDiveFocus(event.target.value)}
-                    className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm sm:max-w-md"
-                    placeholder="Optional focus (e.g. groove timing, edge cases, troubleshooting)"
-                    maxLength={180}
-                  />
-                  <select
-                    value={deepDivePurpose}
-                    onChange={(event) => setDeepDivePurpose(event.target.value as typeof deepDivePurpose)}
-                    className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
-                  >
-                    <option value="exploration">Exploration</option>
-                    <option value="specialization">Specialization</option>
-                    <option value="enrichment">Enrichment</option>
-                    <option value="remediation">Remediation</option>
-                  </select>
-                  <button
-                    className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
-                    onClick={handleDeepDive}
-                    disabled={deepDiveLoading || isLocked}
-                    type="button"
-                  >
-                    {deepDiveLoading ? 'Creating branch...' : 'Create optional branch'}
-                  </button>
-                </div>
-                {deepDiveError && <p className="mt-2 text-sm text-red-700">{deepDiveError}</p>}
-              </section>
-
-              <section className="rounded-xl border border-black/10 bg-white p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Branch Opportunity</h3>
-                  <button
-                    type="button"
-                    className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
-                    onClick={handleGenerateBranchSuggestions}
-                    disabled={branchSuggestionsLoading || branchSuggestionsActionLoading || isLocked}
-                  >
-                    {branchSuggestionsLoading ? 'Generating...' : 'Refresh suggestion'}
-                  </button>
-                </div>
-                <p className="muted mt-2 text-sm">
-                  This recommendation is not part of your tree yet. Accept it to convert it into an active optional path.
-                </p>
-                {branchSuggestionsError && <p className="mt-2 text-sm text-red-700">{branchSuggestionsError}</p>}
-                <div className="mt-3 space-y-2">
-                  {branchSuggestions.map((suggestion) => (
-                    <article key={suggestion.id} className="rounded-lg border border-black/10 bg-paper/40 p-3">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-semibold">{suggestion.title}</p>
-                          <p className="muted mt-1 text-xs">{suggestion.focus}</p>
-                        </div>
-                        <span className="badge border border-black/15 bg-white text-black/70">
-                          {formatDisplayTag(suggestion.purpose)}
-                        </span>
-                      </div>
-                      <p className="muted mt-2 text-sm">{suggestion.rationale}</p>
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        <button
-                          type="button"
-                          className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
-                          onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
-                          disabled={branchSuggestionsActionLoading}
-                        >
-                          Add branch
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
-                          onClick={() => handleRejectBranchSuggestion(suggestion.id)}
-                          disabled={branchSuggestionsActionLoading}
-                        >
-                          Not now
-                        </button>
-                      </div>
-                    </article>
-                  ))}
-                  {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
-                    <p className="muted text-xs">
-                      No recommendation at the moment. Refresh to request one, or create your own optional branch above.
+              {workspaceMode === 'detailed' ? (
+                <>
+                  <section className="rounded-xl border border-black/10 bg-white p-4">
+                    <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Explore Further (Optional)</h3>
+                    <p className="muted mt-2 text-sm">
+                      Create a side branch with optional modules if you want to go deeper on this node.
                     </p>
-                  )}
-                </div>
-              </section>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-center">
+                      <input
+                        value={deepDiveFocus}
+                        onChange={(event) => setDeepDiveFocus(event.target.value)}
+                        className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm sm:max-w-md"
+                        placeholder="Optional focus (e.g. groove timing, edge cases, troubleshooting)"
+                        maxLength={180}
+                      />
+                      <select
+                        value={deepDivePurpose}
+                        onChange={(event) => setDeepDivePurpose(event.target.value as typeof deepDivePurpose)}
+                        className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                      >
+                        <option value="exploration">Exploration</option>
+                        <option value="specialization">Specialization</option>
+                        <option value="enrichment">Enrichment</option>
+                        <option value="remediation">Remediation</option>
+                      </select>
+                      <button
+                        className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                        onClick={handleDeepDive}
+                        disabled={deepDiveLoading || isLocked}
+                        type="button"
+                      >
+                        {deepDiveLoading ? 'Creating branch...' : 'Create optional branch'}
+                      </button>
+                    </div>
+                    {deepDiveError && <p className="mt-2 text-sm text-red-700">{deepDiveError}</p>}
+                  </section>
+
+                  <section className="rounded-xl border border-black/10 bg-white p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Branch Opportunity</h3>
+                      <button
+                        type="button"
+                        className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
+                        onClick={handleGenerateBranchSuggestions}
+                        disabled={branchSuggestionsLoading || branchSuggestionsActionLoading || isLocked}
+                      >
+                        {branchSuggestionsLoading ? 'Generating...' : 'Refresh suggestion'}
+                      </button>
+                    </div>
+                    <p className="muted mt-2 text-sm">
+                      This recommendation is not part of your tree yet. Accept it to convert it into an active optional path.
+                    </p>
+                    {branchSuggestionsError && <p className="mt-2 text-sm text-red-700">{branchSuggestionsError}</p>}
+                    <div className="mt-3 space-y-2">
+                      {branchSuggestions.map((suggestion) => (
+                        <article key={suggestion.id} className="rounded-lg border border-black/10 bg-paper/40 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div>
+                              <p className="text-sm font-semibold">{suggestion.title}</p>
+                              <p className="muted mt-1 text-xs">{suggestion.focus}</p>
+                            </div>
+                            <span className="badge border border-black/15 bg-white text-black/70">
+                              {formatDisplayTag(suggestion.purpose)}
+                            </span>
+                          </div>
+                          <p className="muted mt-2 text-sm">{suggestion.rationale}</p>
+                          <div className="mt-3 flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
+                              onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
+                              disabled={branchSuggestionsActionLoading}
+                            >
+                              Add branch
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
+                              onClick={() => handleRejectBranchSuggestion(suggestion.id)}
+                              disabled={branchSuggestionsActionLoading}
+                            >
+                              Not now
+                            </button>
+                          </div>
+                        </article>
+                      ))}
+                      {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
+                        <p className="muted text-xs">
+                          No recommendation at the moment. Refresh to request one, or create your own optional branch above.
+                        </p>
+                      )}
+                    </div>
+                  </section>
+                </>
+              ) : (
+                <section className="rounded-xl border border-black/10 bg-white p-4">
+                  <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Branching</h3>
+                  <p className="muted mt-2 text-sm">
+                    Focus mode keeps this workspace on one next move. Open detailed tools when you want to add or review optional branches.
+                  </p>
+                  <button
+                    type="button"
+                    className="mt-3 rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
+                    onClick={() => setWorkspaceMode('detailed')}
+                  >
+                    Open detailed tools
+                  </button>
+                </section>
+              )}
 
             </div>
           )}

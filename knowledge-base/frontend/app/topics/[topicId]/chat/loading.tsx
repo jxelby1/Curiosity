@@ -1,0 +1,5 @@
+import { ChatWorkspaceSkeleton } from '@/components/page-skeletons';
+
+export default function Loading() {
+  return <ChatWorkspaceSkeleton />;
+}
