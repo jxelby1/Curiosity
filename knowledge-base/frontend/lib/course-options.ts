@@ -150,7 +150,5 @@ export const ASSESSMENT_STYLE_OPTIONS: Array<{
 ];
 
 export const DEFAULT_ASSESSMENT_STYLES: AssessmentStyle[] = [
-  'short_answer',
   'multiple_choice',
-  'flashcard',
 ];

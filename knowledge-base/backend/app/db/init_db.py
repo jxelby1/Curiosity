@@ -32,7 +32,7 @@ def _apply_lightweight_migrations() -> None:
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS course_depth VARCHAR(30) DEFAULT 'standard'",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS starting_skill_level VARCHAR(30) DEFAULT 'beginner'",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS technical_depth VARCHAR(30) DEFAULT 'intermediate'",
-        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS allowed_assessment_styles JSON DEFAULT '[\"short_answer\",\"multiple_choice\",\"flashcard\"]'::json",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS allowed_assessment_styles JSON DEFAULT '[\"multiple_choice\"]'::json",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS curriculum_blueprint JSON DEFAULT '{}'::json",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS curriculum_ledger JSON DEFAULT '{}'::json",
         'ALTER TABLE documents ADD COLUMN IF NOT EXISTS note_id INTEGER NULL',
@@ -93,6 +93,6 @@ def _apply_lightweight_migrations() -> None:
             conn.execute(text(statement))
         conn.execute(
             text(
-                "ALTER TABLE topics ALTER COLUMN allowed_assessment_styles SET DEFAULT '[\"short_answer\",\"multiple_choice\",\"flashcard\"]'::json"
+                "ALTER TABLE topics ALTER COLUMN allowed_assessment_styles SET DEFAULT '[\"multiple_choice\"]'::json"
             )
         )

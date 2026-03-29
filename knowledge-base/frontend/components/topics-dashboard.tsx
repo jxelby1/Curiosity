@@ -469,7 +469,7 @@ export function TopicsDashboard() {
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Quick start defaults</p>
                   <p className="mt-1 text-sm text-black/75">
-                    Factual topic, standard course, beginner start, intermediate depth, and three core assessment methods.
+                    Factual topic, standard course, beginner start, intermediate depth, and multiple-choice assessment by default.
                   </p>
                   <p className="mt-1 text-xs text-black/60">You can customize before creating if you want finer control.</p>
                 </div>
@@ -632,7 +632,7 @@ export function TopicsDashboard() {
                     </span>
                   </button>
                   <p className="px-2 pb-2 text-xs text-black/60">
-                    Default: short answer, multiple choice, flashcard.
+                    Default: multiple choice.
                   </p>
                   {assessmentPickerOpen && (
                     <div className="grid gap-2 px-2 pb-2 sm:grid-cols-2">

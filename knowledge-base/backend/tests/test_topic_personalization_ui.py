@@ -16,4 +16,4 @@ def test_topic_creation_ui_exposes_course_personalization_controls() -> None:
     assert 'Technical depth' in content
     assert 'Assessment methods' in content
     assert 'Select all' in content
-    assert 'Default: short answer, multiple choice, flashcard.' in content
+    assert 'Default: multiple choice.' in content
