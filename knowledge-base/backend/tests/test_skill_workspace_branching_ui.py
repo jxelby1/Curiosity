@@ -7,12 +7,15 @@ def test_skill_workspace_includes_branching_controls_and_suggestions() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     page_path = repo_root / 'frontend' / 'app' / 'topics' / '[topicId]' / 'skills' / '[skillId]' / 'page.tsx'
     content = page_path.read_text(encoding='utf-8')
+    branch_meta = (repo_root / 'frontend' / 'lib' / 'branch-purpose.ts').read_text(encoding='utf-8')
 
     assert 'Explore Further (Optional)' in content
-    assert 'Create optional branch' in content
-    assert 'Recommended Branch Opportunity' in content
-    assert 'Add branch' in content
+    assert 'Open branch move' in content
+    assert 'Recommended Study Move' in content
+    assert 'Activate branch' in content
     assert 'Refresh suggestion' in content
+    assert 'Style / Technique Practice' in branch_meta
+    assert 'Compare & Contrast' in branch_meta
     assert 'limit: 1' in content
     assert 'branch_size: 1' in content
 

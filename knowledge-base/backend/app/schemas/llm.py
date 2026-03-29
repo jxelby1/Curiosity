@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.branching import normalize_branch_purpose
 from app.core.course_preferences import ASSESSMENT_STYLE_TO_QUESTION_TYPE, ASSESSMENT_STYLE_VALUES
 
 
@@ -27,6 +28,31 @@ def _normalize_prerequisite_keys(value: object) -> list[str]:
         if len(normalized) >= 2:
             break
     return normalized
+
+
+def _normalize_instructional_role_value(raw_role: object, *, fallback: str = 'enrichment') -> str:
+    normalized = str(raw_role or '').strip().lower().replace(' ', '_').replace('-', '_')
+    alias = {
+        'foundation': 'foundational_concept',
+        'foundational': 'foundational_concept',
+        'bridge': 'conceptual_bridge',
+        'application': 'practical_application',
+        'case_study': 'case_deepening',
+        'comparison': 'comparison_contrast',
+        'assessment_prep': 'assessment_preparation',
+        'review': 'synthesis_review',
+        'synthesis': 'synthesis_review',
+        'remedial': 'remediation',
+        'exploration': 'enrichment',
+        'deepen_theme': 'enrichment',
+        'compare_contrast': 'comparison_contrast',
+        'context_influence': 'conceptual_bridge',
+        'study_exemplar': 'case_deepening',
+        'creative_response': 'practical_application',
+        'style_technique_practice': 'remediation',
+        'follow_lineage': 'synthesis_review',
+    }
+    return alias.get(normalized, normalized or fallback)
 
 
 class SkillPlanNode(BaseModel):
@@ -99,6 +125,11 @@ class DeepDivePlanNode(BaseModel):
     def normalize_key(cls, value: str) -> str:
         return value.strip().lower().replace(' ', '_').replace('-', '_')
 
+    @field_validator('instructional_role', mode='before')
+    @classmethod
+    def normalize_instructional_role(cls, value: object) -> str:
+        return _normalize_instructional_role_value(value, fallback='enrichment')
+
     @field_validator('prerequisites', mode='before')
     @classmethod
     def normalize_prerequisites(cls, value: object) -> list[str]:
@@ -110,25 +141,43 @@ class DeepDiveBranchPlan(BaseModel):
     rationale: str = Field(min_length=20, max_length=400)
     nodes: list[DeepDivePlanNode] = Field(min_length=1, max_length=6)
 
+    @field_validator('rationale', mode='before')
+    @classmethod
+    def normalize_rationale_length(cls, value: object) -> str:
+        text = ' '.join(str(value or '').split()).strip()
+        if len(text) <= 400:
+            return text
+        trimmed = text[:399].rstrip(' ,;:-')
+        if not trimmed:
+            trimmed = text[:399].rstrip()
+        return f'{trimmed}…'
+
 
 class BranchSuggestionPlanItem(BaseModel):
     title: str = Field(min_length=4, max_length=160)
     focus: str = Field(min_length=3, max_length=180)
     rationale: str = Field(min_length=20, max_length=320)
-    purpose: Literal['enrichment', 'remediation', 'specialization', 'exploration', 'assessment_prep', 'project']
+    purpose: Literal[
+        'deepen_theme',
+        'compare_contrast',
+        'context_influence',
+        'study_exemplar',
+        'creative_response',
+        'style_technique_practice',
+        'follow_lineage',
+        'enrichment',
+        'remediation',
+        'specialization',
+        'exploration',
+        'assessment_prep',
+        'project',
+        'curiosity',
+    ]
 
     @field_validator('purpose', mode='before')
     @classmethod
     def normalize_purpose(cls, value: object) -> str:
-        normalized = str(value or '').strip().lower()
-        mapping = {
-            'assessment_prep': 'remediation',
-            'project': 'specialization',
-            'curiosity': 'exploration',
-        }
-        candidate = mapping.get(normalized, normalized or 'exploration')
-        allowed = {'enrichment', 'remediation', 'specialization', 'exploration'}
-        return candidate if candidate in allowed else 'exploration'
+        return normalize_branch_purpose(str(value or ''))
 
 
 class BranchSuggestionPlan(BaseModel):
@@ -184,6 +233,11 @@ class LessonPlan(BaseModel):
     learning_objectives: list[str] = Field(min_length=2, max_length=6)
     key_concepts: list[LessonKeyConcept] = Field(min_length=2, max_length=8)
     sections: list[LessonSection] = Field(min_length=2, max_length=8)
+    exemplar_focus: list[str] = Field(default_factory=list, max_length=3)
+    comparison_prompts: list[str] = Field(default_factory=list, max_length=4)
+    observation_prompts: list[str] = Field(default_factory=list, max_length=4)
+    response_prompts: list[str] = Field(default_factory=list, max_length=3)
+    practice_hooks: list[str] = Field(default_factory=list, max_length=3)
     takeaways: list[str] = Field(min_length=2, max_length=6)
     next_steps: list[str] = Field(min_length=1, max_length=4)
 
@@ -198,6 +252,11 @@ class DeepLessonPlan(BaseModel):
     summary: str = Field(min_length=30, max_length=420)
     essential_questions: list[str] = Field(min_length=2, max_length=6)
     sections: list[DeepLessonSection] = Field(min_length=3, max_length=8)
+    exemplar_focus: list[str] = Field(default_factory=list, max_length=3)
+    comparison_prompts: list[str] = Field(default_factory=list, max_length=4)
+    observation_prompts: list[str] = Field(default_factory=list, max_length=5)
+    response_prompts: list[str] = Field(default_factory=list, max_length=4)
+    practice_hooks: list[str] = Field(default_factory=list, max_length=4)
     key_terms: list[LessonKeyConcept] = Field(min_length=2, max_length=10)
     study_prompts: list[str] = Field(min_length=2, max_length=6)
 
@@ -212,6 +271,11 @@ class ExamplesPlan(BaseModel):
     title: str = Field(min_length=4, max_length=180)
     intro: str = Field(min_length=20, max_length=420)
     examples: list[ExamplePlanItem] = Field(min_length=2, max_length=6)
+    exemplar_focus: list[str] = Field(default_factory=list, max_length=3)
+    comparison_prompts: list[str] = Field(default_factory=list, max_length=4)
+    observation_prompts: list[str] = Field(default_factory=list, max_length=4)
+    response_prompts: list[str] = Field(default_factory=list, max_length=3)
+    practice_hooks: list[str] = Field(default_factory=list, max_length=3)
 
 
 class ExercisePlanItem(BaseModel):

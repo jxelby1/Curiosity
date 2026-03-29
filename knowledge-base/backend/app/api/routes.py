@@ -31,6 +31,7 @@ from app.core.course_preferences import (
 )
 from app.core.config import get_settings
 from app.core.exceptions import ConfigurationError, ProviderError
+from app.core.branching import branch_purpose_label, normalize_branch_purpose
 from app.db.database import get_db
 from app.db.models import (
     Assessment,
@@ -47,6 +48,7 @@ from app.db.models import (
     ResourceType,
     MilestoneEvent,
     Note,
+    NoteType,
     Recommendation,
     ChatMessage,
     ChatSession,
@@ -328,7 +330,7 @@ def _branch_suggestion_to_response(suggestion: BranchSuggestion) -> BranchSugges
         title=suggestion.title,
         focus=suggestion.focus,
         rationale=suggestion.rationale,
-        purpose=suggestion.purpose,
+        purpose=normalize_branch_purpose(suggestion.purpose),
         origin=suggestion.origin,
         status=suggestion.status,
         accepted_branch_root_skill_id=suggestion.accepted_branch_root_skill_id,
@@ -995,6 +997,12 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         'milestones_reached': 0,
         'branches_accepted': 0,
         'branches_rejected': 0,
+        'reflections_logged': 0,
+        'comparisons_logged': 0,
+        'exemplars_saved': 0,
+        'interpretations_logged': 0,
+        'view_shifts_logged': 0,
+        'next_threads_logged': 0,
     }
 
     notes = db.scalars(
@@ -1007,6 +1015,23 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         snippet = _markdown_to_plain_text(note.body or '')
         snippet = snippet[:180] + ('…' if len(snippet) > 180 else '')
         note_title = note.title or 'Untitled note'
+        note_tags = {
+            str(tag).strip().lower()
+            for tag in (note.tags or [])
+            if str(tag).strip()
+        }
+        if note.note_type == NoteType.reflection or 'reflection' in note_tags:
+            counts['reflections_logged'] += 1
+        if 'comparison' in note_tags:
+            counts['comparisons_logged'] += 1
+        if 'exemplar' in note_tags or 'saved_work' in note_tags:
+            counts['exemplars_saved'] += 1
+        if 'interpretation' in note_tags:
+            counts['interpretations_logged'] += 1
+        if 'view_shift' in note_tags:
+            counts['view_shifts_logged'] += 1
+        if note.note_type == NoteType.reminder or 'next_thread' in note_tags:
+            counts['next_threads_logged'] += 1
         entries.append(
             TopicJournalEntryResponse(
                 id=f'note-created-{note.id}',
@@ -1022,7 +1047,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                     'note_event': 'created',
                     'note_type': note.note_type.value,
                     'source_type': note.source_type,
-                    'tags': note.tags or [],
+                    'tags': sorted(note_tags),
                 },
             )
         )
@@ -1043,7 +1068,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                         'note_event': 'updated',
                         'note_type': note.note_type.value,
                         'source_type': note.source_type,
-                        'tags': note.tags or [],
+                        'tags': sorted(note_tags),
                     },
                 )
             )
@@ -1232,7 +1257,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 description=(
                     decision.rationale
                     or (
-                        f'Added an optional {decision.purpose} branch from {parent_skill_name or "the selected node"}.'
+                        f'Added an optional "{branch_purpose_label(decision.purpose)}" branch from {parent_skill_name or "the selected node"}.'
                         if accepted
                         else 'Kept focus on the core path for now.'
                     )
@@ -1244,7 +1269,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
                 evidence_strength='derived',
                 metadata={
                     'branch_status': decision.status,
-                    'branch_purpose': decision.purpose,
+                    'branch_purpose': normalize_branch_purpose(decision.purpose),
                     'branch_origin': decision.origin,
                     'branch_focus': decision.focus,
                     'accepted_branch_root_skill_id': decision.accepted_branch_root_skill_id,
@@ -1263,7 +1288,13 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
 
     evidence_entries_count = sum(1 for entry in entries if entry.evidence_strength == 'direct')
     if evidence_entries_count == 0:
-        reflection_prompt = 'Capture one concrete takeaway after your next lesson to start your project memory.'
+        reflection_prompt = 'Capture one concrete work, passage, or artifact and note why it matters to your understanding.'
+    elif counts['view_shifts_logged'] == 0:
+        reflection_prompt = 'Write one short note: what changed your view today, and why?'
+    elif counts['comparisons_logged'] == 0:
+        reflection_prompt = 'Add one comparison entry between two works, interpretations, or styles.'
+    elif counts['next_threads_logged'] == 0:
+        reflection_prompt = 'Record one thread you want to explore next to keep momentum in your notebook.'
     elif counts['assessments_taken'] == 0:
         reflection_prompt = 'You have strong activity evidence. Add one verification step to confirm mastery.'
     elif counts['branches_accepted'] > 0:
@@ -1280,6 +1311,18 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         growth_signal_parts.append(f"{counts['assessments_taken']} assessments taken")
     if counts['artifacts_uploaded'] > 0:
         growth_signal_parts.append(f"{counts['artifacts_uploaded']} artifacts uploaded")
+    if counts['reflections_logged'] > 0:
+        growth_signal_parts.append(f"{counts['reflections_logged']} reflections logged")
+    if counts['comparisons_logged'] > 0:
+        growth_signal_parts.append(f"{counts['comparisons_logged']} comparisons captured")
+    if counts['exemplars_saved'] > 0:
+        growth_signal_parts.append(f"{counts['exemplars_saved']} exemplars saved")
+    if counts['interpretations_logged'] > 0:
+        growth_signal_parts.append(f"{counts['interpretations_logged']} interpretation notes")
+    if counts['view_shifts_logged'] > 0:
+        growth_signal_parts.append(f"{counts['view_shifts_logged']} view shifts recorded")
+    if counts['next_threads_logged'] > 0:
+        growth_signal_parts.append(f"{counts['next_threads_logged']} next threads queued")
     growth_signal = ' · '.join(growth_signal_parts) if growth_signal_parts else 'Start your first evidence-backed learning step.'
 
     importance_rank = {'high': 3, 'medium': 2, 'low': 1}
@@ -1356,6 +1399,12 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
             'milestones_reached': counts['milestones_reached'],
             'branches_accepted': counts['branches_accepted'],
             'branches_rejected': counts['branches_rejected'],
+            'reflections_logged': counts['reflections_logged'],
+            'comparisons_logged': counts['comparisons_logged'],
+            'exemplars_saved': counts['exemplars_saved'],
+            'interpretations_logged': counts['interpretations_logged'],
+            'view_shifts_logged': counts['view_shifts_logged'],
+            'next_threads_logged': counts['next_threads_logged'],
             'verified_nodes': verified_nodes,
             'total_nodes': total_nodes,
             'mastery_average': mastery_average,
@@ -2262,8 +2311,68 @@ async def generate_resource(
             skill_node=skill,
             kind=payload.kind,
             regenerate=regenerate,
+            study_mode=payload.study_mode,
+            exemplar_title=payload.exemplar_title.strip() or None,
+            exemplar_context=payload.exemplar_context.strip() or None,
+            comparison_left=payload.comparison_left.strip() or None,
+            comparison_right=payload.comparison_right.strip() or None,
+            comparison_axis=payload.comparison_axis.strip() or None,
         )
         profile_agent.record_generated_content(db, current_user.id, skill, payload.kind)
+        if payload.kind == 'examples' and payload.study_mode in {'exemplar', 'compare'}:
+            if payload.study_mode == 'exemplar':
+                note_title = f'Exemplar study setup: {payload.exemplar_title.strip()}'
+                note_body = (
+                    f'Exemplar-first study generated for **{payload.exemplar_title.strip()}**.\n\n'
+                    f'Context:\n{payload.exemplar_context.strip() or "- Not provided"}\n\n'
+                    f'Skill node: {skill.name}\n'
+                    f'Resource version: {resource.version}'
+                )
+                note_tags = ['exemplar', 'interpretation']
+            else:
+                left = payload.comparison_left.strip()
+                right = payload.comparison_right.strip()
+                axis = payload.comparison_axis.strip() or 'form, context, interpretation, and effect'
+                note_title = f'Compare mode setup: {left} vs {right}'
+                note_body = (
+                    f'Compare-mode examples generated for **{left}** vs **{right}**.\n\n'
+                    f'Comparison lens: {axis}\n\n'
+                    f'Skill node: {skill.name}\n'
+                    f'Resource version: {resource.version}'
+                )
+                note_tags = ['comparison', 'interpretation']
+
+            recent_mode_note = db.scalar(
+                select(Note)
+                .where(
+                    Note.user_id == current_user.id,
+                    Note.topic_id == topic.id,
+                    Note.skill_node_id == skill.id,
+                    Note.source_type == 'tutor_generated',
+                    Note.title == note_title,
+                )
+                .order_by(desc(Note.updated_at))
+            )
+            if recent_mode_note and (datetime.utcnow() - recent_mode_note.updated_at) <= timedelta(hours=12):
+                recent_mode_note.body = note_body
+                recent_mode_note.tags = note_tags
+                recent_mode_note.updated_at = datetime.utcnow()
+            else:
+                db.add(
+                    Note(
+                        user_id=current_user.id,
+                        topic_id=topic.id,
+                        skill_node_id=skill.id,
+                        note_type=NoteType.summary,
+                        source_type='tutor_generated',
+                        created_from_skill_node_id=skill.id,
+                        created_from_topic_id=topic.id,
+                        title=note_title[:120],
+                        body=note_body[:8000],
+                        tags=note_tags,
+                    )
+                )
+            db.commit()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
@@ -2306,13 +2415,33 @@ async def get_deep_lesson(
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    supporting_media: list[dict[str, str]] = []
+    supporting_media = resource_agent.normalize_supporting_media(structured_content.get('supporting_media'))
     try:
-        supporting_media = await resource_agent.fetch_strict_supporting_media(
-            topic=topic,
-            skill_node=skill,
-            deep_lesson=structured_content,
-            limit=2,
+        remaining = max(0, 3 - len(supporting_media))
+        if remaining > 0:
+            fetched = resource_agent.normalize_supporting_media(
+                await resource_agent.fetch_strict_supporting_media(
+                topic=topic,
+                skill_node=skill,
+                deep_lesson=structured_content,
+                kind='deep_lesson',
+                study_mode='standard',
+                limit=remaining,
+                )
+            )
+            seen_urls = {item['url'] for item in supporting_media}
+            for item in fetched:
+                if item['url'] in seen_urls:
+                    continue
+                seen_urls.add(item['url'])
+                supporting_media.append(item)
+        logger.info(
+            'resource.deep_lesson_media_payload topic_id=%s skill_id=%s selected=%s images=%s videos=%s',
+            topic.id,
+            skill.id,
+            len(supporting_media),
+            sum(1 for item in supporting_media if item.get('media_type') == 'image'),
+            sum(1 for item in supporting_media if item.get('media_type') == 'video'),
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(

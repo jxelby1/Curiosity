@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.branching import normalize_branch_purpose
 from app.core.course_preferences import (
     ASSESSMENT_STYLE_VALUES,
     DEFAULT_ASSESSMENT_STYLES,
@@ -155,7 +156,12 @@ class SkillTreeResponse(BaseModel):
 class DeepDiveBranchRequest(BaseModel):
     focus: str = Field(default='', max_length=240)
     branch_size: int = Field(default=1, ge=1, le=5)
-    purpose: Literal['exploration', 'specialization', 'enrichment', 'remediation', 'assessment_prep', 'project'] = 'exploration'
+    purpose: str = 'deepen_theme'
+
+    @field_validator('purpose', mode='before')
+    @classmethod
+    def normalize_purpose(cls, value: object) -> str:
+        return normalize_branch_purpose(str(value or ''))
 
 
 class BranchSuggestionGenerateRequest(BaseModel):
@@ -313,6 +319,21 @@ class RecommendationResponse(BaseModel):
 
 class GenerateResourceRequest(BaseModel):
     kind: Literal['lesson', 'examples', 'exercises']
+    study_mode: Literal['standard', 'exemplar', 'compare'] = 'standard'
+    exemplar_title: str = Field(default='', max_length=200)
+    exemplar_context: str = Field(default='', max_length=500)
+    comparison_left: str = Field(default='', max_length=200)
+    comparison_right: str = Field(default='', max_length=200)
+    comparison_axis: str = Field(default='', max_length=300)
+
+    @model_validator(mode='after')
+    def validate_study_mode(self) -> 'GenerateResourceRequest':
+        if self.study_mode == 'exemplar' and not self.exemplar_title.strip():
+            raise ValueError('exemplar_title is required when study_mode is exemplar.')
+        if self.study_mode == 'compare':
+            if not self.comparison_left.strip() or not self.comparison_right.strip():
+                raise ValueError('comparison_left and comparison_right are required when study_mode is compare.')
+        return self
 
 
 class ResourceResponse(BaseModel):
@@ -333,6 +354,7 @@ class DeepLessonMediaItem(BaseModel):
     title: str
     url: str
     media_type: Literal['image', 'video']
+    preview_url: str | None = None
     source_domain: str
     relevance_reason: str
 
@@ -592,6 +614,12 @@ class TopicJournalSummaryResponse(BaseModel):
     milestones_reached: int = 0
     branches_accepted: int = 0
     branches_rejected: int = 0
+    reflections_logged: int = 0
+    comparisons_logged: int = 0
+    exemplars_saved: int = 0
+    interpretations_logged: int = 0
+    view_shifts_logged: int = 0
+    next_threads_logged: int = 0
     verified_nodes: int = 0
     total_nodes: int = 0
     mastery_average: float = 0.0

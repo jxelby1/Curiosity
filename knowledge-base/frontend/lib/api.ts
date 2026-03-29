@@ -471,13 +471,25 @@ export async function generateResource(input: {
   skillId: number;
   kind: 'lesson' | 'examples' | 'exercises';
   regenerate?: boolean;
+  study_mode?: 'standard' | 'exemplar' | 'compare';
+  exemplar_title?: string;
+  exemplar_context?: string;
+  comparison_left?: string;
+  comparison_right?: string;
+  comparison_axis?: string;
 }): Promise<Resource> {
   const query = input.regenerate ? '?regenerate=true' : '';
   return request<Resource>(`/skills/${input.skillId}/resources/generate${query}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
-      kind: input.kind
+      kind: input.kind,
+      study_mode: input.study_mode ?? 'standard',
+      exemplar_title: input.exemplar_title ?? '',
+      exemplar_context: input.exemplar_context ?? '',
+      comparison_left: input.comparison_left ?? '',
+      comparison_right: input.comparison_right ?? '',
+      comparison_axis: input.comparison_axis ?? '',
     })
   });
 }
@@ -634,9 +646,16 @@ export async function createDeepDiveBranch(input: {
   skillId: number;
   focus?: string;
   branch_size?: number;
-  purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation';
+  purpose?:
+    | 'deepen_theme'
+    | 'compare_contrast'
+    | 'context_influence'
+    | 'study_exemplar'
+    | 'creative_response'
+    | 'style_technique_practice'
+    | 'follow_lineage';
 }): Promise<SkillTree> {
-  const resolvedPurpose = input.purpose ?? 'exploration';
+  const resolvedPurpose = input.purpose ?? 'deepen_theme';
   const resolvedBranchSize = input.branch_size ?? 1;
   return request<SkillTree>(`/skills/${input.skillId}/deep-dive`, {
     method: 'POST',

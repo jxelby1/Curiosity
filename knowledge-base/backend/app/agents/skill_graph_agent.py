@@ -9,6 +9,10 @@ from difflib import SequenceMatcher
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.core.branching import (
+    CANONICAL_BRANCH_PURPOSES,
+    normalize_branch_purpose,
+)
 from app.core.course_preferences import (
     depth_node_bounds,
     level_prompt_guidance,
@@ -100,16 +104,6 @@ _TITLE_STOPWORDS = {
     'introduction',
     'overview',
 }
-_CANONICAL_BRANCH_PURPOSES = ('remediation', 'enrichment', 'specialization', 'exploration')
-_BRANCH_PURPOSE_MAP = {
-    'remediation': 'remediation',
-    'assessment_prep': 'remediation',
-    'enrichment': 'enrichment',
-    'specialization': 'specialization',
-    'project': 'specialization',
-    'exploration': 'exploration',
-    'curiosity': 'exploration',
-}
 _CONTENT_OVERLAP_STOPWORDS = {
     'the',
     'and',
@@ -180,10 +174,12 @@ class SkillGraphAgent:
 
     @staticmethod
     def _normalize_branch_purpose(raw_purpose: str | None) -> str:
-        normalized = (raw_purpose or '').strip().lower()
-        if normalized in _BRANCH_PURPOSE_MAP:
-            return _BRANCH_PURPOSE_MAP[normalized]
-        return 'exploration'
+        return normalize_branch_purpose(raw_purpose)
+
+    @staticmethod
+    def _purpose_allows_revisit(purpose: str) -> bool:
+        # Technique drills may intentionally revisit prior ideas in a narrower way.
+        return purpose == 'style_technique_practice'
 
     @staticmethod
     def _text_tokens(text: str) -> set[str]:
@@ -312,7 +308,7 @@ class SkillGraphAgent:
         compare_sets: list[str] = []
         compare_sets.extend(state.existing_optional_lines)
         compare_sets.extend(state.future_core_lines)
-        if purpose != 'remediation':
+        if not self._purpose_allows_revisit(purpose):
             compare_sets.extend(state.taught_skill_lines)
             compare_sets.extend(state.taught_concepts[:10])
             compare_sets.extend(state.used_examples[:8])
@@ -323,8 +319,8 @@ class SkillGraphAgent:
             if self._token_overlap_ratio(candidate, baseline) >= 0.76:
                 return True
 
-        # Non-remediation branches must move beyond parent framing.
-        if purpose != 'remediation':
+        # Most branch moves should progress beyond the parent framing.
+        if not self._purpose_allows_revisit(purpose):
             parent_signature = f'{parent_node.name} {parent_node.description}'
             if self._text_similarity_ratio(candidate, parent_signature) >= 0.84:
                 return True
@@ -346,44 +342,71 @@ class SkillGraphAgent:
         weak_hint = state.weak_areas[0] if state.weak_areas else parent_node.name
         strong_hint = state.strong_areas[0] if state.strong_areas else parent_node.name
 
-        if purpose == 'remediation':
-            name = f'Targeted reinforcement: {weak_hint}'
+        if purpose == 'style_technique_practice':
+            focus_label = focus_text or weak_hint
+            name = f'Style and technique practice: {focus_label}'
             description = (
-                f'Close a specific gap before continuing the core path. This branch reinforces {weak_hint} '
-                f'with focused practice and avoids repeating already-mastered examples.'
+                f'Use guided drills to sharpen execution in {focus_label} while staying connected to {parent_node.name}. '
+                'Revisit only the most relevant techniques and keep the practice targeted.'
             )
             role = 'remediation'
-        elif purpose == 'specialization':
-            focus_label = focus_text or strong_hint
-            name = f'Specialized focus: {focus_label}'
-            description = (
-                f'Build a focused specialization off {parent_node.name}. This branch adds distinct depth in {focus_label} '
-                'without duplicating upcoming core modules.'
-            )
-            role = 'specialization'
-        elif purpose == 'enrichment':
+        elif purpose == 'compare_contrast':
             focus_label = focus_text or parent_node.name
-            name = f'Extended perspective: {focus_label}'
+            name = f'Compare and contrast: {focus_label}'
             description = (
-                f'Add an enrichment perspective connected to {parent_node.name}. This node introduces new context and '
-                'applications rather than repeating prior lesson content.'
+                f'Place two works, interpretations, or methods side by side around {focus_label} to clarify differences in form, '
+                'intent, and effect.'
             )
-            role = 'enrichment'
+            role = 'comparison_contrast'
+        elif purpose == 'context_influence':
+            focus_label = focus_text or parent_node.name
+            name = f'Context and influence: {focus_label}'
+            description = (
+                f'Study the cultural context around {focus_label}, including upstream influences and downstream impact, '
+                f'anchored to {parent_node.name}.'
+            )
+            role = 'conceptual_bridge'
+        elif purpose == 'study_exemplar':
+            focus_label = focus_text or strong_hint
+            name = f'Exemplar study: {focus_label}'
+            description = (
+                f'Use one concrete exemplar in {focus_label} to deepen understanding of {parent_node.name}, with close reading, '
+                'structural breakdown, and interpretive reasoning.'
+            )
+            role = 'case_deepening'
+        elif purpose == 'creative_response':
+            focus_label = focus_text or parent_node.name
+            name = f'Creative response: {focus_label}'
+            description = (
+                f'Create a short response piece inspired by {focus_label} to test your interpretation, taste, and decision-making '
+                'in practice.'
+            )
+            role = 'practical_application'
+        elif purpose == 'follow_lineage':
+            focus_label = focus_text or parent_node.name
+            name = f'Follow the lineage: {focus_label}'
+            description = (
+                f'Trace a clear lineage from earlier precedents into {focus_label}, then map how the line evolves in later works '
+                'or movements.'
+            )
+            role = 'synthesis_review'
         else:
             focus_label = focus_text or parent_node.name
-            name = f'Explore: {focus_label}'
+            name = f'Deepen theme: {focus_label}'
             description = (
-                f'Explore a curiosity-driven offshoot from {parent_node.name} with one concrete angle in {focus_label}. '
-                'Keep scope specific and additive to your current path.'
+                f'Extend a key idea from {parent_node.name} into {focus_label} with tighter analysis and richer interpretation, '
+                'without duplicating upcoming core nodes.'
             )
             role = 'enrichment'
+
+        harder_purposes = {'study_exemplar', 'creative_response', 'follow_lineage'}
 
         return SkillPlanNode(
             key='branch_focus_1',
             name=name[:180],
             description=description[:600],
             instructional_role=role,  # type: ignore[arg-type]
-            difficulty=min(5, max(1, parent_node.difficulty + (1 if purpose == 'specialization' else 0))),
+            difficulty=min(5, max(1, parent_node.difficulty + (1 if purpose in harder_purposes else 0))),
             prerequisites=['parent'],
         )
 
@@ -569,6 +592,13 @@ class SkillGraphAgent:
             'synthesis': 'synthesis_review',
             'remedial': 'remediation',
             'exploration': 'enrichment',
+            'deepen_theme': 'enrichment',
+            'compare_contrast': 'comparison_contrast',
+            'context_influence': 'conceptual_bridge',
+            'study_exemplar': 'case_deepening',
+            'creative_response': 'practical_application',
+            'style_technique_practice': 'remediation',
+            'follow_lineage': 'synthesis_review',
         }
         candidate = alias.get(normalized, normalized)
         if candidate in _CORE_ROLE_FALLBACK_ORDER or candidate in {'remediation', 'enrichment', 'specialization'}:
@@ -737,7 +767,9 @@ class SkillGraphAgent:
         system_prompt = (
             'You are SkillGraphAgent. Build a practical learning skill graph for a topic. '
             'Prefer atomic skills, clear prerequisite ordering, and realistic progression from fundamentals '
-            'to applied practice. Keep graph acyclic and avoid redundant skills.'
+            'to applied practice. Keep graph acyclic and avoid redundant skills. '
+            'For cultural and creative topics, prioritize exemplar study, taste development, and hands-on response work, '
+            'with theory/history/context acting as support rather than the dominant mode.'
         )
         user_prompt = (
             f'Topic: {topic.name}\n'
@@ -758,6 +790,10 @@ class SkillGraphAgent:
             '- Use natural, specific, domain-grounded names.\n'
             '- Avoid vague jargon like optimization/framework/strategy/techniques unless topic is explicitly business.\n'
             '- Prefer concrete topic language over abstract process language.\n'
+            'Balance rules for cultural and creative topics:\n'
+            '- Ensure most nodes point toward doing, observing, comparing, or making, not only conceptual explanation.\n'
+            '- Include at least one exemplar-focused node and one response/practice-focused node where relevant.\n'
+            '- Keep theory/history/context nodes as grounding layers connected to practical interpretation or making.\n'
             'Instructional role rules:\n'
             '- Allowed instructional_role values: foundational_concept, conceptual_bridge, practical_application, '
             'case_deepening, comparison_contrast, assessment_preparation, synthesis_review, remediation, enrichment, specialization.\n'
@@ -926,7 +962,7 @@ class SkillGraphAgent:
         focus: str | None = None,
         branch_size: int = 3,
         branch_origin: str = 'user_requested',
-        branch_purpose: str = 'exploration',
+        branch_purpose: str = 'deepen_theme',
     ) -> list[SkillNode]:
         normalized_purpose = self._normalize_branch_purpose(branch_purpose)
         effective_branch_size = self._resolve_effective_branch_size(
@@ -980,17 +1016,28 @@ class SkillGraphAgent:
             f'Generate {effective_branch_size} optional branch nodes.\n'
             'Requirements:\n'
             '- The branch must be clearly optional.\n'
+            '- Keep branch-level rationale concise (about 1-2 sentences, <= 280 characters).\n'
             '- Keep scope tightly tied to the parent node.\n'
             '- Use key, name, description, instructional_role, difficulty, prerequisites.\n'
             "- In prerequisites, use either sibling node keys or 'parent'.\n"
             '- Use no more than 2 prerequisites per node (including parent).\n'
+            '- Shape the node to the required branch purpose:\n'
+            '  deepen_theme: deepen one core theme with richer interpretation.\n'
+            '  compare_contrast: stage a clear comparison between two works, styles, or interpretations.\n'
+            '  context_influence: map context, influence, and downstream impact.\n'
+            '  study_exemplar: focus on one concrete exemplar and analyze it closely.\n'
+            '  creative_response: produce an original response grounded in the studied material.\n'
+            '  style_technique_practice: run targeted style or technique drills.\n'
+            '  follow_lineage: trace lineage from precursors to later developments.\n'
             '- Keep beginner learners on foundational depth, not advanced capstone tasks.\n'
             f'- Match technical rigor to this guidance: {technical_guidance}\n'
             '- Avoid duplicate or overlapping node names.\n'
             '- Titles must be specific and natural; avoid generic strategy/optimization jargon.\n'
             '- Branch nodes must add distinct value relative to already taught nodes/examples.\n'
-            '- For enrichment/specialization/exploration: avoid repeating taught concepts and avoid duplicating planned future core nodes.\n'
-            '- For remediation: revisit only targeted weak areas, not broad repetition.'
+            '- Favor branch nodes that lead to concrete observation, comparison, making, or response.\n'
+            '- If adding theory/history/context, explicitly tie it to a concrete interpretation or practice move.\n'
+            '- For all branch purposes except style_technique_practice: avoid repeating taught concepts and avoid duplicating planned future core nodes.\n'
+            '- For style_technique_practice: revisit only targeted weak areas, not broad repetition.'
         )
 
         plan = await self.llm_service.generate_structured(
@@ -1226,11 +1273,15 @@ class SkillGraphAgent:
             f'Curriculum memory context:\n{self._curriculum_context_text(curriculum_state)}\n'
             f'Provide exactly {limit} optional branch suggestion.\n'
             'Each suggestion must include: title, focus, rationale, purpose.\n'
-            'purpose must be one of: remediation, enrichment, specialization, exploration.\n'
+            'purpose must be one of: deepen_theme, compare_contrast, context_influence, '
+            'study_exemplar, creative_response, style_technique_practice, follow_lineage.\n'
             'Suggestion quality rules:\n'
             '- Must declare why this branch exists now.\n'
+            '- Must clearly match the selected branch move type.\n'
             '- Must reference learner context (strength, weakness, or progression signal).\n'
-            '- Must avoid duplicating already taught content.\n'
+            '- Prefer actionable moves: try this, compare this, study one exemplar, or make a response.\n'
+            '- If proposing context/influence, tie it to a concrete seeing/listening/writing/making action.\n'
+            '- Must avoid duplicating already taught content unless the move is style_technique_practice.\n'
             '- Must avoid overlapping obvious upcoming core nodes.\n'
             '- Only suggest one high-signal path.'
         )
@@ -1258,7 +1309,7 @@ class SkillGraphAgent:
         def _suggestion_redundant(title: str, focus: str, purpose: str) -> bool:
             candidate = f'{title} {focus}'
             compare_lines = curriculum_state.existing_optional_lines + curriculum_state.future_core_lines
-            if purpose != 'remediation':
+            if not self._purpose_allows_revisit(purpose):
                 compare_lines += curriculum_state.taught_skill_lines + curriculum_state.taught_concepts
             for baseline in compare_lines:
                 if self._text_similarity_ratio(candidate, baseline) >= 0.84:
@@ -1295,28 +1346,34 @@ class SkillGraphAgent:
                 break
 
         if not created:
-            fallback_purpose = 'remediation' if curriculum_state.weak_areas else 'specialization' if curriculum_state.strong_areas else 'enrichment'
+            fallback_purpose = (
+                'style_technique_practice'
+                if curriculum_state.weak_areas
+                else 'creative_response'
+                if curriculum_state.strong_areas
+                else 'context_influence'
+            )
             fallback_focus = (
                 curriculum_state.weak_areas[0]
-                if fallback_purpose == 'remediation' and curriculum_state.weak_areas
+                if fallback_purpose == 'style_technique_practice' and curriculum_state.weak_areas
                 else curriculum_state.strong_areas[0]
-                if fallback_purpose == 'specialization' and curriculum_state.strong_areas
+                if fallback_purpose == 'creative_response' and curriculum_state.strong_areas
                 else parent_node.name
             )
             if fallback_focus.lower() not in existing_focuses:
                 fallback_rationale = (
-                    f'Suggested to address a known weakness in {fallback_focus} before advancing the core path.'
-                    if fallback_purpose == 'remediation'
-                    else f'Suggested because strong performance indicates readiness to specialize in {fallback_focus}.'
-                    if fallback_purpose == 'specialization'
-                    else f'Suggested to add an enrichment angle connected to {parent_node.name} without duplicating the core path.'
+                    f'Suggested to strengthen a specific weak area in {fallback_focus} through focused technique practice.'
+                    if fallback_purpose == 'style_technique_practice'
+                    else f'Suggested because strong recent performance indicates readiness for an original creative response in {fallback_focus}.'
+                    if fallback_purpose == 'creative_response'
+                    else f'Suggested to place {parent_node.name} in broader context and influence arcs without duplicating the core path.'
                 )
                 fallback_title = (
-                    f'Remediation focus: {fallback_focus}'
-                    if fallback_purpose == 'remediation'
-                    else f'Specialize further: {fallback_focus}'
-                    if fallback_purpose == 'specialization'
-                    else f'Enrich your understanding of {parent_node.name}'
+                    f'Style / Technique Practice: {fallback_focus}'
+                    if fallback_purpose == 'style_technique_practice'
+                    else f'Creative Response: {fallback_focus}'
+                    if fallback_purpose == 'creative_response'
+                    else f'Context & Influence: {parent_node.name}'
                 )
                 record = BranchSuggestion(
                     topic_id=topic.id,
@@ -1354,15 +1411,15 @@ class SkillGraphAgent:
         rationale = ''
         focus = ''
         if score <= 0.45:
-            purpose = 'remediation'
-            title = f'Reinforcement: {parent_node.name} foundations'
-            focus = f'Foundational reinforcement for {parent_node.name}'
-            rationale = 'Recent assessment signals gaps. A focused reinforcement branch can strengthen prerequisites.'
+            purpose = 'style_technique_practice'
+            title = f'Style / Technique Practice: {parent_node.name}'
+            focus = f'Targeted technique drills for {parent_node.name}'
+            rationale = 'Recent assessment signals targeted execution gaps. A focused technique-practice branch can strengthen foundations.'
         elif score >= 0.85:
-            purpose = 'enrichment'
-            title = f'Advanced extension: {parent_node.name}'
-            focus = f'Advanced applications of {parent_node.name}'
-            rationale = 'Strong performance detected. An enrichment branch can deepen mastery with advanced application.'
+            purpose = 'creative_response'
+            title = f'Creative Response: {parent_node.name}'
+            focus = f'Original response work inspired by {parent_node.name}'
+            rationale = 'Strong performance detected. A creative-response branch can convert understanding into authored work and interpretation.'
 
         if not purpose:
             return None

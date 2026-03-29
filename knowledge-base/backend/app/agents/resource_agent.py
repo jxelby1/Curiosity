@@ -4,11 +4,12 @@ import json
 import logging
 import re
 from typing import Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import quote, unquote, urlparse
 
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from app.agents.lesson_image_agent import LessonImageAgent
 from app.db.models import LearningResource, ResourceType, SkillEdge, SkillNode, Topic, UserSkillState
 from app.core.exceptions import ConfigurationError, ProviderError
 from app.core.config import get_settings
@@ -35,8 +36,6 @@ logger = logging.getLogger(__name__)
 ResourceSource = Literal['stored', 'generated', 'regenerated']
 
 _TRUSTED_MEDIA_DOMAINS = (
-    'wikipedia.org',
-    'wikimedia.org',
     'worldhistory.org',
     'britannica.com',
     'history.state.gov',
@@ -78,6 +77,10 @@ _TRUSTED_MEDIA_DOMAINS = (
     'youtube.com',
     'youtu.be',
 )
+_DEEMPHASIZED_MEDIA_DOMAINS = (
+    'wikipedia.org',
+    'wikimedia.org',
+)
 _TRUSTED_YOUTUBE_HINTS = (
     'khan academy',
     'crashcourse',
@@ -115,7 +118,10 @@ _BLOCKED_STOCK_MEDIA_DOMAINS = (
 _VISUAL_MEDIA_HINTS = (
     'image',
     'photo',
+    'photograph',
     'painting',
+    'drawing',
+    'sketch',
     'diagram',
     'map',
     'illustration',
@@ -124,10 +130,77 @@ _VISUAL_MEDIA_HINTS = (
     'figure',
     'satellite',
     'atlas',
+    'scene',
+    'still',
+    'frame',
+    'poster',
+    'facade',
+    'plan',
+    'blueprint',
+    'layout',
+    'typography',
+    'composition',
+    'gallery',
+    'museum collection',
+    'artifact',
+    'object',
+    'archive image',
+    'visual analysis',
 )
-_STRICT_MEDIA_SCORE_THRESHOLD = 0.28
-_RELAXED_MEDIA_SCORE_THRESHOLD = 0.2
+_VISUAL_DISCIPLINE_HINTS = (
+    'art',
+    'painting',
+    'drawing',
+    'illustration',
+    'design',
+    'typography',
+    'poster',
+    'architecture',
+    'building',
+    'city',
+    'urban',
+    'film',
+    'cinema',
+    'scene',
+    'director',
+    'photography',
+    'photo',
+    'visual',
+    'music',
+    'dj',
+    'curation',
+    'writing',
+    'essay',
+    'poetry',
+    'literature',
+    'culture',
+    'history',
+)
+_STRICT_MEDIA_SCORE_THRESHOLD = 0.24
+_RELAXED_MEDIA_SCORE_THRESHOLD = 0.16
 _BROAD_MEDIA_SCORE_THRESHOLD = 0.1
+_DIRECT_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.avif')
+_DIRECT_VIDEO_EXTENSIONS = ('.mp4', '.webm', '.ogg', '.mov', '.m4v')
+_VIDEO_TITLE_STOPWORDS = {
+    'the',
+    'and',
+    'for',
+    'with',
+    'from',
+    'this',
+    'that',
+    'your',
+    'into',
+    'guide',
+    'lesson',
+    'study',
+    'overview',
+    'introduction',
+    'part',
+    'episode',
+    'official',
+    'video',
+}
 _AI_SLOP_PHRASES = (
     'in this section',
     'it is important to note',
@@ -271,6 +344,7 @@ class ResourceAgent:
         self.course_memory_service = course_memory_service or CourseMemoryService()
         self.course_research_service = course_research_service or CourseResearchService(search_service)
         self.settings = get_settings()
+        self.lesson_image_agent = LessonImageAgent(search_service=search_service, settings=self.settings)
 
     def _difficulty_band(self, difficulty: int) -> str:
         if difficulty <= 2:
@@ -530,6 +604,277 @@ class ResourceAgent:
             )
         return ''
 
+    def _normalize_string_list(self, value: Any, *, limit: int) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        result: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = ' '.join(str(item or '').split()).strip()
+            if len(cleaned) < 4:
+                continue
+            lowered = cleaned.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            result.append(cleaned)
+            if len(result) >= limit:
+                break
+        return result
+
+    def _is_creative_or_visual_topic(self, *, topic: Topic, skill_node: SkillNode) -> bool:
+        haystack = ' '.join(
+            [
+                str(topic.name or ''),
+                str(topic.description or ''),
+                str(topic.goal or ''),
+                str(skill_node.name or ''),
+                str(skill_node.description or ''),
+            ]
+        ).lower()
+        return any(token in haystack for token in _VISUAL_DISCIPLINE_HINTS)
+
+    def _practice_balance_rules(self, *, kind: str, study_mode: str) -> str:
+        base = (
+            'Creative-studio balance rules:\n'
+            '- Lead with concrete works, artifacts, scenes, examples, or observable choices.\n'
+            '- Keep theory/history/context as support for interpretation, comparison, and practice.\n'
+            '- Include at least one "notice this" observation prompt and one practical "try this" hook when relevant.\n'
+            '- Keep language grounded and specific; avoid abstract explanation-only flow.\n'
+        )
+        if kind in {'lesson', 'examples'}:
+            base += '- Ensure at least one response-oriented prompt that asks the learner to produce or interpret something.\n'
+        if study_mode == 'exemplar':
+            base += '- Stay anchored to one exemplar so ideas remain concrete and observable.\n'
+        if study_mode == 'compare':
+            base += '- Include explicit comparison criteria and a clear contrast task.\n'
+        return base
+
+    def _ensure_studio_balance_fields(
+        self,
+        *,
+        kind: str,
+        structured_content: dict[str, Any],
+        skill_node: SkillNode,
+        study_mode: str,
+    ) -> dict[str, Any]:
+        if not isinstance(structured_content, dict):
+            return structured_content
+
+        exemplar_focus = self._normalize_string_list(structured_content.get('exemplar_focus'), limit=3)
+        comparison_prompts = self._normalize_string_list(structured_content.get('comparison_prompts'), limit=4)
+        observation_prompts = self._normalize_string_list(structured_content.get('observation_prompts'), limit=5)
+        response_prompts = self._normalize_string_list(structured_content.get('response_prompts'), limit=4)
+        practice_hooks = self._normalize_string_list(structured_content.get('practice_hooks'), limit=4)
+
+        if not exemplar_focus:
+            exemplar_focus = [
+                f'Use one concrete {skill_node.name} exemplar as the anchor before broad theory.',
+            ]
+        if not observation_prompts:
+            observation_prompts = [
+                f'Notice one concrete formal or stylistic decision in the {skill_node.name} exemplar and explain its effect.',
+            ]
+        if study_mode == 'compare' and not comparison_prompts:
+            comparison_prompts = [
+                'Compare two examples side-by-side using one explicit lens (form, context, interpretation, effect).',
+            ]
+        elif study_mode != 'compare' and not comparison_prompts:
+            comparison_prompts = [
+                'Compare this node with one adjacent style, movement, or interpretation to sharpen distinctions.',
+            ]
+        if not response_prompts and kind in {'lesson', 'examples', 'deep_lesson'}:
+            response_prompts = [
+                'Write a short response that interprets one specific detail and supports your reading with evidence.',
+            ]
+        if not practice_hooks and kind != 'deep_lesson':
+            practice_hooks = [
+                'Run one small practice round, then document what changed between attempt one and two.',
+            ]
+        elif not practice_hooks and kind == 'deep_lesson':
+            practice_hooks = [
+                'Translate this deep reading into one concrete practice or observation task this week.',
+            ]
+
+        structured_content['exemplar_focus'] = exemplar_focus[:3]
+        structured_content['comparison_prompts'] = comparison_prompts[:4]
+        structured_content['observation_prompts'] = observation_prompts[:5]
+        structured_content['response_prompts'] = response_prompts[:4]
+        structured_content['practice_hooks'] = practice_hooks[:4]
+        return structured_content
+
+    async def _attach_supporting_media_if_relevant(
+        self,
+        *,
+        topic: Topic,
+        skill_node: SkillNode,
+        structured_content: dict[str, Any],
+        kind: str,
+        study_mode: str,
+        db: Session | None = None,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        if kind not in {'lesson', 'examples', 'deep_lesson'}:
+            return structured_content
+        if not isinstance(structured_content, dict):
+            return structured_content
+
+        media_limit = 3 if kind == 'deep_lesson' else 2
+        visual_decision = self.lesson_image_agent.assess_visual_support(
+            topic=topic,
+            skill_node=skill_node,
+            lesson_content=structured_content,
+            kind=kind,
+            study_mode=study_mode,
+        )
+        structured_content['visual_support_needed'] = bool(visual_decision.get('visual_support_needed'))
+        structured_content['visual_priority'] = str(visual_decision.get('visual_priority') or 'low')
+        structured_content['visual_support_reason'] = str(visual_decision.get('reason') or '')
+        should_attach = bool(visual_decision.get('visual_support_needed'))
+        if not should_attach:
+            structured_content['visual_support_selected_count'] = 0
+            logger.info(
+                'resource.supporting_media_skip topic_id=%s skill_id=%s kind=%s reason=visual_support_not_needed priority=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                structured_content['visual_priority'],
+            )
+            return structured_content
+
+        used_media_keys = self._collect_used_media_keys_for_topic(
+            db=db,
+            user_id=user_id,
+            topic_id=topic.id,
+            exclude_skill_node_id=skill_node.id,
+        )
+
+        normalized_existing = self._normalize_supporting_media_items(structured_content.get('supporting_media'))
+        filtered_existing, existing_diagnostics = self.lesson_image_agent.filter_existing_media_items(
+            topic=topic,
+            skill_node=skill_node,
+            lesson_content=structured_content,
+            media_items=normalized_existing,
+        )
+        normalized_existing = filtered_existing
+        normalized_existing, dropped_used_existing = self._filter_out_used_media_items(
+            media_items=normalized_existing,
+            used_media_keys=used_media_keys,
+        )
+        if (
+            existing_diagnostics['dropped_generic_filename']
+            or existing_diagnostics['dropped_insufficient_context_match']
+            or existing_diagnostics.get('dropped_mode_mismatch', 0)
+            or dropped_used_existing
+        ):
+            logger.info(
+                'resource.supporting_media_existing_revalidated topic_id=%s skill_id=%s kind=%s kept=%s dropped_generic=%s dropped_context=%s dropped_mode=%s dropped_used=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                existing_diagnostics['kept'],
+                existing_diagnostics['dropped_generic_filename'],
+                existing_diagnostics['dropped_insufficient_context_match'],
+                existing_diagnostics.get('dropped_mode_mismatch', 0),
+                dropped_used_existing,
+            )
+        structured_content['supporting_media'] = normalized_existing
+        has_existing_image = any(item['media_type'] == 'image' for item in normalized_existing)
+        has_existing_video = any(item['media_type'] == 'video' for item in normalized_existing)
+        if normalized_existing and (
+            (kind == 'lesson' and has_existing_image and has_existing_video)
+            or (kind != 'lesson' and has_existing_image)
+        ):
+            structured_content['supporting_media'] = normalized_existing
+            return structured_content
+
+        selected_urls = {item['url'] for item in normalized_existing}
+        existing_items = normalized_existing[:media_limit]
+        fetch_limit = max(1, media_limit - len(existing_items))
+        if kind == 'lesson' and (not has_existing_image or not has_existing_video):
+            fetch_limit = max(fetch_limit, 2)
+        try:
+            media = await self.fetch_strict_supporting_media(
+                topic=topic,
+                skill_node=skill_node,
+                deep_lesson=structured_content,
+                kind=kind,
+                study_mode=study_mode,
+                limit=fetch_limit,
+                exclude_media_keys=used_media_keys,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                'resource.supporting_media_skip topic_id=%s skill_id=%s kind=%s reason=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                exc,
+            )
+            structured_content['visual_support_selected_count'] = sum(
+                1 for item in normalized_existing if item['media_type'] == 'image'
+            )
+            return structured_content
+        normalized_fetched = self._normalize_supporting_media_items(media)
+        normalized_fetched, dropped_used_fetched = self._filter_out_used_media_items(
+            media_items=normalized_fetched,
+            used_media_keys=used_media_keys,
+        )
+        if dropped_used_fetched:
+            logger.info(
+                'resource.supporting_media_fetched_deduped topic_id=%s skill_id=%s kind=%s dropped_used=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                dropped_used_fetched,
+            )
+        merged = list(existing_items)
+        for item in normalized_fetched:
+            if item['url'] in selected_urls:
+                continue
+            if len(merged) >= media_limit:
+                break
+            merged.append(item)
+            selected_urls.add(item['url'])
+
+        if merged and not any(item['media_type'] == 'image' for item in merged):
+            first_image = next((item for item in normalized_fetched if item['media_type'] == 'image'), None)
+            if first_image:
+                replace_idx = next((idx for idx in range(len(merged) - 1, -1, -1) if merged[idx]['media_type'] != 'image'), None)
+                if replace_idx is not None:
+                    merged[replace_idx] = first_image
+        if kind == 'lesson' and merged and not any(item['media_type'] == 'video' for item in merged):
+            first_video = next((item for item in normalized_fetched if item['media_type'] == 'video'), None)
+            if first_video:
+                replace_idx = next((idx for idx in range(len(merged) - 1, -1, -1) if merged[idx]['media_type'] != 'video'), None)
+                if replace_idx is not None:
+                    merged[replace_idx] = first_video
+                elif len(merged) < media_limit:
+                    merged.append(first_video)
+
+        if merged:
+            structured_content['supporting_media'] = merged
+            structured_content['visual_support_selected_count'] = sum(1 for item in merged if item['media_type'] == 'image')
+            logger.info(
+                'resource.supporting_media_attached topic_id=%s skill_id=%s kind=%s selected=%s images=%s videos=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                len(merged),
+                sum(1 for item in merged if item['media_type'] == 'image'),
+                sum(1 for item in merged if item['media_type'] == 'video'),
+            )
+        else:
+            structured_content['supporting_media'] = []
+            structured_content['visual_support_selected_count'] = 0
+            logger.info(
+                'resource.supporting_media_attached topic_id=%s skill_id=%s kind=%s selected=0 images=0 videos=0',
+                topic.id,
+                skill_node.id,
+                kind,
+            )
+        return structured_content
+
     def _contains_advanced_pattern(self, text: str) -> bool:
         lowered = text.lower()
         patterns = (
@@ -721,7 +1066,7 @@ class ResourceAgent:
         return {
             'title': f'{skill_node.name}: Starter lesson',
             'summary': _truncate_text_cleanly(
-                f'A concise introduction to {skill_node.name} for {learner_level} learners in {topic.name}.',
+                f'A focused introduction to {skill_node.name} for {learner_level} learners in {topic.name}, anchored in concrete examples and short practice.',
                 300,
             ),
             'learning_objectives': [
@@ -740,15 +1085,15 @@ class ResourceAgent:
             ],
             'sections': [
                 {
-                    'heading': 'What this skill is for',
+                    'heading': 'Exemplar-first orientation',
                     'content': _truncate_text_cleanly(
-                        f'{skill_node.name} helps you make reliable progress inside {topic.name}. '
-                        'Focus on one clear concept at a time before adding complexity.',
+                        f'Start from one concrete {skill_node.name} exemplar and identify what you can directly observe. '
+                        'Name one choice, effect, or pattern before adding theory.',
                         800,
                     ),
                 },
                 {
-                    'heading': 'How to practice this node',
+                    'heading': 'Practice and reflection loop',
                     'content': _truncate_text_cleanly(
                         'Use short focused practice rounds. Run one attempt, review what happened, and repeat with '
                         'a single adjustment so progress is measurable.',
@@ -760,6 +1105,21 @@ class ResourceAgent:
                 f'You should be able to describe {skill_node.name} in plain language.',
                 'Small, repeatable drills build faster mastery than broad unfocused practice.',
             ],
+            'exemplar_focus': [
+                f'Choose one concrete {skill_node.name} exemplar and use it as your anchor.',
+            ],
+            'comparison_prompts': [
+                'Compare your anchor exemplar with one alternative and name the clearest difference.',
+            ],
+            'observation_prompts': [
+                f'Notice one specific formal choice in the {skill_node.name} exemplar and explain its effect.',
+            ],
+            'response_prompts': [
+                'Write a short interpretation grounded in one observed detail rather than summary language.',
+            ],
+            'practice_hooks': [
+                'Run one short practical attempt, then document one change you would test next.',
+            ],
             'next_steps': [
                 'Open examples to see the concept applied in context.',
                 'Move to exercises and complete one short task end-to-end.',
@@ -770,7 +1130,7 @@ class ResourceAgent:
         return {
             'title': f'{skill_node.name}: Worked examples',
             'intro': _truncate_text_cleanly(
-                f'These examples show practical, beginner-safe uses of {skill_node.name} in {topic.name}.',
+                f'These examples foreground concrete works and practical moves for {skill_node.name} in {topic.name}.',
                 420,
             ),
             'examples': [
@@ -796,6 +1156,21 @@ class ResourceAgent:
                         280,
                     ),
                 },
+            ],
+            'exemplar_focus': [
+                f'Anchor this set around one strong {skill_node.name} exemplar before broad comparisons.',
+            ],
+            'comparison_prompts': [
+                'Stage one side-by-side comparison and explain the meaningful difference in outcome.',
+            ],
+            'observation_prompts': [
+                'Notice one detail first, then interpret why it matters.',
+            ],
+            'response_prompts': [
+                'Draft a short response that applies one observed choice from the exemplar.',
+            ],
+            'practice_hooks': [
+                'Try one constrained variation and capture what changed.',
             ],
         }
 
@@ -862,39 +1237,52 @@ class ResourceAgent:
         return {
             'title': f'{skill_node.name}: Deep dive',
             'summary': _truncate_text_cleanly(
-                f'A deeper lesson on {skill_node.name} with historical context, technical detail, and structured study prompts '
-                f'for {topic.name}.',
+                f'A deeper lesson on {skill_node.name} that moves from exemplar observation to interpretation, comparison, and applied response in {topic.name}.',
                 420,
             ),
             'essential_questions': [
-                f'What is the core historical or conceptual significance of {skill_node.name}?',
-                f'How does {skill_node.name} influence later developments inside {topic.name}?',
+                f'Which concrete exemplar best reveals the core logic of {skill_node.name}?',
+                f'How does context deepen interpretation without replacing close observation?',
             ],
             'sections': [
                 {
-                    'heading': 'Context and background',
+                    'heading': 'Exemplar and close observation',
                     'content': (
-                        f'Start by situating {skill_node.name} in the broader timeline of {topic.name}. '
-                        'Identify what came before it, which constraints shaped it, and what immediate problems it addressed. '
-                        'Use this context to avoid memorizing isolated facts without understanding why they mattered.'
+                        f'Start with one concrete {skill_node.name} exemplar. '
+                        'Identify what you can observe directly before introducing abstract terms. '
+                        'Use concrete detail as the base layer for interpretation.'
                     ),
                 },
                 {
-                    'heading': 'Detailed analysis',
+                    'heading': 'Context, influence, and comparison',
                     'content': (
-                        f'Break {skill_node.name} into component ideas, methods, and trade-offs. '
-                        'For each component, describe its purpose, strengths, and limitations with one concrete example. '
-                        'Where possible, compare two interpretations and explain how evidence supports or challenges each one.'
+                        f'Add historical and cultural context to explain why the exemplar takes this shape. '
+                        'Compare at least one adjacent work, movement, or interpretation. '
+                        'Use evidence to explain differences instead of broad labels.'
                     ),
                 },
                 {
-                    'heading': 'Implications and transfer',
+                    'heading': 'Response and transfer',
                     'content': (
-                        f'Conclude by connecting {skill_node.name} to downstream learning. '
-                        'Highlight what a learner should now be able to explain, critique, and apply. '
-                        'This turns the lesson into reusable understanding rather than a one-off reading exercise.'
+                        f'Convert understanding into action with a short response task tied to {skill_node.name}. '
+                        'Describe what to try, what to notice, and how to reflect on changes in judgment or taste.'
                     ),
                 },
+            ],
+            'exemplar_focus': [
+                f'Choose one defining {skill_node.name} exemplar and keep returning to it through the lesson.',
+            ],
+            'comparison_prompts': [
+                'Compare your anchor exemplar with one related work and justify the key contrast with evidence.',
+            ],
+            'observation_prompts': [
+                'List three concrete details before writing your interpretation.',
+            ],
+            'response_prompts': [
+                'Write or make a short response that applies one technique or interpretive lens from this lesson.',
+            ],
+            'practice_hooks': [
+                'Schedule one focused 15-minute practice session and log what changed in your next note.',
             ],
             'key_terms': [
                 {
@@ -923,13 +1311,71 @@ class ResourceAgent:
             host = host[4:]
         return host
 
+    def _is_direct_image_url(self, url: str) -> bool:
+        lowered = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
+        if '/wiki/file:' in lowered:
+            return False
+        return lowered.endswith(_DIRECT_IMAGE_EXTENSIONS)
+
+    def _wikimedia_preview_url(self, url: str) -> str | None:
+        parsed = urlparse(url)
+        host = parsed.netloc.lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if host not in {'commons.wikimedia.org', 'wikipedia.org', 'en.wikipedia.org'}:
+            return None
+
+        path = parsed.path or ''
+        marker = '/wiki/File:'
+        if marker not in path:
+            return None
+        raw_file_name = path.split(marker, 1)[1].strip()
+        if not raw_file_name:
+            return None
+
+        decoded = unquote(raw_file_name)
+        if not self._is_direct_image_url(decoded):
+            return None
+        return f'https://commons.wikimedia.org/wiki/Special:FilePath/{quote(decoded)}'
+
+    def _resolve_image_preview_url(
+        self,
+        *,
+        url: str,
+        kind: str,
+        lowered_meta: str,
+        existing_preview_url: str = '',
+    ) -> str | None:
+        preview_candidate = existing_preview_url.strip()
+        if preview_candidate and self._is_direct_image_url(preview_candidate):
+            return preview_candidate
+        if self._is_direct_image_url(url):
+            return url
+        wikimedia_preview = self._wikimedia_preview_url(url)
+        if wikimedia_preview:
+            return wikimedia_preview
+        if kind == 'external_image' and any(token in lowered_meta for token in _VISUAL_MEDIA_HINTS):
+            return None
+        return None
+
     def _extract_media_keywords(self, *, topic: Topic, skill_node: SkillNode, deep_lesson: dict[str, Any]) -> list[str]:
         base_terms = [
             topic.name,
+            topic.description or '',
+            topic.goal or '',
             skill_node.name,
+            skill_node.description or '',
+            str(deep_lesson.get('title') or ''),
+            str(deep_lesson.get('summary') or ''),
             *(str(item) for item in deep_lesson.get('essential_questions', []) if str(item).strip()),
+            *(str(item) for item in deep_lesson.get('learning_objectives', []) if str(item).strip()),
+            *(str(item) for item in deep_lesson.get('exemplar_focus', []) if str(item).strip()),
+            *(str(item) for item in deep_lesson.get('comparison_prompts', []) if str(item).strip()),
+            *(str(item) for item in deep_lesson.get('observation_prompts', []) if str(item).strip()),
             *(str(item.get('heading')) for item in deep_lesson.get('sections', []) if isinstance(item, dict)),
             *(str(item.get('term')) for item in deep_lesson.get('key_terms', []) if isinstance(item, dict)),
+            *(str(item.get('term')) for item in deep_lesson.get('key_concepts', []) if isinstance(item, dict)),
+            *(str(item.get('name')) for item in deep_lesson.get('examples', []) if isinstance(item, dict)),
         ]
         keywords: list[str] = []
         seen: set[str] = set()
@@ -941,7 +1387,7 @@ class ResourceAgent:
                 continue
             seen.add(normalized)
             keywords.append(normalized)
-            if len(keywords) >= 10:
+            if len(keywords) >= 14:
                 break
         return keywords
 
@@ -962,12 +1408,12 @@ class ResourceAgent:
             if lowered in {item.lower() for item in parts}:
                 continue
             parts.append(cleaned)
-            if len(parts) >= 4:
+            if len(parts) >= 5:
                 break
 
         seed = ' '.join(parts).strip()
         # Keep search queries compact to avoid provider-side parse errors.
-        return seed[:120]
+        return seed[:160]
 
     def _media_relevance_score(self, *, title: str, summary: str, url: str, keywords: list[str], skill_name: str) -> float:
         haystack = f'{title} {summary} {url}'.lower()
@@ -978,7 +1424,22 @@ class ResourceAgent:
         score = matches / max(1, len(keywords))
         if skill_name.lower() in haystack:
             score += 0.2
-        if any(token in haystack for token in ('museum', 'archive', 'artwork', 'primary source', 'documentary', 'lecture')):
+        if any(
+            token in haystack
+            for token in (
+                'museum',
+                'archive',
+                'artwork',
+                'primary source',
+                'documentary',
+                'lecture',
+                'gallery',
+                'collection',
+                'scene',
+                'still',
+                'visual analysis',
+            )
+        ):
             score += 0.08
         if any(token in haystack for token in _VISUAL_MEDIA_HINTS):
             score += 0.08
@@ -986,8 +1447,42 @@ class ResourceAgent:
             score += 0.05
         return min(score, 1.0)
 
+    def _title_tokens(self, text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r'[a-z0-9]{3,}', (text or '').lower())
+            if token not in _VIDEO_TITLE_STOPWORDS
+        }
+
+    def _video_title_similarity(self, *, node_title: str, candidate_title: str) -> float:
+        node_tokens = self._title_tokens(node_title)
+        candidate_tokens = self._title_tokens(candidate_title)
+        if not node_tokens or not candidate_tokens:
+            return 0.0
+        overlap = node_tokens.intersection(candidate_tokens)
+        if not overlap:
+            return 0.0
+        coverage = len(overlap) / max(1, len(node_tokens))
+        concentration = len(overlap) / max(1, len(candidate_tokens))
+        return min(1.0, (coverage * 0.7) + (concentration * 0.3))
+
+    def _is_embeddable_video_url(self, url: str) -> bool:
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return False
+        host = (parsed.netloc or '').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if host in {'youtube.com', 'm.youtube.com', 'youtu.be', 'vimeo.com', 'player.vimeo.com'}:
+            return True
+        normalized = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
+        return normalized.endswith(_DIRECT_VIDEO_EXTENSIONS)
+
     def _is_trusted_media_candidate(self, *, domain: str, title: str, summary: str, kind: str) -> bool:
         if not domain:
+            return False
+        if self._is_deemphasized_media_domain(domain):
             return False
         if any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _BLOCKED_SOCIAL_MEDIA_DOMAINS):
             return False
@@ -999,11 +1494,14 @@ class ResourceAgent:
 
         lowered_meta = f'{title} {summary}'.lower()
         if 'youtube.com' in domain or 'youtu.be' in domain:
-            if kind != 'external_video':
-                return False
-            return any(hint in lowered_meta for hint in _TRUSTED_YOUTUBE_HINTS)
+            return kind == 'external_video' and bool(lowered_meta.strip())
 
         return True
+
+    def _is_deemphasized_media_domain(self, domain: str) -> bool:
+        if not domain:
+            return False
+        return any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _DEEMPHASIZED_MEDIA_DOMAINS)
 
     def _infer_media_type(
         self,
@@ -1015,13 +1513,130 @@ class ResourceAgent:
     ) -> str | None:
         if kind == 'external_video':
             return 'video'
-        if url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg')):
+        normalized_url = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
+        if normalized_url.endswith(_DIRECT_VIDEO_EXTENSIONS):
+            return 'video'
+        if kind == 'external_image':
+            return 'image'
+        if self._is_direct_image_url(url):
             return 'image'
         if any(token in lowered_meta for token in _VISUAL_MEDIA_HINTS):
             return 'image'
         if allow_article_fallback and kind in {'external_article', 'external_documentation'}:
             return 'image'
         return None
+
+    def _normalize_supporting_media_items(self, media_items: Any) -> list[dict[str, str]]:
+        if not isinstance(media_items, list):
+            return []
+
+        normalized: list[dict[str, str]] = []
+        seen_urls: set[str] = set()
+
+        for item in media_items:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get('title') or '').strip() or 'Supporting reference'
+            url = str(item.get('url') or '').strip()
+            media_type = str(item.get('media_type') or '').strip().lower()
+            source_domain = str(item.get('source_domain') or '').strip() or self._domain_for_url(url)
+            relevance_reason = str(item.get('relevance_reason') or '').strip()
+            preview_url = str(item.get('preview_url') or '').strip()
+
+            if not url or media_type not in {'image', 'video'}:
+                continue
+            if url in seen_urls:
+                continue
+
+            normalized_item: dict[str, str] = {
+                'title': title,
+                'url': url,
+                'media_type': media_type,
+                'source_domain': source_domain,
+                'relevance_reason': relevance_reason,
+            }
+            if media_type == 'image':
+                resolved_preview = self._resolve_image_preview_url(
+                    url=url,
+                    kind='external_image',
+                    lowered_meta=f'{title} {relevance_reason}'.lower(),
+                    existing_preview_url=preview_url,
+                )
+                if not resolved_preview:
+                    continue
+                normalized_item['preview_url'] = resolved_preview
+            elif preview_url:
+                normalized_item['preview_url'] = preview_url
+
+            normalized.append(normalized_item)
+            seen_urls.add(url)
+
+        return normalized
+
+    def normalize_supporting_media(self, media_items: Any) -> list[dict[str, str]]:
+        return self._normalize_supporting_media_items(media_items)
+
+    def _media_key(self, url: str) -> str:
+        key = self.lesson_image_agent.canonical_media_url(url)
+        if key:
+            return key
+        return (url or '').strip().lower()
+
+    def _collect_used_media_keys_for_topic(
+        self,
+        *,
+        db: Session | None,
+        user_id: int | None,
+        topic_id: int,
+        exclude_skill_node_id: int,
+    ) -> set[str]:
+        if db is None or user_id is None or not hasattr(db, 'scalars'):
+            return set()
+
+        resources = db.scalars(
+            select(LearningResource).where(
+                LearningResource.topic_id == topic_id,
+                LearningResource.skill_node_id != exclude_skill_node_id,
+                LearningResource.is_active.is_(True),
+                LearningResource.resource_type.in_(
+                    [
+                        ResourceType.generated_lesson,
+                        ResourceType.generated_examples,
+                    ]
+                ),
+                (LearningResource.user_id == user_id) | (LearningResource.user_id.is_(None)),
+            )
+        ).all()
+
+        used_keys: set[str] = set()
+        for resource in resources:
+            content_json = resource.content_json
+            if not isinstance(content_json, dict):
+                continue
+            normalized = self._normalize_supporting_media_items(content_json.get('supporting_media'))
+            for item in normalized:
+                key = self._media_key(str(item.get('url') or ''))
+                if key:
+                    used_keys.add(key)
+        return used_keys
+
+    def _filter_out_used_media_items(
+        self,
+        *,
+        media_items: list[dict[str, str]],
+        used_media_keys: set[str],
+    ) -> tuple[list[dict[str, str]], int]:
+        if not used_media_keys:
+            return list(media_items), 0
+        kept: list[dict[str, str]] = []
+        dropped = 0
+        for item in media_items:
+            key = self._media_key(str(item.get('url') or ''))
+            if key and key in used_media_keys:
+                dropped += 1
+                continue
+            kept.append(item)
+        return kept, dropped
 
     async def generate_deep_lesson_material(
         self,
@@ -1098,10 +1713,12 @@ class ResourceAgent:
             f'Curated web grounding context (only include if directly relevant):\n'
             f'{web_grounding_context or "No high-signal web grounding selected"}\n\n'
             'Output structured content only and stay tightly scoped to this skill node.\n'
+            f'{self._practice_balance_rules(kind="deep_lesson", study_mode="standard")}\n'
             'Quality constraints:\n'
             '- Avoid formulaic filler phrases and generic transitions.\n'
             '- Prefer concrete distinctions, trade-offs, and specific examples.\n'
-            '- Do not repeat examples already used in the course memory unless clearly marked as remediation.'
+            '- Do not repeat examples already used in the course memory unless clearly marked as remediation.\n'
+            '- Populate exemplar_focus, comparison_prompts, observation_prompts, response_prompts, and practice_hooks.'
         )
 
         try:
@@ -1115,6 +1732,21 @@ class ResourceAgent:
             structured_content = self._polish_structured_snippets(
                 kind='deep_lesson',
                 structured_content=structured_model.model_dump(),
+            )
+            structured_content = self._ensure_studio_balance_fields(
+                kind='deep_lesson',
+                structured_content=structured_content,
+                skill_node=skill_node,
+                study_mode='standard',
+            )
+            structured_content = await self._attach_supporting_media_if_relevant(
+                topic=topic,
+                skill_node=skill_node,
+                structured_content=structured_content,
+                kind='deep_lesson',
+                study_mode='standard',
+                db=db,
+                user_id=user_id,
             )
             writing_issues = self._writing_slop_issues(structured_content, kind='deep_lesson')
             writing_issues.extend(
@@ -1147,6 +1779,21 @@ class ResourceAgent:
                     structured_content = self._polish_structured_snippets(
                         kind='deep_lesson',
                         structured_content=refined_model.model_dump(),
+                    )
+                    structured_content = self._ensure_studio_balance_fields(
+                        kind='deep_lesson',
+                        structured_content=structured_content,
+                        skill_node=skill_node,
+                        study_mode='standard',
+                    )
+                    structured_content = await self._attach_supporting_media_if_relevant(
+                        topic=topic,
+                        skill_node=skill_node,
+                        structured_content=structured_content,
+                        kind='deep_lesson',
+                        study_mode='standard',
+                        db=db,
+                        user_id=user_id,
                     )
                 except ProviderError:
                     pass
@@ -1181,6 +1828,21 @@ class ResourceAgent:
                 kind='deep_lesson',
                 structured_content=self._fallback_deep_lesson_content(topic=topic, skill_node=skill_node),
             )
+            structured_content = self._ensure_studio_balance_fields(
+                kind='deep_lesson',
+                structured_content=structured_content,
+                skill_node=skill_node,
+                study_mode='standard',
+            )
+            structured_content = await self._attach_supporting_media_if_relevant(
+                topic=topic,
+                skill_node=skill_node,
+                structured_content=structured_content,
+                kind='deep_lesson',
+                study_mode='standard',
+                db=db,
+                user_id=user_id,
+            )
             return structured_content, 'fallback'
 
     async def fetch_strict_supporting_media(
@@ -1189,11 +1851,67 @@ class ResourceAgent:
         topic: Topic,
         skill_node: SkillNode,
         deep_lesson: dict[str, Any],
+        kind: str = 'lesson',
+        study_mode: str = 'standard',
         limit: int = 2,
+        exclude_media_keys: set[str] | None = None,
     ) -> list[dict[str, str]]:
+        normalized_kind = kind if kind in {'lesson', 'examples', 'deep_lesson'} else 'lesson'
+        normalized_study_mode = (study_mode or 'standard').strip().lower()
+        blocked_media_keys = {item for item in (exclude_media_keys or set()) if item}
+        seed_media: list[dict[str, str]] = []
+        image_agent_diagnostics: dict[str, Any] = {}
+        try:
+            image_selection = await self.lesson_image_agent.select_supporting_images(
+                topic=topic,
+                skill_node=skill_node,
+                lesson_content=deep_lesson,
+                kind=normalized_kind,
+                study_mode=normalized_study_mode,
+                limit=limit,
+                exclude_media_keys=blocked_media_keys,
+            )
+            seed_media = self._normalize_supporting_media_items(image_selection.media_items)
+            seed_media, dropped_used_seed = self._filter_out_used_media_items(
+                media_items=seed_media,
+                used_media_keys=blocked_media_keys,
+            )
+            image_agent_diagnostics = image_selection.diagnostics
+            if dropped_used_seed:
+                logger.info(
+                    'resource.lesson_image_selection_seed_deduped topic_id=%s skill_id=%s kind=%s dropped_used=%s',
+                    topic.id,
+                    skill_node.id,
+                    normalized_kind,
+                    dropped_used_seed,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                'resource.lesson_image_selection_skip topic_id=%s skill_id=%s kind=%s reason=%s',
+                topic.id,
+                skill_node.id,
+                normalized_kind,
+                exc,
+            )
+            seed_media = []
+            image_agent_diagnostics = {}
+        if len(seed_media) >= limit:
+            logger.info(
+                'resource.lesson_image_selection_seed_only topic_id=%s skill_id=%s kind=%s selected=%s diagnostics=%s',
+                topic.id,
+                skill_node.id,
+                normalized_kind,
+                len(seed_media[:limit]),
+                image_agent_diagnostics,
+            )
+            return seed_media[:limit]
+
         keywords = self._extract_media_keywords(topic=topic, skill_node=skill_node, deep_lesson=deep_lesson)
         query_seed = self._compact_media_query_seed(topic=topic, skill_node=skill_node, keywords=keywords)
-        query = f'{query_seed} map diagram photo documentary educational video'
+        query = (
+            f'{query_seed} artwork photograph scene still architecture design map diagram '
+            'visual analysis documentary educational video museum archive gallery'
+        )[:260]
 
         try:
             search_results = await self.search_service.search(
@@ -1211,6 +1929,39 @@ class ResourceAgent:
                 exc,
             )
             return []
+        logger.info(
+            'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=strict count=%s query=%s',
+            topic.id,
+            skill_node.id,
+            len(search_results),
+            query,
+        )
+
+        def _fresh_diagnostics() -> dict[str, int]:
+            return {
+                'candidates_total': 0,
+                'selected': 0,
+                'selected_images': 0,
+                'selected_videos': 0,
+                'skip_duplicate': 0,
+                'skip_blocked_social': 0,
+                'skip_blocked_stock': 0,
+                'skip_deemphasized_source': 0,
+                'skip_untrusted': 0,
+                'skip_used_elsewhere': 0,
+                'skip_no_media_type': 0,
+                'skip_video_not_embeddable': 0,
+                'skip_video_title_mismatch': 0,
+                'skip_no_renderable_image': 0,
+                'skip_visual_hint': 0,
+                'skip_below_threshold': 0,
+            }
+
+        ranking_diagnostics: dict[str, dict[str, int]] = {
+            'strict': _fresh_diagnostics(),
+            'fallback': _fresh_diagnostics(),
+            'broad': _fresh_diagnostics(),
+        }
 
         def rank_candidates(
             candidates: list[Any],
@@ -1221,16 +1972,32 @@ class ResourceAgent:
             enforce_trusted_sources: bool,
             allow_article_fallback: bool,
             reason_text: str,
+            phase: Literal['strict', 'fallback', 'broad'],
         ) -> list[tuple[float, dict[str, str]]]:
             ranked: list[tuple[float, dict[str, str]]] = []
+            diagnostics = ranking_diagnostics[phase]
             for candidate in candidates:
-                if candidate.url in selected_urls:
+                diagnostics['candidates_total'] += 1
+                kind_key = f'kind_{candidate.kind}'
+                diagnostics[kind_key] = diagnostics.get(kind_key, 0) + 1
+
+                candidate_key = self._media_key(candidate.url)
+                if candidate_key and candidate_key in blocked_media_keys:
+                    diagnostics['skip_used_elsewhere'] += 1
+                    continue
+                if candidate_key in selected_urls:
+                    diagnostics['skip_duplicate'] += 1
                     continue
 
                 domain = self._domain_for_url(candidate.url)
                 if any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _BLOCKED_SOCIAL_MEDIA_DOMAINS):
+                    diagnostics['skip_blocked_social'] += 1
                     continue
                 if any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _BLOCKED_STOCK_MEDIA_DOMAINS):
+                    diagnostics['skip_blocked_stock'] += 1
+                    continue
+                if self._is_deemphasized_media_domain(domain):
+                    diagnostics['skip_deemphasized_source'] += 1
                     continue
                 if enforce_trusted_sources:
                     if not self._is_trusted_media_candidate(
@@ -1239,6 +2006,7 @@ class ResourceAgent:
                         summary=candidate.summary,
                         kind=candidate.kind,
                     ):
+                        diagnostics['skip_untrusted'] += 1
                         continue
 
                 lowered_meta = f'{candidate.title} {candidate.summary}'.lower()
@@ -1249,10 +2017,36 @@ class ResourceAgent:
                     allow_article_fallback=allow_article_fallback,
                 )
                 if media_type is None:
+                    diagnostics['skip_no_media_type'] += 1
                     continue
+
+                if media_type == 'video':
+                    if not self._is_embeddable_video_url(candidate.url):
+                        diagnostics['skip_video_not_embeddable'] += 1
+                        continue
+                    title_similarity = self._video_title_similarity(
+                        node_title=skill_node.name,
+                        candidate_title=candidate.title,
+                    )
+                    if title_similarity < 0.18:
+                        diagnostics['skip_video_title_mismatch'] += 1
+                        continue
+
+                preview_url = ''
+                if media_type == 'image':
+                    preview = self._resolve_image_preview_url(
+                        url=candidate.url,
+                        kind=candidate.kind,
+                        lowered_meta=lowered_meta,
+                    )
+                    if not preview:
+                        diagnostics['skip_no_renderable_image'] += 1
+                        continue
+                    preview_url = preview
 
                 if require_visual_hint and media_type == 'image':
                     if not any(token in lowered_meta for token in _VISUAL_MEDIA_HINTS):
+                        diagnostics['skip_visual_hint'] += 1
                         continue
 
                 score = self._media_relevance_score(
@@ -1262,40 +2056,51 @@ class ResourceAgent:
                     keywords=keywords,
                     skill_name=skill_node.name,
                 )
+                if media_type == 'image':
+                    score = min(1.0, score + 0.04)
                 if score < threshold:
+                    diagnostics['skip_below_threshold'] += 1
                     continue
 
-                selected_urls.add(candidate.url)
-                ranked.append(
-                    (
-                        score,
-                        {
-                            'title': candidate.title,
-                            'url': candidate.url,
-                            'media_type': media_type,
-                            'source_domain': domain,
-                            'relevance_reason': reason_text,
-                        },
-                    )
-                )
+                selected_urls.add(candidate_key)
+                selected_item: dict[str, str] = {
+                    'title': candidate.title,
+                    'url': candidate.url,
+                    'media_type': media_type,
+                    'source_domain': domain,
+                    'relevance_reason': reason_text,
+                }
+                if preview_url:
+                    selected_item['preview_url'] = preview_url
+                ranked.append((score, selected_item))
+
+                diagnostics['selected'] += 1
+                if media_type == 'image':
+                    diagnostics['selected_images'] += 1
+                else:
+                    diagnostics['selected_videos'] += 1
             return ranked
 
-        selected_urls: set[str] = set()
-        scored = rank_candidates(
+        selected_urls: set[str] = {self._media_key(item['url']) for item in seed_media if item.get('url')}
+        scored: list[tuple[float, dict[str, str]]] = []
+        strict_scored = rank_candidates(
             search_results,
             threshold=_STRICT_MEDIA_SCORE_THRESHOLD,
             require_visual_hint=False,
             selected_urls=selected_urls,
             enforce_trusted_sources=True,
-            allow_article_fallback=True,
+            allow_article_fallback=False,
             reason_text='Selected because it directly supports this deep-dive node and comes from a trusted source.',
+            phase='strict',
         )
-        strict_count = len(scored)
+        scored.extend(strict_scored)
+        strict_count = len(strict_scored)
 
-        if len(scored) < limit:
+        fallback_results: list[Any] = []
+        if len(seed_media) + len(scored) < limit:
             fallback_query = (
                 f'{query_seed} map diagram archival image educational video '
-                'site:wikipedia.org site:wikimedia.org site:britannica.com site:khanacademy.org'
+                'site:britannica.com site:khanacademy.org site:metmuseum.org site:moma.org site:tate.org.uk'
             )[:220]
             try:
                 fallback_results = await self.search_service.search(
@@ -1307,50 +2112,170 @@ class ResourceAgent:
                 )
             except (ConfigurationError, ProviderError):
                 fallback_results = []
+            logger.info(
+                'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=fallback count=%s query=%s',
+                topic.id,
+                skill_node.id,
+                len(fallback_results),
+                fallback_query,
+            )
 
-            scored.extend(
-                rank_candidates(
-                    fallback_results,
-                    threshold=_RELAXED_MEDIA_SCORE_THRESHOLD,
-                    require_visual_hint=True,
-                    selected_urls=selected_urls,
-                    enforce_trusted_sources=True,
-                    allow_article_fallback=True,
-                    reason_text='Selected as a trusted supplemental reference that is likely helpful for this deep-dive topic.',
-                )
+            fallback_scored = rank_candidates(
+                fallback_results,
+                threshold=_RELAXED_MEDIA_SCORE_THRESHOLD,
+                require_visual_hint=True,
+                selected_urls=selected_urls,
+                enforce_trusted_sources=False,
+                allow_article_fallback=False,
+                reason_text='Selected as a supplemental reference likely helpful for this deep-dive topic.',
+                phase='fallback',
             )
-        fallback_count = max(0, len(scored) - strict_count)
+            scored.extend(fallback_scored)
+        else:
+            fallback_scored = []
+        fallback_count = len(fallback_scored)
         broad_count = 0
-        if len(scored) < limit and len(scored) == 0:
-            broad_results = search_results
-            scored.extend(
-                rank_candidates(
-                    broad_results,
-                    threshold=_BROAD_MEDIA_SCORE_THRESHOLD,
-                    require_visual_hint=False,
-                    selected_urls=selected_urls,
-                    enforce_trusted_sources=False,
-                    allow_article_fallback=True,
-                    reason_text='Selected from non-social public sources as a high-relevance fallback for this lesson.',
+        broad_results: list[Any] = []
+        if len(seed_media) + len(scored) < limit and len(scored) == 0:
+            broad_query = f'{query_seed} exemplar comparison image video museum archive visual reference'[:220]
+            try:
+                broad_results = await self.search_service.search(
+                    topic.name,
+                    skill_node.name,
+                    query=broad_query,
+                    limit=max(8, limit * 4),
+                    source_policy='standard',
                 )
+            except (ConfigurationError, ProviderError):
+                broad_results = search_results
+            logger.info(
+                'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=broad count=%s query=%s',
+                topic.id,
+                skill_node.id,
+                len(broad_results),
+                broad_query,
             )
-            broad_count = max(0, len(scored) - strict_count - fallback_count)
+            broad_scored = rank_candidates(
+                broad_results,
+                threshold=_BROAD_MEDIA_SCORE_THRESHOLD,
+                require_visual_hint=False,
+                selected_urls=selected_urls,
+                enforce_trusted_sources=False,
+                allow_article_fallback=False,
+                reason_text='Selected from non-social public sources as a high-relevance fallback for this lesson.',
+                phase='broad',
+            )
+            scored.extend(broad_scored)
+            broad_count = len(broad_scored)
         emergency_count = 0
+        if len(seed_media) + len(scored) == 0:
+            emergency_results = [*search_results, *fallback_results, *broad_results]
+            emergency_scored = rank_candidates(
+                emergency_results,
+                threshold=0.08,
+                require_visual_hint=False,
+                selected_urls=selected_urls,
+                enforce_trusted_sources=False,
+                allow_article_fallback=False,
+                reason_text='Selected from top web results when no higher-confidence media candidate passed strict filters.',
+                phase='broad',
+            )
+            emergency_count = len(emergency_scored)
+            scored.extend(emergency_scored[: max(1, limit)])
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top_items = list(seed_media)
+        selected_urls = {self._media_key(item['url']) for item in top_items if item.get('url')}
+        for _, item in scored:
+            candidate_key = self._media_key(item['url'])
+            if len(top_items) >= limit:
+                break
+            if candidate_key in selected_urls:
+                continue
+            top_items.append(item)
+            selected_urls.add(candidate_key)
+        if normalized_kind == 'lesson' and limit >= 2:
+            candidate_pool = [*top_items, *(entry for _, entry in scored)]
+            best_image = next((item for item in candidate_pool if item['media_type'] == 'image'), None)
+            best_video = next((item for item in candidate_pool if item['media_type'] == 'video'), None)
+            if best_image and best_video:
+                balanced: list[dict[str, str]] = []
+                balanced_keys: set[str] = set()
+                for item in (best_image, best_video):
+                    key = self._media_key(item['url'])
+                    if key and key not in balanced_keys:
+                        balanced.append(item)
+                        balanced_keys.add(key)
+                for item in top_items:
+                    if len(balanced) >= limit:
+                        break
+                    key = self._media_key(item['url'])
+                    if key and key in balanced_keys:
+                        continue
+                    balanced.append(item)
+                    if key:
+                        balanced_keys.add(key)
+                top_items = balanced[:limit]
+        if top_items:
+            has_image = any(item['media_type'] == 'image' for item in top_items)
+            if not has_image:
+                fallback_image = next(
+                    (item for item in [*seed_media, *(entry for _, entry in scored)] if item['media_type'] == 'image'),
+                    None,
+                )
+                if fallback_image:
+                    replace_idx = next(
+                        (idx for idx in range(len(top_items) - 1, -1, -1) if top_items[idx]['media_type'] != 'image'),
+                        None,
+                    )
+                    if replace_idx is not None:
+                        top_items[replace_idx] = fallback_image
+
+        revalidated_items, revalidation_diagnostics = self.lesson_image_agent.filter_existing_media_items(
+            topic=topic,
+            skill_node=skill_node,
+            lesson_content=deep_lesson,
+            media_items=top_items,
+        )
+        if (
+            revalidation_diagnostics['dropped_generic_filename']
+            or revalidation_diagnostics['dropped_insufficient_context_match']
+            or revalidation_diagnostics.get('dropped_mode_mismatch', 0)
+        ):
+            logger.info(
+                'resource.deep_lesson_media_revalidated topic_id=%s skill_id=%s kept=%s dropped_generic=%s dropped_context=%s dropped_mode=%s',
+                topic.id,
+                skill_node.id,
+                revalidation_diagnostics['kept'],
+                revalidation_diagnostics['dropped_generic_filename'],
+                revalidation_diagnostics['dropped_insufficient_context_match'],
+                revalidation_diagnostics.get('dropped_mode_mismatch', 0),
+            )
+        top_items = revalidated_items
 
         logger.info(
-            'resource.deep_lesson_media_selected topic_id=%s skill_id=%s selected=%s strict=%s fallback=%s broad=%s emergency=%s requested_limit=%s environment=%s',
+            'resource.deep_lesson_media_selected topic_id=%s skill_id=%s selected=%s seed=%s strict=%s fallback=%s broad=%s emergency=%s requested_limit=%s environment=%s image_agent=%s',
             topic.id,
             skill_node.id,
-            len(scored),
+            len(top_items),
+            len(seed_media),
             strict_count,
             fallback_count,
             broad_count,
             emergency_count,
             limit,
             self.settings.environment,
+            image_agent_diagnostics,
         )
-        scored.sort(key=lambda item: item[0], reverse=True)
-        return [item for _, item in scored[:limit]]
+        logger.info(
+            'resource.deep_lesson_media_diagnostics topic_id=%s skill_id=%s strict=%s fallback=%s broad=%s',
+            topic.id,
+            skill_node.id,
+            ranking_diagnostics['strict'],
+            ranking_diagnostics['fallback'],
+            ranking_diagnostics['broad'],
+        )
+        return top_items
 
     def _get_active_generated_resource(
         self,
@@ -1395,8 +2320,15 @@ class ResourceAgent:
         skill_node: SkillNode,
         kind: str,
         regenerate: bool = False,
+        study_mode: str = 'standard',
+        exemplar_title: str | None = None,
+        exemplar_context: str | None = None,
+        comparison_left: str | None = None,
+        comparison_right: str | None = None,
+        comparison_axis: str | None = None,
     ) -> tuple[LearningResource, dict[str, Any] | None, ResourceSource]:
         resource_type = self._resource_type_for_kind(kind)
+        normalized_study_mode = (study_mode or 'standard').strip().lower()
         existing = self._get_active_generated_resource(
             db,
             user_id=user_id,
@@ -1406,12 +2338,39 @@ class ResourceAgent:
 
         if existing and not regenerate:
             structured = self._extract_structured_content(existing)
+            media_backfilled = False
+            if isinstance(structured, dict) and kind in {'lesson', 'examples'}:
+                structured['supporting_media'] = self._normalize_supporting_media_items(structured.get('supporting_media'))
+                before_media = list(structured['supporting_media'])
+                structured = await self._attach_supporting_media_if_relevant(
+                    topic=topic,
+                    skill_node=skill_node,
+                    structured_content=structured,
+                    kind=kind,
+                    study_mode=normalized_study_mode,
+                    db=db,
+                    user_id=user_id,
+                )
+                normalized_after = self._normalize_supporting_media_items(structured.get('supporting_media'))
+                structured['supporting_media'] = normalized_after
+                media_backfilled = normalized_after != before_media
+                if media_backfilled:
+                    existing.content_json = structured
+                    existing.content = json.dumps(structured, indent=2)
+                    existing.summary = _clean_clipped_fragment(
+                        structured.get('summary') or structured.get('intro') or existing.content,
+                        max_len=320,
+                    )
+                    db.add(existing)
+                    db.commit()
+                    db.refresh(existing)
             logger.info(
-                'resource.loaded_from_store topic_id=%s skill_id=%s kind=%s version=%s',
+                'resource.loaded_from_store topic_id=%s skill_id=%s kind=%s version=%s media_backfilled=%s',
                 topic.id,
                 skill_node.id,
                 kind,
                 existing.version,
+                media_backfilled,
             )
             return existing, structured, 'stored'
 
@@ -1423,14 +2382,14 @@ class ResourceAgent:
                 LessonPlan,
                 (
                     'Create a high-quality lesson that is conceptually rich, specific, and pedagogically structured. '
-                    'Prioritize explanation quality, precision, and node-specific examples over generic summary language.'
+                    'Prioritize exemplar-first teaching, observation detail, and response-oriented understanding over generic summary language.'
                 ),
                 int(lesson_targets['max_tokens']),
             ),
             'examples': (
                 ExamplesPlan,
                 (
-                    'Create concrete examples that build from simple to challenging and explain the reasoning. '
+                    'Create concrete examples that build from simple to challenging, foreground visible/audible details, and explain the reasoning. '
                     f'Adjust example rigor to this technical depth: {technical_depth_prompt_guidance(technical_depth)} '
                     'while keeping intro concise (roughly 2-3 sentences).'
                 ),
@@ -1439,7 +2398,7 @@ class ResourceAgent:
             'exercises': (
                 ExercisesPlan,
                 (
-                    'Create exercises for short practice sessions with clear expected outcomes. '
+                    'Create exercises for short practice sessions with clear expected outcomes and concrete creative action. '
                     f'Adjust cognitive complexity to this technical depth: {technical_depth_prompt_guidance(technical_depth)} '
                     'while keeping intro concise (roughly 2-3 sentences).'
                 ),
@@ -1447,6 +2406,38 @@ class ResourceAgent:
             ),
         }
         schema_model, instruction, max_tokens = prompts[kind]
+
+        mode_instruction = ''
+        mode_context_lines: list[str] = []
+        if normalized_study_mode == 'exemplar':
+            anchor_title = (exemplar_title or skill_node.name).strip()
+            anchor_context = (exemplar_context or '').strip()
+            mode_instruction = (
+                'Exemplar-first mode is active. Teach through one concrete artifact and keep explanations anchored to it. '
+                'Prioritize close reading/listening/viewing observations over abstraction.'
+            )
+            mode_context_lines = [
+                f'Exemplar anchor: {anchor_title}',
+                f'Exemplar context from learner: {anchor_context or "Not provided"}',
+            ]
+        elif normalized_study_mode == 'compare':
+            left = (comparison_left or '').strip()
+            right = (comparison_right or '').strip()
+            axis = (comparison_axis or '').strip() or 'form, context, interpretation, and effect'
+            mode_instruction = (
+                'Compare mode is active. Structure material around contrasts and convergences between the two targets. '
+                'Make comparison criteria explicit and avoid vague summaries.'
+            )
+            mode_context_lines = [
+                f'Comparison target A: {left}',
+                f'Comparison target B: {right}',
+                f'Comparison lens: {axis}',
+            ]
+        else:
+            normalized_study_mode = 'standard'
+            mode_instruction = (
+                'Studio standard mode is active. Teach through concrete examples and observable details, then connect to context and theory.'
+            )
 
         memory_snapshot = self.course_memory_service.build_snapshot(
             db,
@@ -1511,6 +2502,8 @@ class ResourceAgent:
             f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\n'
             f'Instructional role for this node: {skill_node.instructional_role}\n'
             f'Prerequisites for this node: {", ".join(prerequisite_names) if prerequisite_names else "None"}\n\n'
+            f'Study mode: {normalized_study_mode}\n'
+            f'Study mode context:\n{chr(10).join(f"- {line}" for line in mode_context_lines) if mode_context_lines else "- None"}\n\n'
             f'Editorial spine excerpt (preserve coherence):\n{editorial_spine_context}\n\n'
             f'Course memory ledger:\n{memory_context}\n\n'
             f'Stable completed coverage guidance:\n{stable_coverage_context}\n\n'
@@ -1519,13 +2512,16 @@ class ResourceAgent:
             f'{web_grounding_context or "None"}\n\n'
             f'Alignment rules:\n{alignment_rules}\n'
             f'Formatting constraints:\n{field_length_rules}\n'
+            f'{self._practice_balance_rules(kind=kind, study_mode=normalized_study_mode)}\n'
             f'Instruction: {instruction}\n\n'
+            f'Study mode instruction: {mode_instruction or "No special mode. Use standard teaching flow."}\n\n'
             'If web references are present, use them selectively for specific examples and context. '
             'Do not force web facts when relevance is weak. Never produce a link dump.\n'
             'Anti-slop rules:\n'
             '- Avoid filler transitions, motivational fluff, and generic consulting language.\n'
             '- Add concrete distinctions and context-specific details.\n'
-            '- Do not repeat examples already used unless remediation is explicitly required.'
+            '- Do not repeat examples already used unless remediation is explicitly required.\n'
+            '- For lesson/examples, populate exemplar_focus, comparison_prompts, observation_prompts, response_prompts, and practice_hooks.'
         )
 
         used_fallback = False
@@ -1553,6 +2549,25 @@ class ResourceAgent:
                 skill_node=skill_node,
                 learner_level=learner_level,
             )
+        if kind == 'examples' and isinstance(structured_content, dict):
+            if normalized_study_mode == 'exemplar' and (exemplar_title or '').strip():
+                anchor_title = (exemplar_title or '').strip()
+                structured_content['title'] = f'Exemplar Study: {anchor_title}'
+                intro = str(structured_content.get('intro') or '').strip()
+                structured_content['intro'] = (
+                    f'This set is anchored in "{anchor_title}" so each example stays concrete and interpretable. '
+                    f'{intro}'.strip()
+                )[:600]
+            elif normalized_study_mode == 'compare' and (comparison_left or '').strip() and (comparison_right or '').strip():
+                left = (comparison_left or '').strip()
+                right = (comparison_right or '').strip()
+                axis = (comparison_axis or '').strip() or 'form, context, interpretation, and effect'
+                structured_content['title'] = f'Compare: {left} vs {right}'
+                intro = str(structured_content.get('intro') or '').strip()
+                structured_content['intro'] = (
+                    f'This comparison set maps contrasts between "{left}" and "{right}" through {axis}. '
+                    f'{intro}'.strip()
+                )[:600]
         if kind == 'lesson' and not used_fallback:
             _is_high_quality, quality_issues = self._lesson_quality_signals(
                 structured_content,
@@ -1631,6 +2646,22 @@ class ResourceAgent:
                     structured_content = refined_model.model_dump()
                 except ProviderError:
                     pass
+        if kind in {'lesson', 'examples'}:
+            structured_content = self._ensure_studio_balance_fields(
+                kind=kind,
+                structured_content=structured_content,
+                skill_node=skill_node,
+                study_mode=normalized_study_mode,
+            )
+            structured_content = await self._attach_supporting_media_if_relevant(
+                topic=topic,
+                skill_node=skill_node,
+                structured_content=structured_content,
+                kind=kind,
+                study_mode=normalized_study_mode,
+                db=db,
+                user_id=user_id,
+            )
         if skill_node.difficulty <= 2 or learner_level == 'beginner':
             structured_content = self._enforce_foundation_scope(
                 kind=kind,

@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         extra='ignore',
     )
 
-    app_name: str = 'Knowledge Base API'
+    app_name: str = 'Canopy API'
     api_prefix: str = '/api'
     environment: str = 'development'
 
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     password_reset_debug_expose_token: bool = True
     password_reset_allow_user_discovery: bool = False
     password_reset_send_email: bool = False
-    password_reset_email_subject: str = 'Reset your Knowledge Base password'
+    password_reset_email_subject: str = 'Reset your Canopy password'
 
     email_provider: Literal['resend'] = 'resend'
     resend_api_key: str = Field(default='')

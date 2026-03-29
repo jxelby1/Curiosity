@@ -9,8 +9,14 @@ NOTES_PAGE = ROOT / 'frontend' / 'app' / 'topics' / '[topicId]' / 'notes' / 'pag
 
 def test_notes_workspace_exposes_project_journal_view() -> None:
     content = NOTES_PAGE.read_text()
-    assert 'Project journal' in content
-    assert 'Topic project book' in content
-    assert 'persistent learning memory' in content
+    assert 'Notebook timeline' in content
+    assert 'Commonplace timeline' in content
+    assert 'commonplace timeline' in content
+    assert 'Notebook signals' in content
+    assert 'Taste development' in content
     assert 'Reflection cue' in content
     assert 'direct evidence' in content
+    assert 'Quick Notebook Templates' in content
+    assert 'Notebook Tags' in content
+    assert 'What Changed My View' in content
+    assert 'Explore next' in content

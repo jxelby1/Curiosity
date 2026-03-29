@@ -46,7 +46,7 @@ class ResendEmailSender:
         html_body = (
             '<div style="font-family: Arial, sans-serif; max-width: 560px; margin: 0 auto; color: #111827;">'
             f'<h2 style="margin-bottom: 12px;">Hi {safe_name},</h2>'
-            '<p style="line-height: 1.5;">We received a request to reset your password for Knowledge Base.</p>'
+            '<p style="line-height: 1.5;">We received a request to reset your password for Canopy.</p>'
             f'<p style="line-height: 1.5;">This link expires in {expires_in_minutes} minutes.</p>'
             f'<p style="margin: 24px 0;">'
             f'<a href="{safe_link}" '

@@ -17,11 +17,13 @@ def test_backend_exposes_deep_lesson_endpoint_and_strict_media_pipeline() -> Non
     assert "@router.get('/skills/{skill_id}/deep-lesson'" in routes_content
     assert 'generate_deep_lesson_material(' in routes_content
     assert 'fetch_strict_supporting_media(' in routes_content
+    assert 'remaining = max(0, 3 - len(supporting_media))' in routes_content
     assert 'async def generate_deep_lesson_material(' in agent_content
     assert 'async def fetch_strict_supporting_media(' in agent_content
-    assert '_STRICT_MEDIA_SCORE_THRESHOLD = 0.34' in agent_content
-    assert '_RELAXED_MEDIA_SCORE_THRESHOLD = 0.2' in agent_content
-    assert '_BROAD_MEDIA_SCORE_THRESHOLD = 0.12' in agent_content
+    assert '_STRICT_MEDIA_SCORE_THRESHOLD = 0.24' in agent_content
+    assert '_RELAXED_MEDIA_SCORE_THRESHOLD = 0.16' in agent_content
+    assert '_BROAD_MEDIA_SCORE_THRESHOLD = 0.1' in agent_content
+    assert '_VISUAL_DISCIPLINE_HINTS = (' in agent_content
     assert 'fallback_query = (' in agent_content
     assert 'broad_query = ' in agent_content
 
@@ -30,7 +32,7 @@ def test_skill_workspace_includes_deep_dive_tab_and_renderer() -> None:
     page_content = SKILL_PAGE.read_text(encoding='utf-8')
     learning_content = LEARNING_CONTENT.read_text(encoding='utf-8')
     api_content = API_CLIENT.read_text(encoding='utf-8')
-    assert "{ id: 'deep_dive', label: 'Deep Dive' }" in page_content
+    assert "{ id: 'deep_dive', label: 'Deep Dive'" in page_content
     assert "if (activeTab === 'deep_dive')" in page_content
     assert 'ensureDeepLesson' in page_content
     assert '<DeepLessonRenderer content={deepLessonContent} />' in page_content

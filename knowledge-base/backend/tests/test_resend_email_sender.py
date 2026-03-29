@@ -13,10 +13,10 @@ def _settings(**overrides: object) -> Settings:
         'password_reset_send_email': True,
         'email_provider': 'resend',
         'resend_api_key': 're_test_key',
-        'resend_from_email': 'Knowledge Base <no-reply@example.com>',
+        'resend_from_email': 'Canopy <no-reply@example.com>',
         'resend_base_url': 'https://api.resend.com',
         'resend_reply_to': '',
-        'password_reset_email_subject': 'Reset your Knowledge Base password',
+        'password_reset_email_subject': 'Reset your Canopy password',
     }
     base.update(overrides)
     return Settings.model_validate(base)

@@ -29,7 +29,7 @@ def test_ui_surfaces_use_centralized_display_tag_formatter() -> None:
     assert "formatDisplayTag(note.note_type)" in notes_content
     assert "formatDisplayTag(note.source_type)" in notes_content
     assert "formatDisplayTag(node.status)" in skill_content
-    assert "formatDisplayTag(suggestion.purpose)" in skill_content
+    assert "getBranchPurposeMeta(suggestion.purpose)" in skill_content
     assert "formatDisplayTag(topic.course_depth)" in dashboard_content
     assert "formatDisplayTag(topic.starting_skill_level)" in dashboard_content
     assert "formatDisplayTag(tree.topic.course_depth)" in topic_content

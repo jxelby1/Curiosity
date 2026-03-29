@@ -34,12 +34,12 @@ export default function GardenPage() {
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
           <p className="badge mb-3">Learning Garden</p>
-          <h1 className="text-3xl font-semibold md:text-4xl">Your topic forest</h1>
+          <h1 className="text-3xl md:text-4xl">Your topic grove</h1>
           <p className="muted mt-2 max-w-3xl text-sm md:text-base">
             Progress grows each topic tree. Return often to keep your garden alive and expanding.
           </p>
         </div>
-        <Link href="/topics" className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+        <Link href="/topics" className="studio-button-secondary px-3 py-2 text-sm">
           Back to topics
         </Link>
       </header>

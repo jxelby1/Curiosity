@@ -219,6 +219,7 @@ export interface DeepLessonMediaItem {
   title: string;
   url: string;
   media_type: 'image' | 'video';
+  preview_url?: string | null;
   source_domain: string;
   relevance_reason: string;
 }
@@ -527,6 +528,12 @@ export interface TopicJournalSummary {
   milestones_reached: number;
   branches_accepted: number;
   branches_rejected: number;
+  reflections_logged: number;
+  comparisons_logged: number;
+  exemplars_saved: number;
+  interpretations_logged: number;
+  view_shifts_logged: number;
+  next_threads_logged: number;
   verified_nodes: number;
   total_nodes: number;
   mastery_average: number;

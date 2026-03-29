@@ -1,21 +1,19 @@
 import type { Metadata } from 'next';
 
 import { AuthGate, AuthProvider } from '@/components/auth-provider';
+import { PRODUCT_NAME, PRODUCT_TAGLINE } from '@/lib/brand';
 
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Knowledge Base Learning System',
-  description: 'PoC multi-agent learning companion'
+  title: PRODUCT_NAME,
+  description: PRODUCT_TAGLINE
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
-      <body
-        className="font-sans"
-        style={{ fontFamily: '"Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif' }}
-      >
+      <body className="font-sans studio-shell">
         <AuthProvider>
           <AuthGate>{children}</AuthGate>
         </AuthProvider>

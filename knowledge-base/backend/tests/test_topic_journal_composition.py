@@ -66,6 +66,7 @@ def test_topic_journal_merges_notes_exercises_assessments_and_milestones() -> No
             note_type=NoteType.personal,
             title='My takeaway',
             body='- **Style and Technique:** Keep fingers curled and move slowly.',
+            tags=['reflection', 'comparison', 'exemplar', 'interpretation', 'view_shift', 'next_thread'],
             created_at=now - timedelta(minutes=40),
             updated_at=now - timedelta(minutes=35),
         )
@@ -156,6 +157,12 @@ def test_topic_journal_merges_notes_exercises_assessments_and_milestones() -> No
     assert journal.summary.assessments_taken == 1
     assert journal.summary.milestones_reached == 1
     assert journal.summary.branches_accepted == 1
+    assert journal.summary.reflections_logged == 1
+    assert journal.summary.comparisons_logged == 1
+    assert journal.summary.exemplars_saved == 1
+    assert journal.summary.interpretations_logged == 1
+    assert journal.summary.view_shifts_logged == 1
+    assert journal.summary.next_threads_logged == 1
     assert journal.summary.total_nodes == 1
     assert journal.summary.verified_nodes in {0, 1}
     assert journal.summary.growth_signal

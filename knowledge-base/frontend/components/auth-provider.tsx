@@ -14,6 +14,7 @@ import {
 
 import { clearAuthToken, getAuthToken } from '@/lib/auth';
 import { getMe, login as apiLogin, logout as apiLogout, register as apiRegister } from '@/lib/api';
+import { PRODUCT_NAME } from '@/lib/brand';
 import { AuthUser } from '@/lib/types';
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated';
@@ -161,11 +162,11 @@ export function AuthGate({ children }: PropsWithChildren) {
         <div className="mx-auto flex w-full max-w-7xl items-center justify-between gap-3 px-6 py-3 md:px-10">
           <div className="flex items-center gap-4">
             <Link href="/topics" className="text-sm font-semibold tracking-[0.08em] text-black/80">
-              KNOWLEDGE BASE
+              {PRODUCT_NAME.toUpperCase()}
             </Link>
             <nav className="hidden items-center gap-3 text-sm md:flex">
               <Link href="/topics" className="text-black/70 hover:text-black">
-                Topics
+                Studies
               </Link>
               <Link href="/garden" className="text-black/70 hover:text-black">
                 Garden
@@ -179,7 +180,7 @@ export function AuthGate({ children }: PropsWithChildren) {
             </div>
             <button
               type="button"
-              className="rounded-md border border-black/20 bg-white px-3 py-2 text-xs"
+              className="studio-button-secondary px-3 py-2 text-xs"
               onClick={async () => {
                 await logout();
                 router.push('/login');

@@ -76,6 +76,11 @@ _TRUSTED_GROUNDING_DOMAINS = (
     'youtube.com',
     'youtu.be',
 )
+_DEEMPHASIZED_IMAGE_DOMAINS = (
+    'wikipedia.org',
+    'wikimedia.org',
+)
+_DIRECT_IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg', '.avif')
 
 
 @dataclass
@@ -161,6 +166,11 @@ class ExternalSearchService:
             return True
         return any(domain == allowed or domain.endswith(f'.{allowed}') for allowed in _TRUSTED_GROUNDING_DOMAINS)
 
+    def _is_deemphasized_image_domain(self, domain: str) -> bool:
+        if not domain:
+            return False
+        return any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _DEEMPHASIZED_IMAGE_DOMAINS)
+
     def _infer_kind(self, *, url: str, title: str, summary: str, fallback_kind: str) -> str:
         lowered = f'{title} {summary} {url}'.lower()
         domain = self._domain_for_url(url)
@@ -173,6 +183,10 @@ class ExternalSearchService:
         if url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg')):
             return 'external_image'
         return 'external_article'
+
+    def _is_direct_image_url(self, url: str) -> bool:
+        lowered = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
+        return lowered.endswith(_DIRECT_IMAGE_EXTENSIONS)
 
     def _apply_source_policy(
         self,
@@ -188,11 +202,9 @@ class ExternalSearchService:
                 continue
 
             if source_policy == 'strict_media':
-                if not self._is_trusted_domain(domain):
-                    continue
                 if item.kind not in {'external_video', 'external_image', 'external_article', 'external_documentation'}:
                     continue
-                if item.relevance_score < 0.2:
+                if item.relevance_score < 0.14:
                     continue
             elif source_policy == 'grounding':
                 if item.relevance_score < 0.22 and not self._is_trusted_domain(domain):
@@ -240,12 +252,21 @@ class ExternalSearchService:
             if source_policy in {'grounding', 'strict_media'}
             else 'Return broadly relevant high-quality sources while still excluding social media and stock-photo marketplaces.'
         )
+        media_quality_instruction = (
+            'When policy is strict_media, prioritize strongly relevant visual and audiovisual references. '
+            'For external_image, return direct renderable asset URLs ending in .jpg/.jpeg/.png/.webp/.gif/.svg when possible. '
+            'For external_video, prioritize playable pages such as YouTube or Vimeo. '
+            'Avoid weakly related visuals even if they share one keyword.'
+            if source_policy == 'strict_media'
+            else 'Keep media quality high and relevance-focused.'
+        )
         user_prompt = (
             f'Topic: {topic}\n'
             f'Skill focus: {skill}\n'
             f'Search query: {query}\n'
             f'Result limit: {max(4, min(12, limit * 2))}\n'
             f'Policy: {policy_instruction}\n\n'
+            f'Media quality: {media_quality_instruction}\n\n'
             'Use web search and return JSON only:\n'
             '{\n'
             '  "results": [\n'
@@ -451,3 +472,82 @@ class ExternalSearchService:
             len(results),
         )
         return results
+
+    async def search_images(
+        self,
+        topic: str,
+        skill: str,
+        *,
+        query: str | None = None,
+        limit: int = 5,
+        source_policy: Literal['standard', 'grounding', 'strict_media'] = 'strict_media',
+    ) -> list[SearchResult]:
+        final_query = (query or '').strip() or f'{topic} {skill} visual reference example'
+        final_query = self._simplify_query(final_query, topic=topic, skill=skill)
+        image_query = (
+            f'{final_query} high-quality educational image reference '
+            'museum archive gallery contextual visual example'
+        )[:260]
+        logger.info(
+            'external_image_search.start provider=openai_web policy=%s query=%s',
+            source_policy,
+            image_query,
+        )
+
+        results = await self._search_with_openai_web(
+            topic=topic,
+            skill=skill,
+            query=image_query,
+            limit=max(6, limit * 3),
+            source_policy=source_policy,
+        )
+        image_only = []
+        for item in results:
+            domain = item.source_domain or self._domain_for_url(item.url)
+            if self._is_deemphasized_image_domain(domain):
+                continue
+            if item.kind == 'external_video':
+                continue
+            if item.kind != 'external_image' and not self._is_direct_image_url(item.url):
+                continue
+            image_only.append(item)
+        if not image_only:
+            # Practical fallback: keep top direct-image URLs from general web results.
+            fallback_results = await self.search(
+                topic,
+                skill,
+                query=image_query,
+                limit=max(8, limit * 4),
+                source_policy='standard',
+            )
+            for item in fallback_results:
+                domain = item.source_domain or self._domain_for_url(item.url)
+                if self._is_deemphasized_image_domain(domain) or self._is_blocked_domain(domain):
+                    continue
+                if self._is_direct_image_url(item.url):
+                    image_only.append(
+                        SearchResult(
+                            title=item.title,
+                            url=item.url,
+                            kind='external_image',
+                            summary=item.summary,
+                            source_domain=domain,
+                            relevance_score=item.relevance_score,
+                        )
+                    )
+        logger.info(
+            'external_image_search.complete provider=openai_web policy=%s query=%s results=%s',
+            source_policy,
+            image_query,
+            len(image_only),
+        )
+        deduped: list[SearchResult] = []
+        seen_urls: set[str] = set()
+        for item in sorted(image_only, key=lambda candidate: candidate.relevance_score, reverse=True):
+            if item.url in seen_urls:
+                continue
+            seen_urls.add(item.url)
+            deduped.append(item)
+            if len(deduped) >= limit:
+                break
+        return deduped

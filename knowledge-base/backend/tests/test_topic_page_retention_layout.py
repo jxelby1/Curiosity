@@ -8,14 +8,10 @@ def test_topic_page_prioritizes_retention_panels() -> None:
     page_path = repo_root / 'frontend' / 'app' / 'topics' / '[topicId]' / 'page.tsx'
     content = page_path.read_text(encoding='utf-8')
 
-    assert 'Next 3 actions' in content
-    assert 'Unlock anticipation' in content
-    assert (
-        'Today’s plan' in content
-        or "This week’s plan" in content
-        or 'Today plan' in content
-        or 'This week plan' in content
-    )
+    assert 'Primary Next Step' in content
+    assert 'Studio Loop' in content
+    assert 'retention?.plan_summary' in content
+    assert 'retention?.unlock_anticipation' in content
 
 
 def test_topic_page_no_longer_uses_large_tree_stage_panel() -> None:
@@ -24,4 +20,4 @@ def test_topic_page_no_longer_uses_large_tree_stage_panel() -> None:
     content = page_path.read_text(encoding='utf-8')
 
     assert 'TopicTreeStage' not in content
-    assert 'Growth Stage' in content
+    assert 'Study Stage' in content

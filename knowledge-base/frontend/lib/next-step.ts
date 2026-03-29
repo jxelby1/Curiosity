@@ -13,7 +13,7 @@ export type PrimaryNextStep = {
 };
 
 export const LEARNING_LOOP_LABELS: Array<{ id: LearningLoopStep; label: string }> = [
-  { id: 'learn', label: 'Learn' },
+  { id: 'learn', label: 'Study' },
   { id: 'practice', label: 'Practice' },
   { id: 'verify', label: 'Verify' },
   { id: 'reflect', label: 'Reflect' },
@@ -50,7 +50,7 @@ function preferredTabForNode(node: SkillNode): string {
 export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): PrimaryNextStep {
   if (node.status === 'locked') {
     return {
-      label: 'View unlock path',
+      label: 'View unlock sequence',
       reason: node.lock_reason || 'Complete prerequisite nodes first to continue this path.',
       href: `/topics/${topicId}/skills/${node.id}?tab=overview`,
       tab: 'overview',
@@ -62,8 +62,8 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
 
   if (!node.lesson_completed) {
     return {
-      label: 'Learn this node',
-      reason: 'Start with the lesson before practice or assessment so your foundation is clear.',
+      label: 'Study this node',
+      reason: 'Start with the lesson before practice or verification so your interpretation is grounded.',
       href: `/topics/${topicId}/skills/${node.id}?tab=lesson`,
       tab: 'lesson',
       skillNodeId: node.id,
@@ -74,8 +74,8 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
 
   if (!node.exercises_completed) {
     return {
-      label: 'Practice with exercises',
-      reason: 'Practice now to convert understanding into usable skill before verification.',
+      label: 'Practice this node',
+      reason: 'Practice now to turn understanding into concrete skill before verification.',
       href: `/topics/${topicId}/skills/${node.id}?tab=exercises`,
       tab: 'exercises',
       skillNodeId: node.id,
@@ -86,7 +86,7 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
 
   if (!node.quiz_taken || node.progress_state !== 'verified') {
     return {
-      label: 'Verify with assessment',
+      label: 'Verify understanding',
       reason: 'A verified result unlocks progression and confirms mastery for this node.',
       href: `/topics/${topicId}/skills/${node.id}?tab=quiz`,
       tab: 'quiz',
@@ -97,8 +97,8 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
   }
 
   return {
-    label: 'Reflect in journal',
-    reason: 'Capture what worked while it is fresh, then continue the core path or branch.',
+    label: 'Reflect in notebook',
+    reason: 'Capture what shifted in your understanding, then continue the core path or branch.',
     href: `/topics/${topicId}/notes`,
     tab: 'notes',
     skillNodeId: node.id,
@@ -161,8 +161,8 @@ export function derivePrimaryTopicNextStep({
   }
 
   return {
-    label: 'Create your first topic',
-    reason: 'Start one topic to begin the learn-practice-verify loop.',
+    label: 'Start your first study',
+    reason: 'Start one study to begin your core learning loop.',
     href: '/topics',
     tab: 'overview',
     skillNodeId: null,

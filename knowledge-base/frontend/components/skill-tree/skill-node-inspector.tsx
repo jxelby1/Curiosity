@@ -3,7 +3,11 @@
 import Link from 'next/link';
 import { useState } from 'react';
 
-import { formatDisplayTag } from '@/lib/display-format';
+import {
+  BRANCH_PURPOSE_OPTIONS,
+  BranchPurpose,
+  getBranchPurposeMeta,
+} from '@/lib/branch-purpose';
 import { derivePrimaryNodeNextStep } from '@/lib/next-step';
 import { BranchSuggestion, SkillNode } from '@/lib/types';
 
@@ -64,7 +68,7 @@ export function SkillNodeInspector({
   branchError?: string;
   onCreateBranch: (input: {
     focus?: string;
-    purpose: 'exploration' | 'specialization' | 'enrichment' | 'remediation';
+    purpose: BranchPurpose;
   }) => void;
   onGenerateSuggestions: () => void;
   onAcceptSuggestion: (suggestionId: number) => void;
@@ -74,14 +78,12 @@ export function SkillNodeInspector({
   onForceUnlock: (skillNodeId: number) => void;
 }) {
   const [branchFocus, setBranchFocus] = useState('');
-  const [branchPurpose, setBranchPurpose] = useState<
-    'exploration' | 'specialization' | 'enrichment' | 'remediation'
-  >('exploration');
+  const [branchPurpose, setBranchPurpose] = useState<BranchPurpose>('deepen_theme');
 
   if (!node) {
     return (
       <aside className="rounded-2xl border border-black/10 bg-white/85 p-5 text-sm text-black/70 shadow-[0_10px_26px_rgba(16,19,33,0.08)]">
-        Select a node to inspect prerequisites, open learning content, or create a side branch.
+        Select a node to inspect context, open study materials, or add a focused branch.
       </aside>
     );
   }
@@ -90,6 +92,7 @@ export function SkillNodeInspector({
   const isLocked = node.status === 'locked';
   const branchDisabled = isLocked || branchActionLoading || forcingUnlock;
   const primaryAction = derivePrimaryNodeNextStep(topicId, node);
+  const selectedPurposeMeta = getBranchPurposeMeta(branchPurpose);
 
   return (
     <aside className="rounded-2xl border border-black/10 bg-[linear-gradient(165deg,rgba(255,255,255,0.96),rgba(247,252,244,0.92))] p-4 text-black shadow-[0_16px_38px_rgba(16,19,33,0.12)]">
@@ -98,9 +101,9 @@ export function SkillNodeInspector({
         <span className="rounded-full border border-black/15 bg-white px-2.5 py-1 text-[10px] uppercase tracking-[0.14em] text-black/70">
           {node.node_kind === 'optional_branch'
             ? node.branch_origin === 'system_suggested'
-              ? 'Recommended path (active)'
-              : 'Optional path (active)'
-            : 'Core path'}
+              ? 'Suggested branch (active)'
+              : 'Branch path (active)'
+            : 'Core study path'}
         </span>
       </div>
 
@@ -115,7 +118,7 @@ export function SkillNodeInspector({
 
       <section className="mt-3 rounded-xl border border-black/10 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Requirements</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Connections</p>
           <span className="text-[10px] uppercase tracking-[0.14em] text-black/40">{prerequisites.length} prerequisite(s)</span>
         </div>
 
@@ -146,7 +149,7 @@ export function SkillNodeInspector({
 
       <section className="mt-3 rounded-xl border border-black/10 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Primary Next Step</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Next move</p>
           <span className="text-[10px] uppercase tracking-[0.14em] text-black/40">
             {node.progress_state === 'verified' ? 'Keep sharp' : 'Move forward'}
           </span>
@@ -174,7 +177,7 @@ export function SkillNodeInspector({
 
       <section className="mt-3 rounded-xl border border-black/10 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Branch builder</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Branch move</p>
           <button
             type="button"
             className="rounded-md border border-black/15 bg-white px-2 py-1 text-[11px] disabled:opacity-60"
@@ -185,10 +188,10 @@ export function SkillNodeInspector({
           </button>
         </div>
         <p className="mt-1 text-[11px] text-black/64">
-          Create your own optional branch, or review one recommended branch opportunity at a time.
+          Open a focused branch when it deepens your study. Keep branch decisions sparse and intentional.
         </p>
         <p className="mt-1 text-[11px] text-black/56">
-          Recommended opportunities are not part of your tree until you accept them.
+          Each branch type is a distinct study move with a clear intent.
         </p>
 
         <div className="mt-2.5 grid gap-2">
@@ -196,29 +199,22 @@ export function SkillNodeInspector({
             value={branchFocus}
             onChange={(event) => setBranchFocus(event.target.value)}
             className="w-full rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
-            placeholder="Branch focus (optional)"
+            placeholder="Branch focus (work, question, technique)"
             maxLength={180}
             disabled={branchDisabled}
           />
           <div className="flex gap-2">
             <select
               value={branchPurpose}
-              onChange={(event) =>
-                setBranchPurpose(
-                  event.target.value as
-                    | 'exploration'
-                    | 'specialization'
-                    | 'enrichment'
-                    | 'remediation'
-                )
-              }
+              onChange={(event) => setBranchPurpose(event.target.value as BranchPurpose)}
               className="min-w-0 flex-1 rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
               disabled={branchDisabled}
             >
-              <option value="exploration">Exploration</option>
-              <option value="specialization">Specialization</option>
-              <option value="enrichment">Enrichment</option>
-              <option value="remediation">Remediation</option>
+              {BRANCH_PURPOSE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
             </select>
             <button
               type="button"
@@ -235,43 +231,48 @@ export function SkillNodeInspector({
               Create
             </button>
           </div>
+          <p className="text-[11px] text-black/56">{selectedPurposeMeta.summary}</p>
         </div>
 
         {branchError && <p className="mt-2 text-xs text-red-700">{branchError}</p>}
 
         <div className="mt-2.5 space-y-2">
-          {branchSuggestions.map((suggestion) => (
-            <article key={suggestion.id} className="rounded-md border border-black/10 bg-paper/35 p-2.5">
-              <div className="flex items-start justify-between gap-2">
-                <p className="text-xs font-semibold leading-tight">{suggestion.title}</p>
-                <span className="rounded-full border border-black/15 bg-white px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em] text-black/60">
-                  {formatDisplayTag(suggestion.purpose)}
-                </span>
-              </div>
-              <p className="mt-1 text-[11px] text-black/68">{suggestion.rationale}</p>
-              <p className="mt-1 text-[11px] text-black/58">
-                Recommended opportunity. Accept to convert this into an active optional path.
-              </p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  type="button"
-                  className="rounded-md bg-ink px-2 py-1 text-[11px] text-white disabled:opacity-60"
-                  onClick={() => onAcceptSuggestion(suggestion.id)}
-                  disabled={branchDisabled}
-                >
-                  Add path
-                </button>
-                <button
-                  type="button"
-                  className="rounded-md border border-black/15 bg-white px-2 py-1 text-[11px] text-black/70 disabled:opacity-60"
-                  onClick={() => onRejectSuggestion(suggestion.id)}
-                  disabled={branchDisabled}
-                >
-                  Not now
-                </button>
-              </div>
-            </article>
-          ))}
+          {branchSuggestions.map((suggestion) => {
+            const suggestionMeta = getBranchPurposeMeta(suggestion.purpose);
+            return (
+              <article key={suggestion.id} className="rounded-md border border-black/10 bg-paper/35 p-2.5">
+                <div className="flex items-start justify-between gap-2">
+                  <p className="text-xs font-semibold leading-tight">{suggestion.title}</p>
+                  <span className="rounded-full border border-black/15 bg-white px-1.5 py-0.5 text-[10px] uppercase tracking-[0.1em] text-black/60">
+                    {suggestionMeta.label}
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] text-black/68">{suggestion.rationale}</p>
+                <p className="mt-1 text-[11px] text-black/58">{suggestionMeta.summary}</p>
+                <p className="mt-1 text-[11px] text-black/58">
+                  Suggested path. Accept to activate it inside your study tree.
+                </p>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded-md bg-ink px-2 py-1 text-[11px] text-white disabled:opacity-60"
+                    onClick={() => onAcceptSuggestion(suggestion.id)}
+                    disabled={branchDisabled}
+                  >
+                    Activate path
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-md border border-black/15 bg-white px-2 py-1 text-[11px] text-black/70 disabled:opacity-60"
+                    onClick={() => onRejectSuggestion(suggestion.id)}
+                    disabled={branchDisabled}
+                  >
+                    Not now
+                  </button>
+                </div>
+              </article>
+            );
+          })}
           {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
             <p className="text-[11px] text-black/58">No recommended branch opportunity right now.</p>
           )}

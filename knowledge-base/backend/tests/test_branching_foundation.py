@@ -19,6 +19,7 @@ from app.db.models import (
     User,
     UserSkillState,
 )
+from app.schemas.llm import DeepDiveBranchPlan
 
 
 class _BranchLLMStub:
@@ -61,7 +62,7 @@ class _BranchLLMStub:
                             'title': 'Remediate foundations',
                             'focus': 'Foundational reinforcement drills',
                             'rationale': 'Focus practice where performance dropped.',
-                            'purpose': 'remediation',
+                            'purpose': 'style_technique_practice',
                         },
                     ]
                 }
@@ -275,6 +276,36 @@ def _seed_with_taught_concept_overlap(db):
     return user, topic, parent
 
 
+def test_deep_dive_branch_plan_accepts_new_branch_role_alias_and_trims_rationale() -> None:
+    long_rationale = (
+        'This optional branch deepens observational photography practice through timed light studies, '
+        'comparative edits, and iterative response notes that connect practical decisions with interpretive '
+        'outcomes while preserving a clear link to the parent node and the learner’s current momentum in '
+        'the broader curriculum pathway for consistent creative development. It also introduces a brief '
+        'reflection cadence so the learner can articulate what changed in their seeing, their editing '
+        'choices, and their confidence across repeated attempts.'
+    )
+    plan = DeepDiveBranchPlan.model_validate(
+        {
+            'branch_title': 'Focused photography extension',
+            'rationale': long_rationale,
+            'nodes': [
+                {
+                    'key': 'branch_photo_focus',
+                    'name': 'Light timing photo drill',
+                    'description': 'Capture and compare one scene in changing light conditions.',
+                    'instructional_role': 'study_exemplar',
+                    'difficulty': 2,
+                    'prerequisites': ['parent'],
+                }
+            ],
+        }
+    )
+
+    assert len(plan.rationale) <= 400
+    assert plan.nodes[0].instructional_role == 'case_deepening'
+
+
 def test_deep_dive_branch_creation_is_single_available_optional_node() -> None:
     db = _session()
     user, topic, parent = _seed(db)
@@ -289,7 +320,7 @@ def test_deep_dive_branch_creation_is_single_available_optional_node() -> None:
             focus='timing focus',
             branch_size=3,
             branch_origin='user_requested',
-            branch_purpose='specialization',
+            branch_purpose='study_exemplar',
         )
     )
 
@@ -298,7 +329,7 @@ def test_deep_dive_branch_creation_is_single_available_optional_node() -> None:
     assert created_node.status == SkillStatus.available
     assert all(node.node_kind == 'optional_branch' for node in created)
     assert all(node.branch_origin == 'user_requested' for node in created)
-    assert all(node.branch_purpose == 'specialization' for node in created)
+    assert all(node.branch_purpose == 'study_exemplar' for node in created)
     assert all(node.branch_parent_skill_id == parent.id for node in created)
     assert all(node.branch_depth >= 1 for node in created)
 
@@ -313,7 +344,7 @@ def test_deep_dive_branch_creation_is_single_available_optional_node() -> None:
     assert edges[0].parent_skill_id == parent.id
 
 
-def test_exploration_branch_creates_single_available_node() -> None:
+def test_context_influence_branch_creates_single_available_node() -> None:
     db = _session()
     user, topic, parent = _seed(db)
     agent = SkillGraphAgent(_BranchLLMStub())  # type: ignore[arg-type]
@@ -324,10 +355,10 @@ def test_exploration_branch_creates_single_available_node() -> None:
             topic=topic,
             parent_node=parent,
             user_id=user.id,
-            focus='quick exploration',
+            focus='quick context scan',
             branch_size=3,
             branch_origin='user_requested',
-            branch_purpose='exploration',
+            branch_purpose='context_influence',
         )
     )
 
@@ -346,7 +377,7 @@ def test_exploration_branch_creates_single_available_node() -> None:
     assert all(edge.parent_skill_id == parent.id for edge in edges)
 
 
-def test_exploration_suggestion_acceptance_path_stays_single_node() -> None:
+def test_context_influence_suggestion_acceptance_path_stays_single_node() -> None:
     db = _session()
     user, topic, parent = _seed(db)
     agent = SkillGraphAgent(_BranchLLMStub())  # type: ignore[arg-type]
@@ -357,17 +388,17 @@ def test_exploration_suggestion_acceptance_path_stays_single_node() -> None:
             topic=topic,
             parent_node=parent,
             user_id=user.id,
-            focus='suggested exploration',
+            focus='suggested context',
             branch_size=5,
             branch_origin='system_suggested',
-            branch_purpose='exploration',
+            branch_purpose='context_influence',
         )
     )
 
     assert len(created) == 1
     assert created[0].status == SkillStatus.available
     assert created[0].branch_origin == 'system_suggested'
-    assert created[0].branch_purpose == 'exploration'
+    assert created[0].branch_purpose == 'context_influence'
 
     prereq_edges = db.scalars(
         select(SkillEdge).where(
@@ -398,25 +429,25 @@ def test_branch_suggestion_generation_and_performance_suggestion_dedup() -> None
     assert all(item.status == 'pending' for item in created)
     assert all(item.origin == 'system_suggested' for item in created)
 
-    remediation = agent.create_performance_branch_suggestion(
+    practice = agent.create_performance_branch_suggestion(
         db,
         topic=topic,
         parent_node=parent,
         user_id=user.id,
         score=0.3,
     )
-    assert remediation is not None
-    assert remediation.purpose == 'remediation'
+    assert practice is not None
+    assert practice.purpose == 'style_technique_practice'
 
-    remediation_again = agent.create_performance_branch_suggestion(
+    practice_again = agent.create_performance_branch_suggestion(
         db,
         topic=topic,
         parent_node=parent,
         user_id=user.id,
         score=0.2,
     )
-    assert remediation_again is not None
-    assert remediation_again.id == remediation.id
+    assert practice_again is not None
+    assert practice_again.id == practice.id
 
 
 def test_deep_dive_branch_caps_prerequisites_to_2() -> None:
@@ -433,7 +464,7 @@ def test_deep_dive_branch_caps_prerequisites_to_2() -> None:
             focus='dense cap check',
             branch_size=3,
             branch_origin='user_requested',
-            branch_purpose='specialization',
+            branch_purpose='study_exemplar',
         )
     )
     created_ids = {node.id for node in created}
@@ -449,7 +480,7 @@ def test_deep_dive_branch_caps_prerequisites_to_2() -> None:
     assert max(incoming.values()) <= 2
 
 
-def test_branch_generation_avoids_future_core_overlap_for_non_remediation() -> None:
+def test_branch_generation_avoids_future_core_overlap_for_non_practice_branch() -> None:
     db = _session()
     user, topic, parent, future_core = _seed_with_future_core(db)
     agent = SkillGraphAgent(_OverlapBranchLLMStub())  # type: ignore[arg-type]
@@ -463,13 +494,13 @@ def test_branch_generation_avoids_future_core_overlap_for_non_remediation() -> N
             focus='future overlap probe',
             branch_size=1,
             branch_origin='user_requested',
-            branch_purpose='enrichment',
+            branch_purpose='deepen_theme',
         )
     )
 
     assert len(created) == 1
     assert created[0].name != future_core.name
-    assert created[0].branch_purpose == 'enrichment'
+    assert created[0].branch_purpose == 'deepen_theme'
 
 
 def test_branch_creation_canonicalizes_extended_purpose_labels() -> None:
@@ -502,8 +533,8 @@ def test_branch_creation_canonicalizes_extended_purpose_labels() -> None:
         )
     )
 
-    assert created_project[0].branch_purpose == 'specialization'
-    assert created_assessment[0].branch_purpose == 'remediation'
+    assert created_project[0].branch_purpose == 'creative_response'
+    assert created_assessment[0].branch_purpose == 'style_technique_practice'
 
 
 def test_branch_suggestion_filters_overlap_and_falls_back_to_single_high_signal_item() -> None:
@@ -524,10 +555,18 @@ def test_branch_suggestion_filters_overlap_and_falls_back_to_single_high_signal_
 
     assert len(created) == 1
     assert created[0].focus.lower() != 'future core topic'
-    assert created[0].purpose in {'enrichment', 'specialization', 'remediation', 'exploration'}
+    assert created[0].purpose in {
+        'deepen_theme',
+        'compare_contrast',
+        'context_influence',
+        'study_exemplar',
+        'creative_response',
+        'style_technique_practice',
+        'follow_lineage',
+    }
 
 
-def test_enrichment_branch_filters_taught_content_overlap() -> None:
+def test_deepen_theme_branch_filters_taught_content_overlap() -> None:
     db = _session()
     user, topic, parent = _seed_with_taught_concept_overlap(db)
     agent = SkillGraphAgent(_TaughtOverlapBranchLLMStub())  # type: ignore[arg-type]
@@ -541,16 +580,16 @@ def test_enrichment_branch_filters_taught_content_overlap() -> None:
             focus='phrase alignment',
             branch_size=1,
             branch_origin='user_requested',
-            branch_purpose='enrichment',
+            branch_purpose='deepen_theme',
         )
     )
 
     assert len(created) == 1
     assert created[0].name != 'Phrase Alignment Under Pressure'
-    assert created[0].branch_purpose == 'enrichment'
+    assert created[0].branch_purpose == 'deepen_theme'
 
 
-def test_remediation_branch_can_revisit_taught_content_focus() -> None:
+def test_style_technique_practice_branch_can_revisit_taught_content_focus() -> None:
     db = _session()
     user, topic, parent = _seed_with_taught_concept_overlap(db)
     agent = SkillGraphAgent(_TaughtOverlapBranchLLMStub())  # type: ignore[arg-type]
@@ -564,12 +603,12 @@ def test_remediation_branch_can_revisit_taught_content_focus() -> None:
             focus='phrase alignment',
             branch_size=1,
             branch_origin='user_requested',
-            branch_purpose='remediation',
+            branch_purpose='style_technique_practice',
         )
     )
 
     assert len(created) == 1
-    assert created[0].branch_purpose == 'remediation'
+    assert created[0].branch_purpose == 'style_technique_practice'
     assert 'phrase alignment under pressure' in created[0].name.lower()
 
 
@@ -585,7 +624,7 @@ def test_suggest_branch_paths_returns_only_one_pending_per_parent() -> None:
         title='Old branch idea',
         focus='Old focus',
         rationale='Old rationale',
-        purpose='exploration',
+        purpose='context_influence',
         origin='system_suggested',
         trigger_event='manual',
         status='pending',
@@ -601,7 +640,7 @@ def test_suggest_branch_paths_returns_only_one_pending_per_parent() -> None:
         title='Latest branch idea',
         focus='Latest focus',
         rationale='Latest rationale',
-        purpose='specialization',
+        purpose='study_exemplar',
         origin='system_suggested',
         trigger_event='manual',
         status='pending',

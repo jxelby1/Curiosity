@@ -8,12 +8,13 @@ def test_public_landing_page_has_premium_product_story_and_auth_ctas() -> None:
     landing_path = repo_root / 'frontend' / 'app' / 'page.tsx'
     content = landing_path.read_text(encoding='utf-8')
 
-    assert 'Build a living learning tree, not a static course.' in content
+    assert 'Grow your taste through living study paths.' in content
     assert 'Sign in' in content
-    assert 'Create account' in content
-    assert 'Branching mastery map' in content
-    assert 'Project journal + artifacts' in content
-    assert 'Simple first start' in content
+    assert 'Enter {PRODUCT_NAME}' in content
+    assert 'One trunk. Selective branches. Lasting reflection.' in content
+    assert 'Notebook Memory' in content
+    assert 'Start from a work' in content
+    assert 'Living Study Tree' in content
 
 
 def test_post_login_dashboard_has_motivating_home_composition() -> None:
@@ -21,8 +22,8 @@ def test_post_login_dashboard_has_motivating_home_composition() -> None:
     dashboard_path = repo_root / 'frontend' / 'components' / 'topics-dashboard.tsx'
     content = dashboard_path.read_text(encoding='utf-8')
 
-    assert 'Learning home' in content
+    assert '{PRODUCT_NAME} Studio' in content
     assert 'Welcome back' in content
-    assert 'Progress snapshot' in content
-    assert 'Active topics' in content
-    assert 'Create a new topic' in content
+    assert 'Studio pulse' in content
+    assert 'Active studies' in content
+    assert 'Start a new study path' in content

@@ -22,8 +22,8 @@ def test_inspector_exposes_create_branch_and_suggestions_ui() -> None:
     inspector_path = repo_root / 'frontend' / 'components' / 'skill-tree' / 'skill-node-inspector.tsx'
     content = inspector_path.read_text(encoding='utf-8')
 
-    assert 'Branch builder' in content
+    assert 'Branch move' in content
     assert 'Create' in content
     assert 'Suggest one' in content
-    assert 'Add path' in content
+    assert 'Activate path' in content
     assert 'Not now' in content

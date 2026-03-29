@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 
 import { useAuth } from '@/components/auth-provider';
+import { PRODUCT_NAME } from '@/lib/brand';
 
 const EMAIL_MAX = 255;
 const PASSWORD_MAX = 120;
@@ -54,9 +55,9 @@ export default function LoginPage() {
   return (
     <main className="mx-auto max-w-xl p-6 md:p-10">
       <section className="panel p-6 md:p-8">
-        <p className="badge mb-3">Sign in</p>
-        <h1 className="text-3xl font-semibold">Welcome back</h1>
-        <p className="muted mt-2 text-sm">Sign in to access your topics, notes, assessments, and progress.</p>
+        <p className="badge mb-3">{PRODUCT_NAME}</p>
+        <h1 className="text-3xl">Welcome back</h1>
+        <p className="muted mt-2 text-sm">Return to your active studies, notebook reflections, and next move.</p>
 
         <form className="mt-6 space-y-3" onSubmit={onSubmit}>
           <label className="block space-y-1">
@@ -66,7 +67,7 @@ export default function LoginPage() {
               onChange={(event) => setEmail(event.target.value)}
               type="email"
               maxLength={EMAIL_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="you@example.com"
               required
             />
@@ -78,7 +79,7 @@ export default function LoginPage() {
               onChange={(event) => setPassword(event.target.value)}
               type="password"
               maxLength={PASSWORD_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="Your password"
               required
             />
@@ -90,7 +91,7 @@ export default function LoginPage() {
           </div>
           <button
             type="submit"
-            className="w-full rounded-md bg-ink px-4 py-2 text-sm text-white disabled:opacity-60"
+            className="studio-button-primary w-full disabled:opacity-60"
             disabled={submitting}
           >
             {submitting ? 'Signing in...' : 'Sign in'}

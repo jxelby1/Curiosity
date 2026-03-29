@@ -61,10 +61,10 @@ def test_strict_media_filter_keeps_only_high_relevance_trusted_sources() -> None
     deep_lesson = {'essential_questions': [], 'sections': [], 'key_terms': []}
     results = [
         SearchResult(
-            title='Austrian Art and Culture in the Late 19th Century - Overview',
-            url='https://www.britannica.com/art/Austrian-art',
-            kind='external_article',
-            summary='Historical overview with paintings and image references tied to Klimt.',
+            title='Gustav Klimt - Judith',
+            url='https://images.metmuseum.org/CRDImages/ep/original/DT1567.jpg',
+            kind='external_image',
+            summary='High-resolution museum image of a key Klimt work.',
         ),
         SearchResult(
             title='Random art blog post',
@@ -97,9 +97,11 @@ def test_strict_media_filter_keeps_only_high_relevance_trusted_sources() -> None
     )
 
     assert len(media) == 2
-    assert all(item['source_domain'] in {'britannica.com', 'youtube.com'} for item in media)
+    assert all(item['source_domain'] in {'images.metmuseum.org', 'youtube.com'} for item in media)
     assert all(item['media_type'] in {'image', 'video'} for item in media)
     assert all('random-art-blog.example.com' not in item['source_domain'] for item in media)
+    assert any(item['media_type'] == 'image' for item in media)
+    assert any(item.get('preview_url') for item in media if item['media_type'] == 'image')
 
 
 def test_strict_media_filter_returns_empty_for_low_relevance_candidates() -> None:
@@ -133,6 +135,58 @@ def test_strict_media_filter_returns_empty_for_low_relevance_candidates() -> Non
     assert media == []
 
 
+def test_strict_media_filter_rejects_video_when_title_not_similar_to_node() -> None:
+    topic = Topic(
+        user_id=1,
+        name='Photography with Intention',
+        description='Study light timing and editing choices',
+        goal='Build practical photographic judgment',
+    )
+    skill = SkillNode(
+        topic_id=1,
+        name='Photograph with Intention: Light, Timing, and Editing',
+        description='Interpret timing and light decisions in photography',
+        difficulty=2,
+        mastery_estimate=0.0,
+    )
+    deep_lesson = {'essential_questions': [], 'sections': [], 'key_terms': []}
+    results = [
+        SearchResult(
+            title='Street photography timing and light example',
+            url='https://images.example.org/refs/street-light-timing.jpg',
+            kind='external_image',
+            summary='Relevant photography exemplar image.',
+        ),
+        SearchResult(
+            title='Travel vlog from Lisbon',
+            url='https://www.youtube.com/watch?v=zzz999',
+            kind='external_video',
+            summary='Lifestyle travel video unrelated to lesson focus.',
+        ),
+        SearchResult(
+            title='Photograph with Intention: Light, Timing, and Editing walkthrough',
+            url='https://www.youtube.com/watch?v=abc123',
+            kind='external_video',
+            summary='Lesson-aligned photography walkthrough.',
+        ),
+    ]
+    agent = _agent_with_results(results)
+
+    media = asyncio.run(
+        agent.fetch_strict_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            deep_lesson=deep_lesson,
+            kind='lesson',
+            limit=2,
+        )
+    )
+
+    urls = {item['url'] for item in media}
+    assert 'https://www.youtube.com/watch?v=zzz999' not in urls
+    assert 'https://www.youtube.com/watch?v=abc123' in urls
+
+
 def test_strict_media_filter_keeps_map_references_from_trusted_sources() -> None:
     topic = Topic(user_id=1, name='Iran History', description='Geography and historical context', goal='Understand major regions')
     skill = SkillNode(
@@ -150,8 +204,8 @@ def test_strict_media_filter_keeps_map_references_from_trusted_sources() -> None
     results = [
         SearchResult(
             title='Map of Iran - Encyclopaedia Britannica',
-            url='https://www.britannica.com/place/Iran',
-            kind='external_article',
+            url='https://www.loc.gov/static/maps/iran-relief-location-map.jpg',
+            kind='external_image',
             summary='Map and regional overview of Iran geography and topography.',
         ),
         SearchResult(
@@ -173,8 +227,9 @@ def test_strict_media_filter_keeps_map_references_from_trusted_sources() -> None
     )
 
     assert len(media) == 1
-    assert media[0]['source_domain'] == 'britannica.com'
+    assert media[0]['source_domain'] == 'loc.gov'
     assert media[0]['media_type'] == 'image'
+    assert media[0].get('preview_url', '').endswith('.jpg')
 
 
 def test_social_media_candidates_are_blocked_even_in_development_fallback() -> None:
@@ -242,15 +297,15 @@ def test_stock_image_sites_are_blocked_while_bbc_and_medium_are_allowed() -> Non
         ),
         SearchResult(
             title='BBC Arts: Gustav Klimt and symbolism',
-            url='https://www.bbc.com/culture/article/20200101-gustav-klimt-symbolism',
-            kind='external_article',
-            summary='BBC culture analysis with artwork context and references.',
+            url='https://www.youtube.com/watch?v=abc123',
+            kind='external_video',
+            summary='BBC-aligned educational video on Klimt symbolism and context.',
         ),
         SearchResult(
             title='Medium: Reading Symbolism in Klimt',
-            url='https://medium.com/art-history/reading-symbolism-in-klimt-abc123',
-            kind='external_article',
-            summary='Detailed long-form article discussing Klimt symbols and context.',
+            url='https://miro.medium.com/v2/resize:fit:1400/1*klimtSymbolism.jpeg',
+            kind='external_image',
+            summary='Detailed visual explainer discussing Klimt symbols and context.',
         ),
     ]
     agent = _agent_with_results(results)
@@ -266,8 +321,8 @@ def test_stock_image_sites_are_blocked_while_bbc_and_medium_are_allowed() -> Non
 
     domains = {item['source_domain'] for item in media}
     assert 'gettyimages.com' not in domains
-    assert 'bbc.com' in domains
-    assert 'medium.com' in domains
+    assert 'youtube.com' in domains
+    assert 'miro.medium.com' in domains
 
 
 def test_broad_fallback_can_return_relevant_non_social_non_stock_results() -> None:
@@ -287,8 +342,8 @@ def test_broad_fallback_can_return_relevant_non_social_non_stock_results() -> No
     results = [
         SearchResult(
             title='Iran geography map and terrain explainer',
-            url='https://geography.example.org/iran-map-terrain-overview',
-            kind='external_article',
+            url='https://geography.example.org/assets/iran-map-terrain-overview.jpg',
+            kind='external_image',
             summary='A geography explainer with regional map context and movement constraints.',
         ),
     ]
@@ -305,3 +360,109 @@ def test_broad_fallback_can_return_relevant_non_social_non_stock_results() -> No
 
     assert len(media) == 1
     assert media[0]['source_domain'] == 'geography.example.org'
+    assert media[0]['media_type'] == 'image'
+
+
+def test_strict_media_filter_rejects_wikimedia_file_pages() -> None:
+    topic, skill = _topic_and_skill()
+    deep_lesson = {'essential_questions': [], 'sections': [], 'key_terms': []}
+    results = [
+        SearchResult(
+            title='File: The Kiss by Gustav Klimt',
+            url='https://commons.wikimedia.org/wiki/File:Klimt_-_Der_Kuss.jpeg',
+            kind='external_image',
+            summary='Wikimedia Commons file page for a Klimt artwork.',
+        ),
+    ]
+    agent = _agent_with_results(results)
+
+    media = asyncio.run(
+        agent.fetch_strict_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            deep_lesson=deep_lesson,
+            limit=1,
+        )
+    )
+
+    assert media == []
+
+
+def test_strict_media_filter_keeps_at_least_one_image_when_available() -> None:
+    topic, skill = _topic_and_skill()
+    deep_lesson = {'essential_questions': [], 'sections': [], 'key_terms': []}
+    results = [
+        SearchResult(
+            title='Austrian Art and Culture in the Late 19th Century video overview',
+            url='https://www.youtube.com/watch?v=abc123',
+            kind='external_video',
+            summary='Trusted educational channel overview.',
+        ),
+        SearchResult(
+            title='PBS visual analysis of Vienna modernism',
+            url='https://www.youtube.com/watch?v=def456',
+            kind='external_video',
+            summary='PBS classroom segment on Viennese modernism.',
+        ),
+        SearchResult(
+            title='Klimt painting detail study',
+            url='https://images.metmuseum.org/CRDImages/ep/original/DP-14110-001.jpg',
+            kind='external_image',
+            summary='High-resolution image detail from a Klimt painting.',
+        ),
+    ]
+    agent = _agent_with_results(results)
+
+    media = asyncio.run(
+        agent.fetch_strict_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            deep_lesson=deep_lesson,
+            limit=2,
+        )
+    )
+
+    assert len(media) == 2
+    assert any(item['media_type'] == 'image' for item in media)
+
+
+def test_strict_media_filter_drops_opaque_wikimedia_filename_for_photography_lessons() -> None:
+    topic = Topic(
+        user_id=1,
+        name='Photography with Intention',
+        description='Study light timing and editing through exemplar images',
+        goal='Develop visual judgment in photography practice',
+    )
+    skill = SkillNode(
+        topic_id=1,
+        name='Photograph with Intention: Light, Timing, and Editing',
+        description='Observe how lighting and timing shape photographic outcomes',
+        difficulty=2,
+        mastery_estimate=0.0,
+    )
+    deep_lesson = {
+        'title': 'Photograph with Intention: Light, Timing, and Editing',
+        'summary': 'Compare two photographs and interpret how timing changes tone.',
+        'sections': [{'heading': 'Observe lighting', 'content': 'Notice highlight and shadow transitions.'}],
+        'exemplar_focus': ['Compare two photographs with different lighting conditions.'],
+    }
+    results = [
+        SearchResult(
+            title='Timinglight.jpg',
+            url='https://commons.wikimedia.org/wiki/File:Timinglight.jpg',
+            kind='external_image',
+            summary='Wikimedia Commons image asset',
+        ),
+    ]
+    agent = _agent_with_results(results)
+
+    media = asyncio.run(
+        agent.fetch_strict_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            deep_lesson=deep_lesson,
+            limit=2,
+        )
+    )
+
+    assert media == []

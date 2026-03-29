@@ -24,6 +24,11 @@ import {
   updateProgress
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
+import {
+  BRANCH_PURPOSE_OPTIONS,
+  BranchPurpose,
+  getBranchPurposeMeta,
+} from '@/lib/branch-purpose';
 import { formatDisplayTag } from '@/lib/display-format';
 import { derivePrimaryNodeNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
 import {
@@ -58,6 +63,7 @@ import { TopicHeader } from '@/components/topic-header';
 type LearningTab = 'overview' | 'lesson' | 'deep_dive' | 'examples' | 'exercises' | 'quiz' | 'resources';
 type WorkspaceMode = 'focus' | 'detailed';
 type ResourceKind = 'lesson' | 'examples' | 'exercises';
+type ExamplesStudyMode = 'standard' | 'exemplar' | 'compare';
 type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 
 type NodeCache = {
@@ -122,6 +128,12 @@ function isDirectImageUrl(url: string): boolean {
   return /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url);
 }
 
+function renderableImageUrl(url: string, previewUrl?: string | null): string | null {
+  const normalizedPreview = (previewUrl || '').trim();
+  if (normalizedPreview && isDirectImageUrl(normalizedPreview)) return normalizedPreview;
+  return isDirectImageUrl(url) ? url : null;
+}
+
 function toYouTubeEmbedUrl(url: string): string | null {
   try {
     const parsed = new URL(url);
@@ -137,6 +149,32 @@ function toYouTubeEmbedUrl(url: string): string | null {
   } catch {
     return null;
   }
+  return null;
+}
+
+function toVimeoEmbedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (!host.includes('vimeo.com')) return null;
+    const segments = parsed.pathname.split('/').filter(Boolean);
+    const id = segments.find((segment) => /^\d+$/.test(segment));
+    return id ? `https://player.vimeo.com/video/${id}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function isDirectVideoUrl(url: string): boolean {
+  return /\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(url);
+}
+
+function toVideoEmbedSource(url: string): { kind: 'iframe' | 'native'; src: string } | null {
+  const youtube = toYouTubeEmbedUrl(url);
+  if (youtube) return { kind: 'iframe', src: youtube };
+  const vimeo = toVimeoEmbedUrl(url);
+  if (vimeo) return { kind: 'iframe', src: vimeo };
+  if (isDirectVideoUrl(url)) return { kind: 'native', src: url };
   return null;
 }
 
@@ -213,9 +251,13 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
   const [loadingTree, setLoadingTree] = useState(!cachedTree);
   const [deepDiveFocus, setDeepDiveFocus] = useState('');
-  const [deepDivePurpose, setDeepDivePurpose] = useState<
-    'exploration' | 'specialization' | 'enrichment' | 'remediation'
-  >('exploration');
+  const [deepDivePurpose, setDeepDivePurpose] = useState<BranchPurpose>('deepen_theme');
+  const [examplesStudyMode, setExamplesStudyMode] = useState<ExamplesStudyMode>('standard');
+  const [exemplarTitle, setExemplarTitle] = useState('');
+  const [exemplarContext, setExemplarContext] = useState('');
+  const [comparisonLeft, setComparisonLeft] = useState('');
+  const [comparisonRight, setComparisonRight] = useState('');
+  const [comparisonAxis, setComparisonAxis] = useState('');
   const [pageError, setPageError] = useState('');
 
   const selectedSkill = useMemo(() => {
@@ -293,7 +335,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       return;
     }
     if (activeTab === 'examples') {
-      void ensureResource('examples');
+      if (examplesStudyMode === 'standard') {
+        void ensureResource('examples');
+      }
       return;
     }
     if (activeTab === 'exercises') {
@@ -308,7 +352,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     if (activeTab === 'quiz') {
       void ensureAssessment();
     }
-  }, [activeTab, selectedSkill?.id, selectedSkill?.status]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeTab, examplesStudyMode, selectedSkill?.id, selectedSkill?.status]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function keyFor(type: string, skillId?: number) {
     const id = skillId || selectedSkill?.id || 0;
@@ -325,7 +369,18 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     setErrorByKey((prev) => ({ ...prev, [key]: message }));
   }
 
-  async function ensureResource(kind: ResourceKind, forceRegenerate = false) {
+  async function ensureResource(
+    kind: ResourceKind,
+    forceRegenerate = false,
+    options?: {
+      study_mode?: 'standard' | 'exemplar' | 'compare';
+      exemplar_title?: string;
+      exemplar_context?: string;
+      comparison_left?: string;
+      comparison_right?: string;
+      comparison_axis?: string;
+    }
+  ) {
     if (!selectedSkill) return;
     const nodeId = selectedSkill.id;
     if (selectedSkill.status === 'locked') {
@@ -341,7 +396,13 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       const resource = await generateResource({
         skillId: nodeId,
         kind,
-        regenerate: forceRegenerate
+        regenerate: forceRegenerate,
+        study_mode: options?.study_mode,
+        exemplar_title: options?.exemplar_title,
+        exemplar_context: options?.exemplar_context,
+        comparison_left: options?.comparison_left,
+        comparison_right: options?.comparison_right,
+        comparison_axis: options?.comparison_axis,
       });
       setContentCache((prev) => {
         const nodeCache = prev[nodeId] || { resources: {} };
@@ -812,6 +873,31 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  async function handleGenerateExamplesByMode() {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('examples', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
+    if (examplesStudyMode === 'exemplar' && !exemplarTitle.trim()) {
+      setErrorState('examples', 'Add an exemplar title to run exemplar-first mode.', nodeId);
+      return;
+    }
+    if (examplesStudyMode === 'compare' && (!comparisonLeft.trim() || !comparisonRight.trim())) {
+      setErrorState('examples', 'Add both comparison targets to run compare mode.', nodeId);
+      return;
+    }
+    await ensureResource('examples', true, {
+      study_mode: examplesStudyMode,
+      exemplar_title: exemplarTitle.trim(),
+      exemplar_context: exemplarContext.trim(),
+      comparison_left: comparisonLeft.trim(),
+      comparison_right: comparisonRight.trim(),
+      comparison_axis: comparisonAxis.trim(),
+    });
+  }
+
   async function onTabChange(tab: LearningTab) {
     if (selectedSkill?.status === 'locked' && tab !== 'overview') {
       return;
@@ -890,6 +976,47 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
+  useEffect(() => {
+    const skillId = selectedSkill?.id;
+    if (!skillId) return;
+    if (typeof window === 'undefined') return;
+    const debugEnabled = window.localStorage.getItem('canopy_debug_media') === '1' || process.env.NODE_ENV !== 'production';
+    if (!debugEnabled) return;
+
+    const lessonContent = parseLessonContent(contentCache[skillId]?.resources?.lesson?.structured_content);
+    if (!lessonContent) return;
+    const media = lessonContent.supporting_media || [];
+    const renderableImages = media.filter((item) => !!renderableImageUrl(item.url, item.preview_url)).length;
+    console.info('ui.lesson_media_render', {
+      topicId,
+      skillId,
+      mediaCount: media.length,
+      renderableImages,
+      videoCount: media.filter((item) => item.media_type === 'video').length,
+    });
+  }, [topicId, selectedSkill?.id, contentCache]);
+
+  useEffect(() => {
+    const skillId = selectedSkill?.id;
+    if (!skillId) return;
+    if (typeof window === 'undefined') return;
+    const debugEnabled = window.localStorage.getItem('canopy_debug_media') === '1' || process.env.NODE_ENV !== 'production';
+    if (!debugEnabled) return;
+
+    const deepLessonPayload = contentCache[skillId]?.deepLesson;
+    const deepLessonParsed = parseDeepLessonContent(deepLessonPayload?.structured_content);
+    if (!deepLessonParsed) return;
+    const media = deepLessonParsed.supporting_media || [];
+    const renderableImages = media.filter((item) => !!renderableImageUrl(item.url, item.preview_url)).length;
+    console.info('ui.deep_lesson_media_render', {
+      topicId,
+      skillId,
+      mediaCount: media.length,
+      renderableImages,
+      videoCount: media.filter((item) => item.media_type === 'video').length,
+    });
+  }, [topicId, selectedSkill?.id, contentCache]);
+
   if (!tree && loadingTree) return <SkillWorkspaceSkeleton />;
 
   if (!tree || !selectedSkill) {
@@ -944,6 +1071,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const deepLessonContent = parseDeepLessonContent(deepLesson?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
   const exercises = parseExercisesContent(exercisesResource?.structured_content);
+  const deepLessonHasInlineMedia = (deepLessonContent?.supporting_media?.length || 0) > 0;
   const lessonComplete = selectedSkill.lesson_completed;
   const exercisesComplete = selectedSkill.exercises_completed;
   const quizTaken = selectedSkill.quiz_taken;
@@ -962,13 +1090,17 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     typeof selectedSkill.best_quiz_score === 'number' ? Math.round(selectedSkill.best_quiz_score * 100) : null;
   const primaryNextStep = derivePrimaryNodeNextStep(topicId, selectedSkill);
   const isFocusMode = workspaceMode === 'focus';
+  const selectedBranchMove = getBranchPurposeMeta(deepDivePurpose);
+  const exemplarModeInvalid = examplesStudyMode === 'exemplar' && !exemplarTitle.trim();
+  const compareModeInvalid = examplesStudyMode === 'compare' && (!comparisonLeft.trim() || !comparisonRight.trim());
+  const examplesModeInvalid = exemplarModeInvalid || compareModeInvalid;
 
   return (
     <main className="mx-auto max-w-7xl p-6 md:p-10">
       <TopicHeader
         topicId={topicId}
         topicName={tree.topic.name}
-        subtitle={`Focused node workspace for ${selectedSkill.name}`}
+        subtitle={`Focused study workspace for ${selectedSkill.name}`}
         rightSlot={
           <button
             className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
@@ -1025,12 +1157,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
               <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Focus Context</p>
               <h2 className="mt-2 text-lg font-semibold">{selectedSkill.name}</h2>
               <p className="muted mt-1 text-sm">Stay on this node until your next learning action is complete.</p>
-              <div className="mt-3 flex flex-wrap items-center gap-2">
-                <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
-                  {progressStateLabel(selectedSkill.progress_state)}
-                </span>
-                <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
-              </div>
               <Link
                 href={`/topics/${topicId}`}
                 className="mt-3 inline-flex rounded-md border border-black/15 bg-white px-3 py-2 text-xs"
@@ -1049,7 +1175,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 Do this now
               </Link>
               <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-xs">
-                Reflect
+                Notebook
               </Link>
             </div>
             <ol className="mt-3 space-y-1.5 text-xs">
@@ -1094,10 +1220,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                       {selectedSkill.branch_origin === 'system_suggested' ? 'Recommended (active)' : 'User-created'}
                     </span>
                   )}
-                  <span className={`badge border ${progressStateClasses(selectedSkill.progress_state)}`}>
-                    {progressStateLabel(selectedSkill.progress_state)}
-                  </span>
-                  <span className={`badge border ${statusClasses(selectedSkill.status)}`}>{formatDisplayTag(selectedSkill.status)}</span>
                 </div>
                 <div className="inline-flex rounded-full border border-black/15 bg-white p-1 text-xs">
                   <button
@@ -1119,11 +1241,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     Detailed tools
                   </button>
                 </div>
-                <p className="max-w-sm text-right text-[11px] text-black/58">
-                  {isFocusMode
-                    ? 'Focus mode keeps one clear next move front and center.'
-                    : 'Detailed tools shows branching, deep-dive, and developer controls.'}
-                </p>
               </div>
             </div>
 
@@ -1196,7 +1313,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     {primaryNextStep.label}
                   </Link>
                   <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm">
-                    Reflect in journal
+                    Reflect in notebook
                   </Link>
                   {workspaceMode === 'detailed' && (
                     <button
@@ -1259,25 +1376,26 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   <section className="rounded-xl border border-black/10 bg-white p-4">
                     <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Explore Further (Optional)</h3>
                     <p className="muted mt-2 text-sm">
-                      Create a side branch with optional modules if you want to go deeper on this node.
+                      Add one optional branch move only when it clearly deepens this node.
                     </p>
                     <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto] sm:items-center">
                       <input
                         value={deepDiveFocus}
                         onChange={(event) => setDeepDiveFocus(event.target.value)}
                         className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm sm:max-w-md"
-                        placeholder="Optional focus (e.g. groove timing, edge cases, troubleshooting)"
+                        placeholder="Optional focus (work, question, technique)"
                         maxLength={180}
                       />
                       <select
                         value={deepDivePurpose}
-                        onChange={(event) => setDeepDivePurpose(event.target.value as typeof deepDivePurpose)}
+                        onChange={(event) => setDeepDivePurpose(event.target.value as BranchPurpose)}
                         className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
                       >
-                        <option value="exploration">Exploration</option>
-                        <option value="specialization">Specialization</option>
-                        <option value="enrichment">Enrichment</option>
-                        <option value="remediation">Remediation</option>
+                        {BRANCH_PURPOSE_OPTIONS.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
                       </select>
                       <button
                         className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
@@ -1285,15 +1403,16 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                         disabled={deepDiveLoading || isLocked}
                         type="button"
                       >
-                        {deepDiveLoading ? 'Creating branch...' : 'Create optional branch'}
+                        {deepDiveLoading ? 'Opening branch...' : 'Open branch move'}
                       </button>
                     </div>
+                    <p className="muted mt-2 text-xs">{selectedBranchMove.summary}</p>
                     {deepDiveError && <p className="mt-2 text-sm text-red-700">{deepDiveError}</p>}
                   </section>
 
                   <section className="rounded-xl border border-black/10 bg-white p-4">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Branch Opportunity</h3>
+                      <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Recommended Study Move</h3>
                       <button
                         type="button"
                         className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
@@ -1308,41 +1427,45 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     </p>
                     {branchSuggestionsError && <p className="mt-2 text-sm text-red-700">{branchSuggestionsError}</p>}
                     <div className="mt-3 space-y-2">
-                      {branchSuggestions.map((suggestion) => (
-                        <article key={suggestion.id} className="rounded-lg border border-black/10 bg-paper/40 p-3">
-                          <div className="flex flex-wrap items-start justify-between gap-2">
-                            <div>
-                              <p className="text-sm font-semibold">{suggestion.title}</p>
-                              <p className="muted mt-1 text-xs">{suggestion.focus}</p>
+                      {branchSuggestions.map((suggestion) => {
+                        const suggestionMove = getBranchPurposeMeta(suggestion.purpose);
+                        return (
+                          <article key={suggestion.id} className="rounded-lg border border-black/10 bg-paper/40 p-3">
+                            <div className="flex flex-wrap items-start justify-between gap-2">
+                              <div>
+                                <p className="text-sm font-semibold">{suggestion.title}</p>
+                                <p className="muted mt-1 text-xs">{suggestion.focus}</p>
+                              </div>
+                              <span className="badge border border-black/15 bg-white text-black/70">
+                                {suggestionMove.label}
+                              </span>
                             </div>
-                            <span className="badge border border-black/15 bg-white text-black/70">
-                              {formatDisplayTag(suggestion.purpose)}
-                            </span>
-                          </div>
-                          <p className="muted mt-2 text-sm">{suggestion.rationale}</p>
-                          <div className="mt-3 flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
-                              onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
-                              disabled={branchSuggestionsActionLoading}
-                            >
-                              Add branch
-                            </button>
-                            <button
-                              type="button"
-                              className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
-                              onClick={() => handleRejectBranchSuggestion(suggestion.id)}
-                              disabled={branchSuggestionsActionLoading}
-                            >
-                              Not now
-                            </button>
-                          </div>
-                        </article>
-                      ))}
+                            <p className="muted mt-2 text-sm">{suggestion.rationale}</p>
+                            <p className="muted mt-1 text-xs">{suggestionMove.summary}</p>
+                            <div className="mt-3 flex flex-wrap gap-2">
+                              <button
+                                type="button"
+                                className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
+                                onClick={() => handleAcceptBranchSuggestion(suggestion.id)}
+                                disabled={branchSuggestionsActionLoading}
+                              >
+                                Activate branch
+                              </button>
+                              <button
+                                type="button"
+                                className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
+                                onClick={() => handleRejectBranchSuggestion(suggestion.id)}
+                                disabled={branchSuggestionsActionLoading}
+                              >
+                                Not now
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })}
                       {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
                         <p className="muted text-xs">
-                          No recommendation at the moment. Refresh to request one, or create your own optional branch above.
+                          No high-signal branch move right now. Refresh to request one, or open a custom branch move above.
                         </p>
                       )}
                     </div>
@@ -1351,12 +1474,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
               ) : (
                 <section className="rounded-xl border border-black/10 bg-white p-4">
                   <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Branching</h3>
-                  <p className="muted mt-2 text-sm">
-                    Focus mode keeps this workspace on one next move. Open detailed tools when you want to add or review optional branches.
-                  </p>
                   <button
                     type="button"
-                    className="mt-3 rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
+                    className="mt-2 rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
                     onClick={() => setWorkspaceMode('detailed')}
                   >
                     Open detailed tools
@@ -1426,7 +1546,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 </div>
               )}
 
-              {deepLesson && (
+              {deepLesson && !deepLessonHasInlineMedia && (
                 <section className="rounded-xl border border-black/10 bg-white p-4">
                   <div className="mb-2">
                     <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">
@@ -1443,8 +1563,9 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                   ) : (
                     <div className="space-y-3">
                       {deepLesson.supporting_media.map((item) => {
-                        const embedUrl = item.media_type === 'video' ? toYouTubeEmbedUrl(item.url) : null;
-                        const showImage = item.media_type === 'image' && isDirectImageUrl(item.url);
+                        const embedSource = item.media_type === 'video' ? toVideoEmbedSource(item.url) : null;
+                        const imageUrl = item.media_type === 'image' ? renderableImageUrl(item.url, item.preview_url) : null;
+                        const showImage = Boolean(imageUrl);
                         return (
                           <article key={item.url} className="rounded-lg border border-black/10 bg-paper/40 p-3">
                             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
@@ -1454,10 +1575,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                             <p className="text-sm font-semibold">{item.title}</p>
                             <p className="muted mt-1 text-xs">{item.relevance_reason}</p>
 
-                            {embedUrl && (
+                            {embedSource?.kind === 'iframe' && (
                               <div className="mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5">
                                 <iframe
-                                  src={embedUrl}
+                                  src={embedSource.src}
                                   title={item.title}
                                   className="h-64 w-full"
                                   loading="lazy"
@@ -1467,9 +1588,16 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                                 />
                               </div>
                             )}
+                            {embedSource?.kind === 'native' && (
+                              <div className="mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5">
+                                <video controls preload="metadata" className="h-64 w-full bg-black">
+                                  <source src={embedSource.src} />
+                                </video>
+                              </div>
+                            )}
                             {showImage && (
                               <img
-                                src={item.url}
+                                src={imageUrl || item.url}
                                 alt={item.title}
                                 loading="lazy"
                                 className="mt-3 max-h-80 w-full rounded-md border border-black/10 object-contain bg-white"
@@ -1495,15 +1623,116 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
 
           {activeTab === 'examples' && !isLocked && (
             <div className="space-y-4">
+              <section className="rounded-xl border border-black/10 bg-white p-4">
+                <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Study Mode</h3>
+                <p className="muted mt-2 text-sm">
+                  Choose how examples are taught: standard progression, one concrete exemplar, or structured comparison.
+                </p>
+                <div className="mt-3 grid gap-2 md:grid-cols-[220px_1fr]">
+                  <select
+                    value={examplesStudyMode}
+                    onChange={(event) => setExamplesStudyMode(event.target.value as ExamplesStudyMode)}
+                    className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                  >
+                    <option value="standard">Standard examples</option>
+                    <option value="exemplar">Exemplar-first</option>
+                    <option value="compare">Compare mode</option>
+                  </select>
+                  <div className="flex items-center">
+                    <button
+                      className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
+                      onClick={() => {
+                        if (examplesStudyMode === 'standard') {
+                          void ensureResource('examples', !!examplesResource);
+                          return;
+                        }
+                        void handleGenerateExamplesByMode();
+                      }}
+                      disabled={examplesLoading || examplesModeInvalid}
+                    >
+                      {examplesLoading
+                        ? 'Loading...'
+                        : examplesStudyMode === 'standard'
+                        ? examplesResource
+                          ? 'Regenerate examples'
+                          : 'Generate examples'
+                        : examplesStudyMode === 'exemplar'
+                        ? 'Generate exemplar study'
+                        : 'Generate comparison study'}
+                    </button>
+                  </div>
+                </div>
+
+                {examplesStudyMode === 'exemplar' && (
+                  <div className="mt-3 grid gap-2">
+                    <input
+                      value={exemplarTitle}
+                      onChange={(event) => setExemplarTitle(event.target.value)}
+                      className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                      placeholder="Exemplar title (painting, poem, scene, building, object...)"
+                      maxLength={200}
+                    />
+                    <textarea
+                      value={exemplarContext}
+                      onChange={(event) => setExemplarContext(event.target.value)}
+                      className="min-h-[84px] rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                      placeholder="Optional context: medium, period, creator, or what you want to interpret."
+                      maxLength={400}
+                    />
+                  </div>
+                )}
+
+                {examplesStudyMode === 'compare' && (
+                  <div className="mt-3 grid gap-2">
+                    <div className="grid gap-2 md:grid-cols-2">
+                      <input
+                        value={comparisonLeft}
+                        onChange={(event) => setComparisonLeft(event.target.value)}
+                        className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                        placeholder="Comparison target A"
+                        maxLength={200}
+                      />
+                      <input
+                        value={comparisonRight}
+                        onChange={(event) => setComparisonRight(event.target.value)}
+                        className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                        placeholder="Comparison target B"
+                        maxLength={200}
+                      />
+                    </div>
+                    <input
+                      value={comparisonAxis}
+                      onChange={(event) => setComparisonAxis(event.target.value)}
+                      className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                      placeholder="Comparison lens (e.g., form, symbolism, context, influence)"
+                      maxLength={280}
+                    />
+                  </div>
+                )}
+
+                {examplesModeInvalid && (
+                  <p className="mt-2 text-xs text-amber-700">
+                    {examplesStudyMode === 'exemplar'
+                      ? 'Add an exemplar title to run exemplar-first mode.'
+                      : 'Add both comparison targets to run compare mode.'}
+                  </p>
+                )}
+                {examplesStudyMode !== 'standard' && (
+                  <p className="mt-2 text-xs text-black/58">
+                    Custom study modes also save a notebook entry so your exemplar/comparison trail remains visible in the journal.
+                  </p>
+                )}
+              </section>
+
               <div className="flex flex-wrap items-center gap-2">
                 {examplesResource && <ContentMeta source={examplesResource.source} version={examplesResource.version} />}
-                <button
-                  className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
-                  onClick={() => ensureResource('examples', !!examplesResource)}
-                  disabled={examplesLoading}
-                >
-                  {examplesLoading ? 'Loading...' : examplesResource ? 'Regenerate examples' : 'Generate examples'}
-                </button>
+                <span className="badge border border-black/15 bg-white text-black/70">
+                  {examplesStudyMode === 'standard'
+                    ? 'Standard mode'
+                    : examplesStudyMode === 'exemplar'
+                    ? 'Exemplar-first'
+                    : 'Compare mode'}
+                </span>
               </div>
 
               {examplesLoading && <p className="rounded-md border border-black/10 bg-white p-3 text-sm">Loading examples...</p>}

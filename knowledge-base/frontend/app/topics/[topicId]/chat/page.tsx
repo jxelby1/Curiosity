@@ -191,7 +191,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
           body: saveBody,
           tags
         });
-        setSaveFeedback(result.duplicate_warning || 'Tutor content appended to note.');
+        setSaveFeedback(result.duplicate_warning || 'Dialogue response appended to notebook entry.');
       } else {
         const mode = saveMode === 'summary' ? 'summary' : saveMode;
         const result = await saveTutorResponseToNotes({
@@ -205,7 +205,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
           note_type: saveMode === 'summary' ? 'summary' : 'lesson',
           skill_node_id: selectedSkillId
         });
-        setSaveFeedback(result.duplicate_warning || 'Tutor response saved to notes.');
+        setSaveFeedback(result.duplicate_warning || 'Dialogue response saved to notebook.');
       }
 
       await loadTopicNotes();
@@ -228,11 +228,11 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
 
   return (
     <main className="mx-auto max-w-6xl p-6 md:p-10">
-      <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Focused tutoring chat workspace" />
+      <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Dialogue for interpretation, context, and next moves" />
 
       <section className="panel grid min-h-[72vh] gap-0 overflow-hidden lg:grid-cols-[0.85fr_2fr]">
         <aside className="border-b border-black/10 bg-white p-4 lg:border-b-0 lg:border-r">
-          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Context Skill</h2>
+          <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Context Node</h2>
           <div className="mt-3 space-y-2">
             {tree.nodes.map((node) => (
               <button
@@ -264,7 +264,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                   }`}
                   onClick={() => setRetrievalMode('knowledge_base')}
                 >
-                  Learn from my knowledge base
+                  Use study context
                 </button>
                 <button
                   type="button"
@@ -275,12 +275,12 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                   }`}
                   onClick={() => setRetrievalMode('knowledge_plus_web')}
                 >
-                  Include current web resources
+                  Add current web sources
                 </button>
               </div>
               <div className="flex items-center justify-between gap-3">
                 <p className="muted text-xs">
-                  Internal knowledge (documents, skill graph, history, generated lessons) is always used first.
+                  Internal study context (skill graph, lessons, notebook memory, and history) is always prioritized.
                 </p>
                 <label className="flex items-center gap-2 text-xs">
                   <input
@@ -288,7 +288,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                     checked={includePersonalNotes}
                     onChange={(event) => setIncludePersonalNotes(event.target.checked)}
                   />
-                  <span>Use personal notes</span>
+                  <span>Use notebook entries</span>
                 </label>
               </div>
             </div>
@@ -297,7 +297,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
           <div className="flex-1 space-y-4 overflow-y-auto rounded-xl border border-black/10 bg-white p-4">
             {messages.length === 0 && (
               <p className="muted rounded-md border border-dashed border-black/15 bg-paper/50 p-4 text-sm">
-                Ask a question to start your tutoring session.
+                Ask for interpretation, comparison, context, or a concrete next study move.
               </p>
             )}
 
@@ -320,7 +320,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                               className="rounded-md border border-black/20 bg-white px-2.5 py-1 text-xs"
                               onClick={() => openSavePanel(item, 'full')}
                             >
-                              Save to notes
+                              Save to notebook
                             </button>
                             <button
                               type="button"
@@ -334,7 +334,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                               className="rounded-md border border-black/20 bg-white px-2.5 py-1 text-xs"
                               onClick={() => openSavePanel(item, 'summary')}
                             >
-                              Save summary to notes
+                              Save summary to notebook
                             </button>
                             <button
                               type="button"
@@ -351,7 +351,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                       <div className="max-w-3xl rounded-xl border border-black/15 bg-white p-3">
                         <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
                           <span className="badge">Save mode: {saveMode}</span>
-                          <span className="text-black/60">Notes in topic: {topicNotes.length}</span>
+                          <span className="text-black/60">Notebook entries in study: {topicNotes.length}</span>
                         </div>
 
                         {saveMode === 'append' && (
@@ -361,11 +361,11 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                             className="mb-2 w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
                           >
                             <option value="">Select note to append</option>
-                            {topicNotes.map((note) => (
-                              <option key={note.id} value={note.id}>
-                                #{note.id} {note.title}
-                              </option>
-                            ))}
+                              {topicNotes.map((note) => (
+                                <option key={note.id} value={note.id}>
+                                  #{note.id} {note.title}
+                                </option>
+                              ))}
                           </select>
                         )}
 
@@ -427,7 +427,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
               <div>
                 <div className="inline-flex items-center gap-2 rounded-2xl border border-black/10 bg-paper/60 px-3 py-2 text-xs text-black/70">
                   <span className="inline-block h-2 w-2 rounded-full bg-ink/70" />
-                  <span>Composing tutor response...</span>
+                  <span>Composing studio response...</span>
                 </div>
               </div>
             )}
@@ -439,7 +439,7 @@ export default function TopicChatPage({ params }: { params: { topicId: string } 
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
                 className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                placeholder="Ask about concept gaps, debugging strategy, or next step..."
+                placeholder="Ask for comparison, interpretation, context, or your next best study move..."
                 maxLength={CHAT_MESSAGE_MAX}
               />
               <p className="text-right text-xs text-black/60">

@@ -22,6 +22,7 @@ import {
   readSkillTreeCache,
   writeSkillTreeCache,
 } from '@/lib/cache';
+import { BranchPurpose } from '@/lib/branch-purpose';
 import { formatDisplayTag } from '@/lib/display-format';
 import { BranchSuggestion, SkillNode, SkillTree, TopicRetentionLoop } from '@/lib/types';
 import { derivePrimaryTopicNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
@@ -211,7 +212,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     skillId: number,
     input: {
       focus?: string;
-      purpose: 'exploration' | 'specialization' | 'enrichment' | 'remediation';
+      purpose: BranchPurpose;
     }
   ) {
     setBranchActionLoading(skillId, true);
@@ -337,17 +338,17 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
         <div>
           <div className="flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-black/58">
             <Link href="/topics" className="underline underline-offset-4">
-              Topics
+              Studies
             </Link>
             <span>/</span>
             <span>{tree.topic.name}</span>
           </div>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight md:text-4xl">{tree.topic.name}</h1>
+          <h1 className="mt-2 text-3xl tracking-tight md:text-4xl">{tree.topic.name}</h1>
           <p className="muted mt-2 max-w-3xl text-sm md:text-base">
-            {tree.topic.description || 'Continue your progression path through this topic skill constellation.'}
+            {tree.topic.description || 'Continue your study path through this constellation of concepts and practices.'}
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
-            <span className="badge border border-black/15 bg-white">Growth Stage {retention?.tree_stage || 1}</span>
+            <span className="badge border border-black/15 bg-white">Study Stage {retention?.tree_stage || 1}</span>
             <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.course_depth)} Course</span>
             <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.starting_skill_level)} Start</span>
             <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.technical_depth)} Depth</span>
@@ -357,21 +358,21 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
         </div>
 
         <div className="flex flex-wrap gap-2">
-          <Link href="/garden" className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+          <Link href="/garden" className="studio-button-secondary px-3 py-2 text-sm">
             Garden
           </Link>
-          <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
-            Notes
+          <Link href={`/topics/${topicId}/notes`} className="studio-button-secondary px-3 py-2 text-sm">
+            Notebook
           </Link>
-          <Link href={`/topics/${topicId}/chat`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
-            Tutor chat
+          <Link href={`/topics/${topicId}/chat`} className="studio-button-secondary px-3 py-2 text-sm">
+            Dialogue
           </Link>
-          <Link href={primaryNextStep.href} className="rounded-md bg-ink px-3 py-2 text-sm text-white">
+          <Link href={primaryNextStep.href} className="studio-button-primary px-3 py-2 text-sm">
             {primaryNextStep.label}
           </Link>
             <button
               type="button"
-              className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-button-secondary px-3 py-2 text-sm"
               onClick={() => refreshEverything()}
             >
               Refresh
@@ -402,7 +403,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
                   href={`/topics/${topicId}/skills/${retention.reminder.action_skill_node_id}?tab=${retention.reminder.action_tab}`}
                   className="rounded-md bg-amber-700 px-3 py-2 text-sm text-white"
                 >
-                  Resume
+                  Return to study
                 </Link>
               )}
               <button
@@ -429,7 +430,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
               className="rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm text-emerald-900"
               onClick={() => onAcknowledgeMilestone(topMilestone.id)}
             >
-              Nice
+              Acknowledge
             </button>
           </div>
         </section>
@@ -464,7 +465,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
 
       <section className="mb-5 grid gap-3 lg:grid-cols-[1.4fr_1fr]">
         <article className="panel p-4">
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-black/62">Progress overview</h2>
+          <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-black/62">Study progression</h2>
           <div className="space-y-3">
             <CompactProgressBar label="Unlocked nodes" value={unlockedNodes} total={totalNodes} tone="cyan" />
             <CompactProgressBar label="Verified nodes" value={verifiedNodes} total={totalNodes} tone="emerald" />
@@ -490,10 +491,10 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
         <article className="rounded-3xl border border-black/10 bg-[linear-gradient(165deg,rgba(255,255,255,0.95),rgba(241,249,236,0.9))] p-4 shadow-[0_20px_52px_rgba(16,19,33,0.14)] md:p-5">
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div>
-              <p className="text-xs uppercase tracking-[0.18em] text-black/58">Skill Constellation</p>
-              <p className="mt-1 text-sm text-black/66">Follow the core trunk and grow optional offshoot branches as your interests evolve.</p>
+              <p className="text-xs uppercase tracking-[0.18em] text-black/58">Living Study Constellation</p>
+              <p className="mt-1 text-sm text-black/66">Follow the core trunk, then open selective branches for context, comparison, and creative practice.</p>
               <p className="mt-1 text-xs text-black/52">
-                Select an unlocked node to continue learning. Recommended branch opportunities appear one at a time in the inspector.
+                Select an unlocked node to continue. Branch opportunities are intentionally sparse and shown one at a time.
               </p>
             </div>
             {selectedNode && (
@@ -572,14 +573,14 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
               Start now
             </Link>
             <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
-              Reflect in journal
+              Reflect in notebook
             </Link>
           </div>
           {retention?.plan_summary && <p className="mt-3 text-xs text-black/58">{retention.plan_summary}</p>}
         </article>
 
         <article className="panel p-5">
-          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Learning Loop</p>
+          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Studio Loop</p>
           <ol className="mt-3 space-y-2 text-sm">
             {LEARNING_LOOP_LABELS.map((item, index) => {
               const active = item.id === primaryNextStep.loopStep;

@@ -10,7 +10,7 @@ NOTES_PAGE = ROOT / 'frontend' / 'app' / 'topics' / '[topicId]' / 'notes' / 'pag
 def test_existing_notes_default_to_read_mode_with_explicit_edit_button() -> None:
     content = NOTES_PAGE.read_text(encoding='utf-8')
     assert 'selectedNote && !isEditingNote' in content
-    assert 'Edit note' in content
+    assert 'Edit entry' in content
     assert 'beginEditingSelectedNote' in content
     assert '<MarkdownContent markdown={selectedNote.body} />' in content
     assert '{markdownToPlainText(note.body)}' in content

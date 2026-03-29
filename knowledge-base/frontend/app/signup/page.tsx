@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { FormEvent, useState } from 'react';
 
 import { useAuth } from '@/components/auth-provider';
+import { PRODUCT_NAME } from '@/lib/brand';
 
 const NAME_MAX = 120;
 const EMAIL_MAX = 255;
@@ -60,10 +61,10 @@ export default function SignupPage() {
   return (
     <main className="mx-auto max-w-xl p-6 md:p-10">
       <section className="panel p-6 md:p-8">
-        <p className="badge mb-3">Create account</p>
-        <h1 className="text-3xl font-semibold">Start learning with your profile</h1>
+        <p className="badge mb-3">Create {PRODUCT_NAME} account</p>
+        <h1 className="text-3xl">Begin your study studio</h1>
         <p className="muted mt-2 text-sm">
-          Your topics, notes, assessments, and mastery progress are stored per authenticated account.
+          Your studies, notebook, assessments, and long-term progress memory stay with your account.
         </p>
 
         <form className="mt-6 space-y-3" onSubmit={onSubmit}>
@@ -73,7 +74,7 @@ export default function SignupPage() {
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
               maxLength={NAME_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="Your name"
               required
             />
@@ -87,7 +88,7 @@ export default function SignupPage() {
               onChange={(event) => setEmail(event.target.value)}
               type="email"
               maxLength={EMAIL_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="you@example.com"
               required
             />
@@ -101,7 +102,7 @@ export default function SignupPage() {
               type="password"
               minLength={PASSWORD_MIN}
               maxLength={PASSWORD_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="At least 8 characters"
               required
             />
@@ -110,7 +111,7 @@ export default function SignupPage() {
 
           <button
             type="submit"
-            className="w-full rounded-md bg-ink px-4 py-2 text-sm text-white disabled:opacity-60"
+            className="studio-button-primary w-full disabled:opacity-60"
             disabled={submitting}
           >
             {submitting ? 'Creating account...' : 'Create account'}

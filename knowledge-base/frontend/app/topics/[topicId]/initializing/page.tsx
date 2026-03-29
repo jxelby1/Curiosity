@@ -4,6 +4,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { getTopicInitializationStatus, startTopicInitialization } from '@/lib/api';
+import { PRODUCT_NAME } from '@/lib/brand';
 import { TopicInitializationStatus } from '@/lib/types';
 
 const FALLBACK_STEPS = [
@@ -34,8 +35,8 @@ const STAGE_HINTS: Record<string, string[]> = {
   path: ['Building your skill tree...', 'Mapping a sensible progression path...'],
   unlocks: ['Unlocking your first node sequence...', 'Preparing your entry path...'],
   lesson: ['Designing your first lesson...', 'Shaping clear learning objectives...'],
-  examples: ['Gathering practical examples...', 'Preparing concrete reference material...'],
-  activities: ['Preparing your first exercises...', 'Crafting high-signal practice activities...'],
+  examples: ['Gathering exemplar works...', 'Preparing concrete references for close observation...'],
+  activities: ['Preparing your first studio exercises...', 'Crafting high-signal try-it practice prompts...'],
   finalising: ['Connecting recommendations and milestones...', 'Final quality checks before launch...'],
   ready: ['Your first module is ready. Launching your workspace...'],
   preloading: ['Preparing extra lessons in the background...', 'Warming up likely next modules...'],
@@ -200,10 +201,10 @@ export default function TopicInitializingPage({ params }: { params: { topicId: s
     <main className="mx-auto flex min-h-[72vh] max-w-4xl items-center p-6 md:p-10">
       <section className="panel w-full overflow-hidden">
         <div className="border-b border-black/10 bg-white/70 p-6 md:p-8">
-          <p className="badge mb-3">Topic Builder</p>
-          <h1 className="text-2xl font-semibold md:text-3xl">Setting up your personalised topic</h1>
+          <p className="badge mb-3">Studio Setup</p>
+          <h1 className="text-2xl md:text-3xl">Preparing your studio path in {PRODUCT_NAME}</h1>
           <p className="muted mt-2 max-w-2xl text-sm md:text-base">
-            We are preparing your first lesson, examples, and activities so you can start immediately.
+            We are preparing your first lesson, exemplar set, and hands-on prompts so you can begin through practice, not just reading.
           </p>
         </div>
 

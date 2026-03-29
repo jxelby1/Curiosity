@@ -9,14 +9,18 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        ink: '#101321',
-        paper: '#f4f7ee',
-        moss: '#7ca982',
-        brass: '#c7a04f',
-        steel: '#455a64'
+        ink: '#1f2622',
+        paper: '#f7f2e7',
+        moss: '#3f6d59',
+        brass: '#9a7a42',
+        steel: '#51625a'
+      },
+      fontFamily: {
+        display: ['Canela', 'Iowan Old Style', 'Palatino Linotype', 'Book Antiqua', 'serif'],
+        sans: ['Avenir Next', 'Neue Haas Grotesk Text Pro', 'IBM Plex Sans', 'Segoe UI', 'sans-serif'],
       },
       boxShadow: {
-        panel: '0 10px 30px rgba(16, 19, 33, 0.12)'
+        panel: '0 24px 55px rgba(20, 26, 24, 0.11)'
       }
     }
   },

@@ -4,6 +4,7 @@ import Link from 'next/link';
 import { FormEvent, useState } from 'react';
 
 import { forgotPassword } from '@/lib/api';
+import { PRODUCT_NAME } from '@/lib/brand';
 
 const EMAIL_MAX = 255;
 
@@ -42,8 +43,8 @@ export default function ForgotPasswordPage() {
   return (
     <main className="mx-auto max-w-xl p-6 md:p-10">
       <section className="panel p-6 md:p-8">
-        <p className="badge mb-3">Password reset</p>
-        <h1 className="text-3xl font-semibold">Reset your password</h1>
+        <p className="badge mb-3">{PRODUCT_NAME}</p>
+        <h1 className="text-3xl">Reset your password</h1>
         <p className="muted mt-2 text-sm">Enter your email and we will help you set a new password.</p>
 
         <form className="mt-6 space-y-3" onSubmit={onSubmit}>
@@ -54,7 +55,7 @@ export default function ForgotPasswordPage() {
               onChange={(event) => setEmail(event.target.value)}
               type="email"
               maxLength={EMAIL_MAX}
-              className="w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+              className="studio-input"
               placeholder="you@example.com"
               required
             />
@@ -62,7 +63,7 @@ export default function ForgotPasswordPage() {
 
           <button
             type="submit"
-            className="w-full rounded-md bg-ink px-4 py-2 text-sm text-white disabled:opacity-60"
+            className="studio-button-primary w-full disabled:opacity-60"
             disabled={submitting}
           >
             {submitting ? 'Sending...' : 'Send reset instructions'}

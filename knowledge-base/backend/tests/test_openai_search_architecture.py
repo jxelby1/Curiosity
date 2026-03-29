@@ -67,3 +67,42 @@ def test_search_prefers_openai_web_provider_path() -> None:
 
     assert len(output) == 1
     assert output[0].source_domain == 'britannica.com'
+
+
+def test_search_images_keeps_direct_image_urls_even_when_kind_is_article() -> None:
+    service = ExternalSearchService()
+
+    async def fake_openai_web_search(**_: object) -> list[SearchResult]:
+        return [
+            SearchResult(
+                title='Street photography exemplar',
+                url='https://cdn.example.org/visuals/street-photography-exemplar.jpg',
+                kind='external_article',
+                summary='Direct image asset for composition study.',
+                source_domain='cdn.example.org',
+                relevance_score=0.74,
+            ),
+            SearchResult(
+                title='Wikimedia file',
+                url='https://commons.wikimedia.org/wiki/File:Chapter-1.jpg',
+                kind='external_image',
+                summary='Generic reference image',
+                source_domain='commons.wikimedia.org',
+                relevance_score=0.82,
+            ),
+        ]
+
+    service._search_with_openai_web = fake_openai_web_search  # type: ignore[assignment]
+    output = asyncio.run(
+        service.search_images(
+            topic='Photography with Intention',
+            skill='Light, Timing, and Editing',
+            query='street photography composition references',
+            limit=3,
+            source_policy='strict_media',
+        )
+    )
+
+    assert len(output) == 1
+    assert output[0].url.endswith('.jpg')
+    assert output[0].source_domain == 'cdn.example.org'

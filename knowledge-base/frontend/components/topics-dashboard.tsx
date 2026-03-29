@@ -22,11 +22,100 @@ import {
 } from '@/lib/course-options';
 import { formatDisplayTag } from '@/lib/display-format';
 import { derivePrimaryTopicNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
+import { PRODUCT_NAME } from '@/lib/brand';
 import { AssessmentStyle, CourseDepth, StartingSkillLevel, TechnicalDepth, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
 
 const TOPIC_NAME_MAX = 120;
 const TOPIC_DESC_MAX = 500;
 const TOPIC_GOAL_MAX = 500;
+
+type StudioStarter = {
+  area: string;
+  name: string;
+  goal: string;
+  description: string;
+  mode: TopicMode;
+};
+
+const STUDIO_TOPIC_STARTERS: StudioStarter[] = [
+  {
+    area: 'Art',
+    name: 'Modern Art Through 12 Works and Your Own Responses',
+    goal: 'Build a repeatable habit of observing one artwork closely, writing a short interpretation, and refining your taste.',
+    description: 'Study landmark works, compare interpretations, and create short response notes that connect form, feeling, and context.',
+    mode: 'factual',
+  },
+  {
+    area: 'Literature',
+    name: 'Reading Novels Through Passages and Voice',
+    goal: 'Develop a close-reading routine by annotating passages, comparing narrative voices, and testing interpretations.',
+    description: 'Work passage-by-passage with short comparison notes so theory supports what you actually notice in the text.',
+    mode: 'factual',
+  },
+  {
+    area: 'Philosophy',
+    name: 'Philosophy in Practice: Stoic and Buddhist Daily Exercises',
+    goal: 'Use philosophy as lived practice by comparing short texts and trying simple reflection exercises each week.',
+    description: 'Keep conceptual depth, but tie every concept to one concrete practice, interpretation, or decision in daily life.',
+    mode: 'factual',
+  },
+  {
+    area: 'Film',
+    name: 'Cinema Through Scenes: Framing, Rhythm, and Mood',
+    goal: 'Learn film appreciation by studying scenes, comparing directors, and capturing what each style makes you feel.',
+    description: 'Anchor each lesson in concrete stills and scene comparisons, then write short interpretation and response notes.',
+    mode: 'factual',
+  },
+  {
+    area: 'Music',
+    name: 'Listening Like a Curator: Jazz and Electronic Taste Building',
+    goal: 'Develop listening taste by building themed playlists, comparing tracks, and writing concise curation notes.',
+    description: 'Use theory as support while prioritizing listening practice, contrast drills, and personal taste articulation.',
+    mode: 'factual',
+  },
+  {
+    area: 'Architecture',
+    name: 'Architecture by Looking: Cities, Buildings, and Sketch Notes',
+    goal: 'Train architectural seeing through weekly building studies, quick sketches, and comparative place notes.',
+    description: 'Study exemplar buildings with context and lineage, then practice observation through photo-plus-sketch responses.',
+    mode: 'factual',
+  },
+  {
+    area: 'Photography',
+    name: 'Photograph with Intention: Light, Timing, and Editing',
+    goal: 'Build a practical photography routine: shoot, review contact sheets, compare choices, and iterate deliberately.',
+    description: 'Learn composition and visual storytelling through exemplar photos plus short weekly shooting prompts.',
+    mode: 'creative',
+  },
+  {
+    area: 'Writing',
+    name: 'Short Reflective Essays from Art and Place Notes',
+    goal: 'Grow a writing habit by turning observations from works, films, and places into concise reflective essays.',
+    description: 'Use exemplar passages for craft study, then produce short response drafts with focused revision loops.',
+    mode: 'creative',
+  },
+  {
+    area: 'Design',
+    name: 'Design Taste Studio: Interfaces, Posters, and Objects',
+    goal: 'Develop design taste by collecting references, running side-by-side critiques, and making small redesign responses.',
+    description: 'Train your eye for hierarchy, typography, and composition through concrete examples and practice prompts.',
+    mode: 'factual',
+  },
+  {
+    area: 'Cultural History',
+    name: 'Cultural Movements Through Works, Venues, and Scenes',
+    goal: 'Study a movement through artifacts and creators, then map influence using comparison and interpretation notes.',
+    description: 'Keep historical depth, but center real works, listening/viewing sessions, and reflective synthesis.',
+    mode: 'factual',
+  },
+  {
+    area: 'City and Place',
+    name: 'Creative Neighborhood Exploration Studio',
+    goal: 'Learn a city through visits, photos, sketches, and cultural notes that build your own place-based archive.',
+    description: 'Combine local observation with context and influence so place study feels lived, visual, and personal.',
+    mode: 'factual',
+  },
+];
 
 function pct(value: number): string {
   return `${Math.round(value * 100)}%`;
@@ -124,8 +213,8 @@ export function TopicsDashboard() {
   const primaryNextStep = useMemo(() => {
     if (!continueTopic) {
       return {
-        label: 'Create your first topic',
-        reason: 'Start one topic to begin your learning loop.',
+        label: 'Start your first study',
+        reason: 'Choose one focused study to begin your core learning rhythm.',
         href: '#create-topic-form',
         loopStep: 'learn' as const,
       };
@@ -222,7 +311,7 @@ export function TopicsDashboard() {
       });
       router.push(`/topics/${result.topic.id}/initializing`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to create topic');
+      setError(err instanceof Error ? err.message : 'Failed to start study');
     } finally {
       setCreating(false);
     }
@@ -247,20 +336,29 @@ export function TopicsDashboard() {
     }
   }
 
+  function applyStarter(starter: StudioStarter) {
+    setName(starter.name);
+    setGoal(starter.goal);
+    setDescription(starter.description);
+    setTopicMode(starter.mode);
+    setPlausibilityPrompt(null);
+    setError('');
+  }
+
   return (
     <main className="mx-auto w-full max-w-7xl p-6 md:p-10">
-      <section className="relative overflow-hidden rounded-2xl border border-black/10 bg-gradient-to-br from-[#eef4ff] via-[#f8f7f2] to-[#eef7ed] p-6 md:p-8">
+      <section className="relative overflow-hidden rounded-3xl border border-black/10 bg-gradient-to-br from-[#f9f5ea] via-[#f6f1e5] to-[#eef4ee] p-6 shadow-[0_24px_50px_rgba(20,26,24,0.1)] md:p-8">
         <div className="absolute -right-16 -top-20 h-56 w-56 rounded-full bg-ink/10 blur-3xl" />
         <div className="absolute -left-20 bottom-[-60px] h-52 w-52 rounded-full bg-emerald-300/20 blur-3xl" />
 
         <div className="relative grid gap-6 lg:grid-cols-[1.3fr_1fr]">
           <div>
-            <p className="badge mb-3">Learning home</p>
-            <h1 className="text-3xl font-semibold leading-tight md:text-4xl">
+            <p className="badge mb-3">{PRODUCT_NAME} Studio</p>
+            <h1 className="text-3xl leading-tight md:text-4xl">
               Welcome back{user?.display_name ? `, ${user.display_name}` : ''}.
             </h1>
             <p className="mt-3 max-w-2xl text-sm text-black/70 md:text-base">
-              Pick up your momentum with clear next steps, balanced progression, and evolving topic trees.
+              Continue with one clear next move, selective branching, and a practical creative rhythm.
             </p>
             <div className="mt-4 rounded-xl border border-black/10 bg-white/80 p-3">
               <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
@@ -287,7 +385,7 @@ export function TopicsDashboard() {
               {continueTopic ? (
                 <Link
                   href={primaryNextStep.href}
-                  className="rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white"
+                  className="studio-button-primary px-4 py-2 text-sm"
                 >
                   {primaryNextStep.label}
                 </Link>
@@ -295,12 +393,12 @@ export function TopicsDashboard() {
                 <button
                   type="button"
                   onClick={() => document.getElementById('create-topic-form')?.scrollIntoView({ behavior: 'smooth' })}
-                  className="rounded-lg bg-ink px-4 py-2 text-sm font-medium text-white"
+                  className="studio-button-primary px-4 py-2 text-sm"
                 >
-                  Create your first topic
+                  Start your first study
                 </button>
               )}
-              <Link href="/garden" className="rounded-lg border border-black/20 bg-white/90 px-4 py-2 text-sm">
+              <Link href="/garden" className="studio-button-secondary px-4 py-2 text-sm">
                 View garden
               </Link>
               {!user?.dev_tools_enabled && (
@@ -325,7 +423,7 @@ export function TopicsDashboard() {
           </div>
 
           <article className="rounded-xl border border-black/10 bg-white/80 p-4 backdrop-blur-sm">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/60">Progress snapshot</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/60">Studio pulse</h2>
             {loading ? (
               <div className="mt-3 space-y-2">
                 <div className="skeleton h-12 w-full" />
@@ -335,7 +433,7 @@ export function TopicsDashboard() {
             ) : (
               <div className="mt-3 grid gap-2 sm:grid-cols-3 lg:grid-cols-1">
                 <div className="rounded-lg border border-black/10 bg-white p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-black/55">Topics</p>
+                  <p className="text-xs uppercase tracking-[0.12em] text-black/55">Studies</p>
                   <p className="mt-1 text-xl font-semibold">{progressSummary?.topics_total ?? topics.length}</p>
                 </div>
                 <div className="rounded-lg border border-black/10 bg-white p-3">
@@ -358,8 +456,8 @@ export function TopicsDashboard() {
         <article className="panel p-6">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-semibold">Active topics</h2>
-              <p className="muted mt-1 text-sm">Your current learning paths and their growth state.</p>
+              <h2 className="text-xl font-semibold">Active studies</h2>
+              <p className="muted mt-1 text-sm">Your current study paths and how they are maturing.</p>
             </div>
             <button className="text-sm underline underline-offset-4" onClick={loadDashboard}>
               Refresh
@@ -376,26 +474,26 @@ export function TopicsDashboard() {
 
           {!loading && topics.length === 0 && (
             <article className="rounded-xl border border-black/10 bg-gradient-to-br from-white to-[#eef6ec] p-5">
-              <p className="text-xs uppercase tracking-[0.14em] text-black/55">First steps</p>
-              <h3 className="mt-2 text-xl font-semibold">Your learning tree starts here.</h3>
+              <p className="text-xs uppercase tracking-[0.14em] text-black/55">First study</p>
+              <h3 className="mt-2 text-xl font-semibold">Your core trunk starts here.</h3>
               <p className="mt-2 text-sm text-black/70">
-                Create one topic to unlock your guided path, exercises, and progress journal in a single flow.
+                Start one focused study to unlock exemplar-led lessons, comparison prompts, creative practice, and notebook memory.
               </p>
               <div className="mt-4 grid gap-2 sm:grid-cols-3">
                 <div className="rounded-lg border border-black/10 bg-white p-3">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">1. Pick a topic</p>
-                  <p className="mt-1 text-xs text-black/70">Start with one clear learning goal.</p>
+                  <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">1. Choose a study</p>
+                    <p className="mt-1 text-xs text-black/70">Anchor it in one concrete cultural or creative question.</p>
+                  </div>
+                  <div className="rounded-lg border border-black/10 bg-white p-3">
+                    <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">2. Enter the studio</p>
+                    <p className="mt-1 text-xs text-black/70">Your first lesson includes exemplars, observation prompts, and practice hooks.</p>
+                  </div>
+                  <div className="rounded-lg border border-black/10 bg-white p-3">
+                    <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">3. Build taste</p>
+                    <p className="mt-1 text-xs text-black/70">Practice, compare, collect references, and grow your study tree over time.</p>
+                  </div>
                 </div>
-                <div className="rounded-lg border border-black/10 bg-white p-3">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">2. Enter your path</p>
-                  <p className="mt-1 text-xs text-black/70">Your first lesson and examples are prepared automatically.</p>
-                </div>
-                <div className="rounded-lg border border-black/10 bg-white p-3">
-                  <p className="text-[11px] uppercase tracking-[0.12em] text-black/55">3. Build momentum</p>
-                  <p className="mt-1 text-xs text-black/70">Complete nodes, unlock branches, and grow your garden.</p>
-                </div>
-              </div>
-            </article>
+              </article>
           )}
 
           {topics.length > 0 && (
@@ -427,11 +525,11 @@ export function TopicsDashboard() {
                         {item.verified_nodes}/{item.total_nodes} verified · mastery {pct(item.mastery_average)}
                       </p>
                       {topic && (
-                      <p className="text-xs text-black/60">
-                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {formatDisplayTag(topic.technical_depth)} depth · {topic.assessment_styles.length} Assessment Styles
-                      </p>
-                    )}
-                  </div>
+                        <p className="text-xs text-black/60">
+                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {formatDisplayTag(topic.technical_depth)} depth · {topic.assessment_styles.length} assessment styles
+                        </p>
+                      )}
+                    </div>
                   </Link>
                 );
               })}
@@ -440,16 +538,36 @@ export function TopicsDashboard() {
         </article>
 
         <article id="create-topic-form" className="panel p-6">
-          <h2 className="mb-2 text-xl font-semibold">Create a new topic</h2>
+          <h2 className="mb-2 text-xl font-semibold">Start a new study path</h2>
           <p className="muted mb-4 text-sm">
-            Start with one clear learning goal. We&apos;ll prepare a strong default path and you can customize if needed.
+            Frame one meaningful creative practice or cultural inquiry. We&apos;ll prepare a coherent path you can refine through doing.
           </p>
           <form className="space-y-3" onSubmit={onCreateTopic}>
+            <div className="rounded-xl border border-black/10 bg-white/85 p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Studio starters</p>
+              <p className="mt-1 text-xs text-black/68">
+                Practice-forward starters across art, literature, philosophy, film, music, design, and place-based exploration.
+              </p>
+              <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                {STUDIO_TOPIC_STARTERS.map((starter) => (
+                  <button
+                    key={starter.name}
+                    type="button"
+                    className="rounded-md border border-black/15 bg-white px-3 py-2 text-left text-xs transition hover:border-black/30"
+                    onClick={() => applyStarter(starter)}
+                  >
+                    <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">{starter.area}</p>
+                    <p className="mt-1 font-semibold text-black/84">{starter.name}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
             <input
               value={name}
               onChange={(event) => setName(event.target.value)}
               className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="Topic (e.g. Python debugging)"
+              placeholder="Study title (e.g. Photographing your city with stronger composition)"
               maxLength={TOPIC_NAME_MAX}
               required
             />
@@ -459,7 +577,7 @@ export function TopicsDashboard() {
               value={goal}
               onChange={(event) => setGoal(event.target.value)}
               className="min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="What do you want to be able to do? (optional)"
+              placeholder="What practice, taste, or creative ability do you want to build over the next few weeks?"
               maxLength={TOPIC_GOAL_MAX}
             />
             <p className="text-right text-xs text-black/60">{goal.length}/{TOPIC_GOAL_MAX}</p>
@@ -469,9 +587,9 @@ export function TopicsDashboard() {
                 <div>
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Quick start defaults</p>
                   <p className="mt-1 text-sm text-black/75">
-                    Factual topic, standard course, beginner start, intermediate depth, and multiple-choice assessment by default.
+                    Grounded mode, standard depth, beginner start, and a balanced loop of exemplars, practice, and verification.
                   </p>
-                  <p className="mt-1 text-xs text-black/60">You can customize before creating if you want finer control.</p>
+                  <p className="mt-1 text-xs text-black/60">Refine framing and rigor before starting if you want tighter control.</p>
                 </div>
                 <button
                   type="button"
@@ -505,7 +623,7 @@ export function TopicsDashboard() {
               <div className="rounded-xl border border-black/10 bg-black/[0.02] p-3">
                 <h3 className="text-sm font-semibold">Advanced options</h3>
                 <p className="muted mt-1 text-xs">
-                  Tune topic framing and learning controls. Defaults are optimized for a strong first run.
+                  Tune framing and study controls. Defaults are calibrated for a calm, high-signal first run.
                 </p>
 
                 <div className="mt-3">
@@ -514,7 +632,7 @@ export function TopicsDashboard() {
                     value={description}
                     onChange={(event) => setDescription(event.target.value)}
                     className="mt-2 min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-                    placeholder="Optional context for better curriculum targeting"
+                    placeholder="Optional context (period, movement, works, creators, place, or interpretive lens)"
                     maxLength={TOPIC_DESC_MAX}
                   />
                   <p className="mt-1 text-right text-xs text-black/60">{description.length}/{TOPIC_DESC_MAX}</p>
@@ -524,10 +642,10 @@ export function TopicsDashboard() {
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Topic framing</p>
                   <div className="mt-2 flex flex-wrap gap-2">
                     {[
-                      { value: 'factual', label: 'Factual' },
-                      { value: 'fictional', label: 'Fictional' },
-                      { value: 'hypothetical', label: 'Hypothetical' },
-                      { value: 'creative', label: 'Creative' },
+                      { value: 'factual', label: 'Grounded' },
+                      { value: 'fictional', label: 'Invented World' },
+                      { value: 'hypothetical', label: 'Speculative' },
+                      { value: 'creative', label: 'Creative Practice' },
                     ].map((item) => (
                       <button
                         key={item.value}
@@ -547,7 +665,7 @@ export function TopicsDashboard() {
                     ))}
                   </div>
                   <p className="mt-2 text-xs text-black/60">
-                    Keep factual for real-world topics. Use fictional or hypothetical framing for creative scenarios.
+                    Use grounded for real works and histories. Use speculative or creative framing for invention and studio exercises.
                   </p>
                 </div>
 
@@ -613,7 +731,7 @@ export function TopicsDashboard() {
                     ))}
                   </div>
                   <p className="mt-2 text-xs text-black/60">
-                    Controls how rigorous lessons, examples, and assessments should be.
+                    Controls how rigorous lessons, exemplars, and assessments should be.
                   </p>
                 </div>
 
@@ -685,8 +803,8 @@ export function TopicsDashboard() {
               <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm">
                 <p className="font-semibold text-amber-900">
                   {plausibilityPrompt.status === 'needs_context'
-                    ? 'This topic needs more grounding context'
-                    : 'This topic may need clarification'}
+                    ? 'This study needs stronger grounding'
+                    : 'This framing may need clarification'}
                 </p>
                 <p className="mt-1 text-amber-900/90">{plausibilityPrompt.reason}</p>
                 {plausibilityPrompt.suggested_reframe && (
@@ -715,7 +833,7 @@ export function TopicsDashboard() {
                       void runTopicCreation('fictional', true);
                     }}
                   >
-                    Continue as fictional
+                    Continue as invented world
                   </button>
                   <button
                     type="button"
@@ -726,7 +844,7 @@ export function TopicsDashboard() {
                       void runTopicCreation('hypothetical', true);
                     }}
                   >
-                    Continue as hypothetical
+                    Continue as speculative
                   </button>
                 </div>
               </div>
@@ -737,7 +855,7 @@ export function TopicsDashboard() {
               disabled={creating}
               className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60"
             >
-              {creating ? 'Creating topic...' : 'Create topic'}
+              {creating ? 'Starting study...' : 'Start study'}
             </button>
           </form>
         </article>

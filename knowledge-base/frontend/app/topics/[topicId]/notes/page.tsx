@@ -31,12 +31,74 @@ import { NotesWorkspaceSkeleton } from '@/components/page-skeletons';
 import { ProofArtifactViewer } from '@/components/proof-artifact-viewer';
 
 const NOTE_TYPE_OPTIONS: Array<{ value: NoteType; label: string }> = [
-  { value: 'personal', label: 'Personal note' },
-  { value: 'lesson', label: 'Lesson note' },
-  { value: 'summary', label: 'Summary' },
+  { value: 'personal', label: 'Notebook note' },
+  { value: 'lesson', label: 'Study note' },
+  { value: 'summary', label: 'Synthesis' },
   { value: 'reflection', label: 'Reflection' },
-  { value: 'reminder', label: 'Reminder' }
+  { value: 'reminder', label: 'Next-step prompt' }
 ];
+type NotebookLens = 'reflection' | 'comparison' | 'exemplar' | 'interpretation' | 'view_shift' | 'next_thread';
+const NOTE_LENS_OPTIONS: Array<{
+  tag: NotebookLens;
+  label: string;
+  noteType: NoteType;
+  promptTitle: string;
+  starter: string;
+}> = [
+  {
+    tag: 'reflection',
+    label: 'Reflection',
+    noteType: 'reflection',
+    promptTitle: 'Reflection',
+    starter: 'What became clearer today?\n- \nWhat still feels unresolved?\n- ',
+  },
+  {
+    tag: 'comparison',
+    label: 'Comparison',
+    noteType: 'summary',
+    promptTitle: 'Comparison',
+    starter: 'Compare two works or interpretations:\n- Similarities:\n- Differences:\n- Why the contrast matters:',
+  },
+  {
+    tag: 'exemplar',
+    label: 'Saved Exemplar',
+    noteType: 'lesson',
+    promptTitle: 'Exemplar',
+    starter: 'Work or artifact:\nContext:\nWhat to study closely:\nWhy this is a reference point:',
+  },
+  {
+    tag: 'interpretation',
+    label: 'Interpretation',
+    noteType: 'summary',
+    promptTitle: 'Interpretation',
+    starter: 'My interpretation:\nEvidence from the work:\nAlternative reading worth considering:',
+  },
+  {
+    tag: 'view_shift',
+    label: 'What Changed My View',
+    noteType: 'reflection',
+    promptTitle: 'View shift',
+    starter: 'What changed my view:\nWhat triggered the shift:\nWhat I now notice differently:',
+  },
+  {
+    tag: 'next_thread',
+    label: 'Explore Next',
+    noteType: 'reminder',
+    promptTitle: 'Explore next',
+    starter: 'What I want to explore next:\nWhy this thread matters now:\nFirst concrete step:',
+  },
+];
+
+const JOURNAL_LENS_FILTERS: Array<{ id: 'all' | NotebookLens; label: string }> = [
+  { id: 'all', label: 'All entries' },
+  { id: 'reflection', label: 'Reflections' },
+  { id: 'comparison', label: 'Comparisons' },
+  { id: 'exemplar', label: 'Exemplars' },
+  { id: 'interpretation', label: 'Interpretations' },
+  { id: 'view_shift', label: 'View shifts' },
+  { id: 'next_thread', label: 'Explore next' },
+];
+
 const NOTE_TITLE_MAX = 120;
 const NOTE_BODY_MAX = 8000;
 
@@ -59,6 +121,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [body, setBody] = useState('');
   const [noteType, setNoteType] = useState<NoteType>('personal');
   const [linkedSkillId, setLinkedSkillId] = useState<string>('');
+  const [noteTags, setNoteTags] = useState<string[]>([]);
   const [isEditingNote, setIsEditingNote] = useState(false);
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
@@ -71,6 +134,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const [uploadingDocument, setUploadingDocument] = useState(false);
   const [deletingDocumentId, setDeletingDocumentId] = useState<number | null>(null);
   const [error, setError] = useState('');
+  const [journalLensFilter, setJournalLensFilter] = useState<'all' | NotebookLens>('all');
 
   const selectedNote = useMemo(
     () => (selectedNoteId ? notes.find((note) => note.id === selectedNoteId) || null : null),
@@ -169,7 +233,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       setJournalChapters(journal.chapters || []);
       setJournalSummary(journal.summary || null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load project journal');
+      setError(err instanceof Error ? err.message : 'Failed to load study notebook timeline');
     } finally {
       setLoadingJournal(false);
     }
@@ -188,6 +252,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody(selectedNote.body);
     setNoteType(selectedNote.note_type);
     setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+    setNoteTags(normalizeTags(selectedNote.tags || []));
     setIsEditingNote(false);
   }, [selectedNote]);
 
@@ -197,6 +262,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody('');
     setNoteType('personal');
     setLinkedSkillId('');
+    setNoteTags([]);
     setIsEditingNote(true);
   }
 
@@ -206,6 +272,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     setBody(selectedNote.body);
     setNoteType(selectedNote.note_type);
     setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+    setNoteTags(normalizeTags(selectedNote.tags || []));
     setIsEditingNote(true);
   }
 
@@ -215,6 +282,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       setBody(selectedNote.body);
       setNoteType(selectedNote.note_type);
       setLinkedSkillId(selectedNote.skill_node_id ? String(selectedNote.skill_node_id) : '');
+      setNoteTags(normalizeTags(selectedNote.tags || []));
       setIsEditingNote(false);
       return;
     }
@@ -222,14 +290,72 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   }
 
   function journalEntryLabel(entry: TopicJournalEntry): string {
-    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'created') return 'Note created';
-    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'updated') return 'Note updated';
+    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'created') return 'Entry added';
+    if (entry.entry_type === 'note' && entry.metadata?.note_event === 'updated') return 'Entry revised';
     if (entry.entry_type === 'exercise') return 'Evidence';
     if (entry.entry_type === 'assessment') return 'Verification';
     if (entry.entry_type === 'module') return 'Progress';
     if (entry.entry_type === 'milestone') return 'Milestone';
     if (entry.entry_type === 'branch') return 'Branch decision';
-    return 'Note';
+    return 'Entry';
+  }
+
+  function normalizeTags(tags: string[]): string[] {
+    const unique = new Set<string>();
+    for (const tag of tags) {
+      const normalized = tag.trim().toLowerCase();
+      if (!normalized) continue;
+      unique.add(normalized);
+    }
+    return Array.from(unique).slice(0, 12);
+  }
+
+  function toggleNoteTag(tag: NotebookLens) {
+    setNoteTags((prev) => {
+      const current = new Set(prev);
+      if (current.has(tag)) current.delete(tag);
+      else current.add(tag);
+      return normalizeTags(Array.from(current));
+    });
+  }
+
+  function applyNotebookLens(tag: NotebookLens) {
+    const lens = NOTE_LENS_OPTIONS.find((item) => item.tag === tag);
+    if (!lens) return;
+    setNoteType(lens.noteType);
+    setNoteTags((prev) => normalizeTags([...prev, lens.tag]));
+    if (!title.trim()) setTitle(lens.promptTitle);
+    setBody((prev) => {
+      const trimmed = prev.trim();
+      if (!trimmed) return lens.starter;
+      if (trimmed.includes(lens.starter.split('\n')[0])) return prev;
+      return `${prev.trim()}\n\n${lens.starter}`;
+    });
+    setIsEditingNote(true);
+  }
+
+  function entryTags(entry: TopicJournalEntry): string[] {
+    const raw = entry.metadata?.tags;
+    if (!Array.isArray(raw)) return [];
+    return normalizeTags(raw.map((item) => String(item)));
+  }
+
+  function entryMatchesLens(entry: TopicJournalEntry, lens: 'all' | NotebookLens): boolean {
+    if (lens === 'all') return true;
+    return entryTags(entry).includes(lens);
+  }
+
+  function journalLensCount(lens: 'all' | NotebookLens): number {
+    if (!journalSummary) {
+      return lens === 'all' ? journalEntries.length : 0;
+    }
+    if (lens === 'all') return journalSummary.total_entries;
+    if (lens === 'reflection') return journalSummary.reflections_logged;
+    if (lens === 'comparison') return journalSummary.comparisons_logged;
+    if (lens === 'exemplar') return journalSummary.exemplars_saved;
+    if (lens === 'interpretation') return journalSummary.interpretations_logged;
+    if (lens === 'view_shift') return journalSummary.view_shifts_logged;
+    return journalSummary.next_threads_logged;
   }
 
   async function onSaveNote(event: FormEvent<HTMLFormElement>) {
@@ -250,7 +376,8 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
         title: title.trim(),
         body: body.trim(),
         note_type: noteType,
-        skill_node_id: linkedSkillId ? Number(linkedSkillId) : null
+        skill_node_id: linkedSkillId ? Number(linkedSkillId) : null,
+        tags: normalizeTags(noteTags),
       };
 
       if (selectedNoteId) {
@@ -334,7 +461,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
 
   return (
     <main className="mx-auto max-w-7xl p-6 md:p-10">
-      <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Personal notes and learning materials" />
+      <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Notebook, commonplace archive, and source materials" />
 
       <div className="mb-4 flex flex-wrap gap-2">
         <button
@@ -344,7 +471,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('journal')}
         >
-          Project journal
+          Notebook timeline
         </button>
         <button
           type="button"
@@ -353,7 +480,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('notes')}
         >
-          Notes editor
+          Notebook editor
         </button>
         <button
           type="button"
@@ -362,7 +489,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('documents')}
         >
-          Source documents
+          Source materials
         </button>
       </div>
 
@@ -370,14 +497,14 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
         <section className="panel p-5">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-lg font-semibold">Topic project book</h2>
+              <h2 className="text-lg font-semibold">Commonplace timeline</h2>
               <p className="muted mt-1 text-sm">
-                Your persistent learning memory: evidence, reflection, branch decisions, and milestone progress.
+                Your commonplace timeline: evidence, reflection, branch decisions, and turning points in understanding.
               </p>
             </div>
             <button
               type="button"
-              className="rounded-md border border-black/15 bg-white px-3 py-1.5 text-xs"
+              className="studio-button-secondary px-3 py-1.5 text-xs"
               onClick={loadJournal}
             >
               Refresh
@@ -385,7 +512,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           </div>
 
           {journalSummary && (
-            <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
               <article className="rounded-lg border border-black/10 bg-white p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-black/55">Evidence</p>
                 <p className="mt-1 text-lg font-semibold">
@@ -418,13 +545,48 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                   {journalSummary.branches_rejected} dismissed · {journalSummary.notes_created} notes created
                 </p>
               </article>
-              <article className="sm:col-span-2 lg:col-span-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Notebook signals</p>
+                <p className="mt-1 text-lg font-semibold">
+                  {journalSummary.reflections_logged} reflections
+                </p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.comparisons_logged} comparisons · {journalSummary.interpretations_logged} interpretations
+                </p>
+              </article>
+              <article className="rounded-lg border border-black/10 bg-white p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-black/55">Taste development</p>
+                <p className="mt-1 text-lg font-semibold">
+                  {journalSummary.view_shifts_logged} view shifts
+                </p>
+                <p className="mt-1 text-xs text-black/62">
+                  {journalSummary.exemplars_saved} exemplars · {journalSummary.next_threads_logged} next threads
+                </p>
+              </article>
+              <article className="sm:col-span-2 lg:col-span-3 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-emerald-900/70">Reflection cue</p>
                 <p className="mt-1 text-sm text-emerald-900">{journalSummary.reflection_prompt}</p>
                 <p className="mt-1 text-xs text-emerald-900/75">{journalSummary.growth_signal}</p>
               </article>
             </div>
           )}
+
+          <div className="mb-4 flex flex-wrap gap-2">
+            {JOURNAL_LENS_FILTERS.map((filter) => (
+              <button
+                key={filter.id}
+                type="button"
+                className={`rounded-full border px-3 py-1 text-xs ${
+                  journalLensFilter === filter.id
+                    ? 'border-ink bg-ink text-white'
+                    : 'border-black/15 bg-white text-black/75'
+                }`}
+                onClick={() => setJournalLensFilter(filter.id)}
+              >
+                {filter.label} ({journalLensCount(filter.id)})
+              </button>
+            ))}
+          </div>
 
           <div className="space-y-3">
             {loadingJournal && journalEntries.length === 0 && (
@@ -433,57 +595,71 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                 <div className="skeleton h-16 w-full" />
               </>
             )}
-            {journalEntriesByChapter.map(({ chapter, entries }) => (
-              <section key={chapter.id} className="rounded-xl border border-black/10 bg-white/70 p-3">
-                <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="text-sm font-semibold">{chapter.label}</p>
-                    <p className="text-xs text-black/65">
-                      {chapter.entry_count} entries · {chapter.evidence_count} direct evidence · {chapter.focus}
-                    </p>
+            {journalEntriesByChapter.map(({ chapter, entries }) => {
+              const filteredEntries = entries.filter((entry) => entryMatchesLens(entry, journalLensFilter));
+              if (filteredEntries.length === 0) return null;
+              return (
+                <section key={chapter.id} className="rounded-xl border border-black/10 bg-white/70 p-3">
+                  <header className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold">{chapter.label}</p>
+                      <p className="text-xs text-black/65">
+                        {filteredEntries.length} entries ·{' '}
+                        {filteredEntries.filter((entry) => entry.evidence_strength === 'direct').length} direct evidence · {chapter.focus}
+                      </p>
+                    </div>
+                    <span className="text-[11px] text-black/55">
+                      {new Date(chapter.started_at).toLocaleDateString()}
+                    </span>
+                  </header>
+                  <div className="space-y-3">
+                    {filteredEntries.map((entry) => (
+                      <article key={entry.id} className="rounded-lg border border-black/10 bg-white p-4">
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="text-sm font-semibold">{entry.title}</p>
+                            <p className="muted mt-1 text-xs">
+                              {journalEntryLabel(entry)}
+                              {entry.skill_name ? ` · ${entry.skill_name}` : ''}
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
+                                entry.evidence_strength === 'direct'
+                                  ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
+                                  : entry.evidence_strength === 'derived'
+                                  ? 'border-amber-300 bg-amber-50 text-amber-800'
+                                  : 'border-black/20 bg-black/[0.03] text-black/60'
+                              }`}
+                            >
+                              {formatDisplayTag(entry.evidence_strength)}
+                            </span>
+                            <span className="text-[11px] text-black/60">{new Date(entry.occurred_at).toLocaleString()}</span>
+                          </div>
+                        </div>
+                        <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
+                        {entryTags(entry).length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {entryTags(entry).slice(0, 4).map((tag) => (
+                              <span key={`${entry.id}-${tag}`} className="badge border border-black/15 bg-white text-black/70">
+                                {formatDisplayTag(tag)}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                        {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
+                          <ProofArtifactViewer proofUrl={String(entry.metadata.proof_url)} />
+                        )}
+                      </article>
+                    ))}
                   </div>
-                  <span className="text-[11px] text-black/55">
-                    {new Date(chapter.started_at).toLocaleDateString()}
-                  </span>
-                </header>
-                <div className="space-y-3">
-                  {entries.map((entry) => (
-                    <article key={entry.id} className="rounded-lg border border-black/10 bg-white p-4">
-                      <div className="flex flex-wrap items-start justify-between gap-2">
-                        <div>
-                          <p className="text-sm font-semibold">{entry.title}</p>
-                          <p className="muted mt-1 text-xs">
-                            {journalEntryLabel(entry)}
-                            {entry.skill_name ? ` · ${entry.skill_name}` : ''}
-                          </p>
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span
-                            className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${
-                              entry.evidence_strength === 'direct'
-                                ? 'border-emerald-300 bg-emerald-50 text-emerald-800'
-                                : entry.evidence_strength === 'derived'
-                                ? 'border-amber-300 bg-amber-50 text-amber-800'
-                                : 'border-black/20 bg-black/[0.03] text-black/60'
-                            }`}
-                          >
-                            {formatDisplayTag(entry.evidence_strength)}
-                          </span>
-                          <span className="text-[11px] text-black/60">{new Date(entry.occurred_at).toLocaleString()}</span>
-                        </div>
-                      </div>
-                      <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
-                      {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
-                        <ProofArtifactViewer proofUrl={String(entry.metadata.proof_url)} />
-                      )}
-                    </article>
-                  ))}
-                </div>
-              </section>
-            ))}
-            {!loadingJournal && journalEntries.length === 0 && (
+                </section>
+              );
+            })}
+            {!loadingJournal && journalEntries.filter((entry) => entryMatchesLens(entry, journalLensFilter)).length === 0 && (
               <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
-                Your project book will populate as you complete lessons, record notes, verify skills, and upload proof.
+                No entries yet for this notebook lens. Try capturing a note with one of the notebook templates.
               </p>
             )}
           </div>
@@ -494,9 +670,9 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
         <section className="grid gap-6 xl:grid-cols-[0.95fr_1.25fr]">
           <article className="panel p-5">
             <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">My Notes</h2>
+              <h2 className="text-lg font-semibold">Notebook entries</h2>
               <button className="text-xs underline underline-offset-4" onClick={resetEditorForNewNote}>
-                New note
+                New entry
               </button>
             </div>
 
@@ -506,7 +682,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                 onChange={(event) => setSearchInput(event.target.value)}
                 onBlur={() => setSearchQuery(searchInput.trim())}
                 className="w-full rounded-lg border border-black/15 bg-white px-3 py-2 text-sm"
-                placeholder="Search notes..."
+                placeholder="Search notebook..."
               />
               <button
                 className="rounded-lg border border-black/15 bg-white px-3 py-2 text-xs"
@@ -542,6 +718,11 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                     <div className="flex items-center gap-1">
                       <span className="badge">{formatDisplayTag(note.note_type)}</span>
                       <span className="badge">{formatDisplayTag(note.source_type)}</span>
+                      {note.tags.slice(0, 2).map((tag) => (
+                        <span key={`${note.id}-${tag}`} className="badge border border-black/15 bg-white text-black/70">
+                          {formatDisplayTag(tag)}
+                        </span>
+                      ))}
                     </div>
                     <span className="text-[11px] text-black/60">{new Date(note.updated_at).toLocaleDateString()}</span>
                   </div>
@@ -549,7 +730,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
               ))}
               {!loadingNotes && notes.length === 0 && (
                 <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
-                  No notes yet. Create your first learning note.
+                  No entries yet. Create your first notebook entry.
                 </p>
               )}
             </div>
@@ -564,14 +745,23 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                     <p className="muted mt-1 text-sm">
                       {formatDisplayTag(selectedNote.note_type)} · {new Date(selectedNote.updated_at).toLocaleString()}
                     </p>
+                    {selectedNote.tags.length > 0 && (
+                      <div className="mt-2 flex flex-wrap gap-1.5">
+                        {selectedNote.tags.map((tag) => (
+                          <span key={`${selectedNote.id}-tag-${tag}`} className="badge border border-black/15 bg-white text-black/70">
+                            {formatDisplayTag(tag)}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      className="rounded-lg border border-black/20 bg-white px-3 py-1.5 text-sm"
-                      onClick={beginEditingSelectedNote}
-                    >
-                      Edit note
+                  <button
+                    type="button"
+                    className="studio-button-secondary px-3 py-1.5 text-sm"
+                    onClick={beginEditingSelectedNote}
+                  >
+                    Edit entry
                     </button>
                     <button
                       type="button"
@@ -589,8 +779,8 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
               </>
             ) : (
               <>
-                <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit Note' : 'Create Note'}</h2>
-                <p className="muted mt-1 text-sm">Use notes for takeaways, reflections, and reminders tied to this topic.</p>
+                <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit entry' : 'Create entry'}</h2>
+                <p className="muted mt-1 text-sm">Capture takeaways, comparisons, interpretations, and what changed your view.</p>
 
                 <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
                   <input
@@ -629,18 +819,60 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                     </select>
                   </div>
 
+                  <div className="rounded-lg border border-black/10 bg-white p-3">
+                    <p className="text-xs uppercase tracking-[0.12em] text-black/58">Quick Notebook Templates</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {NOTE_LENS_OPTIONS.map((lens) => (
+                        <button
+                          key={`template-${lens.tag}`}
+                          type="button"
+                          className="rounded-full border border-black/15 bg-white px-3 py-1 text-xs text-black/75 hover:bg-black/[0.03]"
+                          onClick={() => applyNotebookLens(lens.tag)}
+                        >
+                          {lens.label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-2 text-[11px] text-black/58">
+                      Templates seed reflection/comparison/exemplar structures, and add matching notebook tags.
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-black/10 bg-white p-3">
+                    <p className="text-xs uppercase tracking-[0.12em] text-black/58">Notebook Tags</p>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {NOTE_LENS_OPTIONS.map((lens) => {
+                        const active = noteTags.includes(lens.tag);
+                        return (
+                          <button
+                            key={`tag-${lens.tag}`}
+                            type="button"
+                            className={`rounded-full border px-3 py-1 text-xs ${
+                              active
+                                ? 'border-ink bg-ink text-white'
+                                : 'border-black/15 bg-white text-black/75'
+                            }`}
+                            onClick={() => toggleNoteTag(lens.tag)}
+                          >
+                            {lens.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   <textarea
                     value={body}
                     onChange={(event) => setBody(event.target.value)}
                     className="min-h-[260px] w-full rounded-lg border border-black/15 bg-white p-3 text-sm"
-                    placeholder="Write notes, takeaways, reflections, reminders, or summaries..."
+                    placeholder="Write notes, reflections, comparisons, exemplars, or next exploration threads..."
                     maxLength={NOTE_BODY_MAX}
                   />
                   <p className="text-right text-xs text-black/60">{body.length}/{NOTE_BODY_MAX}</p>
 
                   <div className="flex flex-wrap gap-2">
                     <button className="rounded-lg bg-ink px-4 py-2 text-sm text-white disabled:opacity-60" disabled={savingNote}>
-                      {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create note'}
+                      {savingNote ? 'Saving...' : selectedNoteId ? 'Save changes' : 'Create entry'}
                     </button>
                     {selectedNoteId && (
                       <>
@@ -673,12 +905,11 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
       {activeView === 'documents' && (
         <section className="panel p-5">
           <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Source Documents</h2>
+            <h2 className="text-lg font-semibold">Source materials</h2>
             <span className="badge">Optional</span>
           </div>
           <p className="muted mt-1 text-sm">
-            Source documents are reference material for retrieval-grounded tutoring and generation. Personal notes and
-            project-journal records remain separate.
+            Source materials support retrieval-grounded study dialogue and generation. Notebook entries remain separate.
           </p>
 
           <form className="mt-4 space-y-3" onSubmit={onUploadDocument}>
@@ -692,7 +923,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
               className="rounded-lg border border-black/20 bg-white px-4 py-2 text-sm disabled:opacity-60"
               disabled={uploadingDocument || !uploadFile}
             >
-              {uploadingDocument ? 'Uploading...' : 'Upload document'}
+              {uploadingDocument ? 'Uploading...' : 'Upload source'}
             </button>
           </form>
 
@@ -723,7 +954,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
             ))}
             {!loadingDocuments && documents.length === 0 && (
               <p className="muted rounded-lg border border-dashed border-black/15 bg-white p-4 text-sm">
-                No source documents uploaded yet.
+                No source materials uploaded yet.
               </p>
             )}
           </div>
