@@ -82,6 +82,7 @@ class Topic(Base):
     goal: Mapped[str] = mapped_column(Text, default='')
     course_depth: Mapped[str] = mapped_column(String(30), default='standard')
     starting_skill_level: Mapped[str] = mapped_column(String(30), default='beginner')
+    technical_depth: Mapped[str] = mapped_column(String(30), default='intermediate')
     allowed_assessment_styles: Mapped[list[str]] = mapped_column(JSON, default=lambda: DEFAULT_ASSESSMENT_STYLES.copy())
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import logging
+import re
 from datetime import datetime
+from difflib import SequenceMatcher
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -11,12 +14,26 @@ from app.core.course_preferences import (
     level_prompt_guidance,
     normalize_course_depth,
     normalize_starting_skill_level,
+    normalize_technical_depth,
+    technical_depth_prompt_guidance,
 )
-from app.db.models import BranchSuggestion, SkillEdge, SkillNode, SkillStatus, Topic, UserSkillState
+from app.db.models import (
+    Assessment,
+    AssessmentAttempt,
+    BranchSuggestion,
+    LearningResource,
+    ResourceType,
+    SkillEdge,
+    SkillNode,
+    SkillStatus,
+    Topic,
+    UserSkillState,
+)
 from app.schemas.llm import (
     BranchSuggestionPlan,
     DeepDiveBranchPlan,
     SkillGraphPlan,
+    SkillNodeTitleRewritePlan,
     SkillPlanNode,
 )
 from app.services.llm import LLMService
@@ -26,6 +43,111 @@ logger = logging.getLogger(__name__)
 MAX_PREREQUISITES_PER_NODE = 2
 MAX_PENDING_BRANCH_SUGGESTIONS = 1
 DEFAULT_OPTIONAL_BRANCH_NODE_COUNT = 1
+_BUSINESS_TOPIC_HINTS = (
+    'business',
+    'marketing',
+    'sales',
+    'startup',
+    'strategy',
+    'operations',
+    'finance',
+    'management',
+    'product',
+    'go-to-market',
+    'growth',
+    'consulting',
+    'mba',
+)
+_GENERIC_JARGON_TERMS = (
+    'optimization',
+    'optimisation',
+    'framework',
+    'synergy',
+    'synergies',
+    'best practice',
+    'methodology',
+    'techniques',
+    'strategy',
+    'strategies',
+    'leverage',
+    'value chain',
+    'stakeholder',
+    'roadmap',
+)
+_ABSTRACT_TITLE_PREFIXES = (
+    'optimization',
+    'optimisation',
+    'strategic',
+    'framework',
+    'leveraging',
+    'maximizing',
+    'maximising',
+    'advanced techniques',
+)
+_TITLE_STOPWORDS = {
+    'the',
+    'and',
+    'for',
+    'with',
+    'from',
+    'into',
+    'your',
+    'this',
+    'that',
+    'about',
+    'using',
+    'guide',
+    'basics',
+    'introduction',
+    'overview',
+}
+_CANONICAL_BRANCH_PURPOSES = ('remediation', 'enrichment', 'specialization', 'exploration')
+_BRANCH_PURPOSE_MAP = {
+    'remediation': 'remediation',
+    'assessment_prep': 'remediation',
+    'enrichment': 'enrichment',
+    'specialization': 'specialization',
+    'project': 'specialization',
+    'exploration': 'exploration',
+    'curiosity': 'exploration',
+}
+_CONTENT_OVERLAP_STOPWORDS = {
+    'the',
+    'and',
+    'for',
+    'with',
+    'from',
+    'into',
+    'that',
+    'this',
+    'about',
+    'your',
+    'node',
+    'topic',
+    'learning',
+    'skill',
+    'course',
+    'lesson',
+    'core',
+    'path',
+    'basics',
+    'overview',
+    'introduction',
+}
+
+
+@dataclass
+class BranchCurriculumState:
+    taught_skill_lines: list[str] = field(default_factory=list)
+    taught_concepts: list[str] = field(default_factory=list)
+    used_examples: list[str] = field(default_factory=list)
+    assessed_concepts: list[str] = field(default_factory=list)
+    future_core_lines: list[str] = field(default_factory=list)
+    existing_optional_lines: list[str] = field(default_factory=list)
+    accepted_branch_focuses: list[str] = field(default_factory=list)
+    pending_branch_focuses: list[str] = field(default_factory=list)
+    weak_areas: list[str] = field(default_factory=list)
+    strong_areas: list[str] = field(default_factory=list)
 
 
 class SkillGraphAgent:
@@ -40,6 +162,368 @@ class SkillGraphAgent:
         if state.progress_state in ('learning', 'completed') or state.mastery >= 0.35:
             return 'intermediate'
         return 'beginner'
+
+    @staticmethod
+    def _normalize_branch_purpose(raw_purpose: str | None) -> str:
+        normalized = (raw_purpose or '').strip().lower()
+        if normalized in _BRANCH_PURPOSE_MAP:
+            return _BRANCH_PURPOSE_MAP[normalized]
+        return 'exploration'
+
+    @staticmethod
+    def _text_tokens(text: str) -> set[str]:
+        return {
+            token
+            for token in re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", (text or '').lower())
+            if token not in _CONTENT_OVERLAP_STOPWORDS
+        }
+
+    @classmethod
+    def _token_overlap_ratio(cls, left: str, right: str) -> float:
+        left_tokens = cls._text_tokens(left)
+        right_tokens = cls._text_tokens(right)
+        if not left_tokens or not right_tokens:
+            return 0.0
+        intersection = len(left_tokens & right_tokens)
+        return intersection / max(1, min(len(left_tokens), len(right_tokens)))
+
+    @staticmethod
+    def _text_similarity_ratio(left: str, right: str) -> float:
+        left_clean = ' '.join((left or '').lower().split())
+        right_clean = ' '.join((right or '').lower().split())
+        if not left_clean or not right_clean:
+            return 0.0
+        return SequenceMatcher(None, left_clean, right_clean).ratio()
+
+    @staticmethod
+    def _dedupe_keep_order(items: list[str], *, limit: int) -> list[str]:
+        deduped: list[str] = []
+        seen: set[str] = set()
+        for item in items:
+            cleaned = ' '.join((item or '').split()).strip()
+            if not cleaned:
+                continue
+            key = cleaned.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(cleaned)
+            if len(deduped) >= limit:
+                break
+        return deduped
+
+    def _extract_resource_memory(self, resource: LearningResource) -> tuple[list[str], list[str]]:
+        taught_concepts: list[str] = []
+        example_names: list[str] = []
+        payload = resource.content_json if isinstance(resource.content_json, dict) else {}
+        if not payload:
+            return taught_concepts, example_names
+
+        if resource.resource_type == ResourceType.generated_lesson:
+            concepts = payload.get('key_concepts')
+            if isinstance(concepts, list):
+                for item in concepts:
+                    if not isinstance(item, dict):
+                        continue
+                    term = str(item.get('term') or '').strip()
+                    desc = str(item.get('description') or '').strip()
+                    if term:
+                        taught_concepts.append(term)
+                    if desc:
+                        taught_concepts.append(desc)
+            sections = payload.get('sections')
+            if isinstance(sections, list):
+                for item in sections[:5]:
+                    if not isinstance(item, dict):
+                        continue
+                    heading = str(item.get('heading') or '').strip()
+                    if heading:
+                        taught_concepts.append(heading)
+
+        if resource.resource_type == ResourceType.generated_examples:
+            examples = payload.get('examples')
+            if isinstance(examples, list):
+                for item in examples[:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get('name') or '').strip()
+                    explanation = str(item.get('explanation') or '').strip()
+                    if name:
+                        example_names.append(name)
+                    if explanation:
+                        taught_concepts.append(explanation)
+            intro = str(payload.get('intro') or '').strip()
+            if intro:
+                taught_concepts.append(intro)
+
+        return taught_concepts, example_names
+
+    def _build_curriculum_state(
+        self,
+        db: Session,
+        *,
+        topic: Topic,
+        parent_node: SkillNode,
+        user_id: int,
+    ) -> BranchCurriculumState:
+        all_nodes = db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
+        node_by_id = {node.id: node for node in all_nodes}
+        node_ids = list(node_by_id.keys())
+        states = (
+            db.scalars(
+                select(UserSkillState).where(
+                    UserSkillState.user_id == user_id,
+                    UserSkillState.skill_node_id.in_(node_ids),
+                )
+            ).all()
+            if node_ids
+            else []
+        )
+        state_by_skill_id = {state.skill_node_id: state for state in states}
+
+        taught_ids: set[int] = set()
+        weak_areas: list[str] = []
+        strong_areas: list[str] = []
+        taught_skill_lines: list[str] = []
+        for node in all_nodes:
+            state = state_by_skill_id.get(node.id)
+            if not state:
+                continue
+            if state.progress_state in {'learning', 'completed', 'verified'} or state.lesson_completed_at is not None:
+                taught_ids.add(node.id)
+                taught_skill_lines.append(f'{node.name} — {node.description}')
+            if state.progress_state in {'learning', 'completed'} and state.mastery <= 0.35:
+                weak_areas.append(node.name)
+            if state.progress_state == 'verified' or state.mastery >= 0.8:
+                strong_areas.append(node.name)
+
+        # The selected parent node is currently in scope even if it wasn't completed.
+        taught_skill_lines.append(f'{parent_node.name} — {parent_node.description}')
+
+        taught_concepts: list[str] = []
+        used_examples: list[str] = []
+        if node_ids:
+            active_resources = db.scalars(
+                select(LearningResource).where(
+                    LearningResource.topic_id == topic.id,
+                    LearningResource.skill_node_id.in_(node_ids),
+                    LearningResource.is_active.is_(True),
+                    (LearningResource.user_id == user_id) | (LearningResource.user_id.is_(None)),
+                    LearningResource.resource_type.in_(
+                        [ResourceType.generated_lesson, ResourceType.generated_examples]
+                    ),
+                )
+            ).all()
+            for resource in active_resources:
+                if resource.skill_node_id not in taught_ids and resource.skill_node_id != parent_node.id:
+                    continue
+                concepts, examples = self._extract_resource_memory(resource)
+                taught_concepts.extend(concepts)
+                used_examples.extend(examples)
+
+        assessed_concepts: list[str] = []
+        attempts = db.scalars(
+            select(AssessmentAttempt)
+            .join(Assessment, AssessmentAttempt.assessment_id == Assessment.id)
+            .where(
+                Assessment.topic_id == topic.id,
+                AssessmentAttempt.user_id == user_id,
+            )
+            .order_by(desc(AssessmentAttempt.created_at))
+            .limit(12)
+        ).all()
+        for attempt in attempts:
+            strengths = [str(item).strip() for item in (attempt.strengths or []) if str(item).strip()]
+            weaknesses = [str(item).strip() for item in (attempt.weaknesses or []) if str(item).strip()]
+            assessed_concepts.extend(strengths[:3])
+            assessed_concepts.extend(weaknesses[:3])
+            weak_areas.extend(weaknesses[:2])
+            if attempt.score >= 0.82:
+                strong_areas.extend(strengths[:2])
+
+        core_edges = db.scalars(
+            select(SkillEdge).where(
+                SkillEdge.topic_id == topic.id,
+                SkillEdge.edge_type == 'prerequisite',
+            )
+        ).all()
+        children_by_parent: dict[int, list[int]] = {}
+        for edge in core_edges:
+            parent = node_by_id.get(edge.parent_skill_id)
+            child = node_by_id.get(edge.child_skill_id)
+            if not parent or not child:
+                continue
+            if parent.node_kind != 'core' or child.node_kind != 'core':
+                continue
+            children_by_parent.setdefault(parent.id, []).append(child.id)
+
+        future_core_lines: list[str] = []
+        queue: list[int] = [parent_node.id]
+        visited: set[int] = set()
+        while queue:
+            current = queue.pop(0)
+            if current in visited:
+                continue
+            visited.add(current)
+            for child_id in children_by_parent.get(current, []):
+                if child_id not in visited:
+                    queue.append(child_id)
+                if child_id in taught_ids:
+                    continue
+                child = node_by_id.get(child_id)
+                if child:
+                    future_core_lines.append(f'{child.name} — {child.description}')
+
+        optional_under_parent = db.scalars(
+            select(SkillNode).where(
+                SkillNode.topic_id == topic.id,
+                SkillNode.branch_parent_skill_id == parent_node.id,
+            )
+        ).all()
+        existing_optional_lines = [
+            f'{node.name} — {node.description}'
+            for node in optional_under_parent
+        ]
+
+        suggestions = db.scalars(
+            select(BranchSuggestion).where(
+                BranchSuggestion.topic_id == topic.id,
+                BranchSuggestion.user_id == user_id,
+                BranchSuggestion.parent_skill_id == parent_node.id,
+            )
+        ).all()
+        accepted_branch_focuses = [item.focus for item in suggestions if item.status == 'accepted']
+        pending_branch_focuses = [item.focus for item in suggestions if item.status == 'pending']
+
+        return BranchCurriculumState(
+            taught_skill_lines=self._dedupe_keep_order(taught_skill_lines, limit=14),
+            taught_concepts=self._dedupe_keep_order(taught_concepts, limit=18),
+            used_examples=self._dedupe_keep_order(used_examples, limit=10),
+            assessed_concepts=self._dedupe_keep_order(assessed_concepts, limit=12),
+            future_core_lines=self._dedupe_keep_order(future_core_lines, limit=12),
+            existing_optional_lines=self._dedupe_keep_order(existing_optional_lines, limit=12),
+            accepted_branch_focuses=self._dedupe_keep_order(accepted_branch_focuses, limit=8),
+            pending_branch_focuses=self._dedupe_keep_order(pending_branch_focuses, limit=4),
+            weak_areas=self._dedupe_keep_order(weak_areas, limit=6),
+            strong_areas=self._dedupe_keep_order(strong_areas, limit=6),
+        )
+
+    def _curriculum_context_text(self, state: BranchCurriculumState) -> str:
+        def _render(label: str, items: list[str], max_items: int = 6) -> str:
+            if not items:
+                return f'{label}: none'
+            preview = '\n'.join(f'  - {item}' for item in items[:max_items])
+            return f'{label}:\n{preview}'
+
+        return '\n\n'.join(
+            [
+                _render('Already taught nodes', state.taught_skill_lines),
+                _render('Taught concepts and terminology', state.taught_concepts),
+                _render('Examples already used', state.used_examples),
+                _render('Assessment strengths/weaknesses', state.assessed_concepts),
+                _render('Planned future core nodes', state.future_core_lines),
+                _render('Existing optional branches under this parent', state.existing_optional_lines),
+                _render('Previously accepted branch focuses', state.accepted_branch_focuses),
+                _render('Pending branch focuses', state.pending_branch_focuses, max_items=3),
+                _render('Known weak areas', state.weak_areas, max_items=4),
+                _render('Known strong areas', state.strong_areas, max_items=4),
+            ]
+        )
+
+    def _is_redundant_branch_candidate(
+        self,
+        *,
+        node_name: str,
+        node_description: str,
+        parent_node: SkillNode,
+        purpose: str,
+        state: BranchCurriculumState,
+    ) -> bool:
+        candidate = f'{node_name} {node_description}'.strip()
+        if not candidate:
+            return True
+
+        title_issues = self._title_quality_issues(
+            topic_name=parent_node.name,
+            topic_description=parent_node.description or '',
+            topic_goal='',
+            title=node_name,
+        )
+        if 'empty' in title_issues or 'too_short' in title_issues:
+            return True
+
+        compare_sets: list[str] = []
+        compare_sets.extend(state.existing_optional_lines)
+        compare_sets.extend(state.future_core_lines)
+        if purpose != 'remediation':
+            compare_sets.extend(state.taught_skill_lines)
+            compare_sets.extend(state.taught_concepts[:10])
+            compare_sets.extend(state.used_examples[:8])
+
+        for baseline in compare_sets:
+            if self._text_similarity_ratio(candidate, baseline) >= 0.84:
+                return True
+            if self._token_overlap_ratio(candidate, baseline) >= 0.76:
+                return True
+
+        # Non-remediation branches must move beyond parent framing.
+        if purpose != 'remediation':
+            parent_signature = f'{parent_node.name} {parent_node.description}'
+            if self._text_similarity_ratio(candidate, parent_signature) >= 0.84:
+                return True
+            if self._token_overlap_ratio(candidate, parent_signature) >= 0.8:
+                return True
+
+        return False
+
+    def _fallback_branch_node(
+        self,
+        *,
+        topic: Topic,
+        parent_node: SkillNode,
+        focus: str | None,
+        purpose: str,
+        state: BranchCurriculumState,
+    ) -> SkillPlanNode:
+        focus_text = ' '.join((focus or '').split()).strip()
+        weak_hint = state.weak_areas[0] if state.weak_areas else parent_node.name
+        strong_hint = state.strong_areas[0] if state.strong_areas else parent_node.name
+
+        if purpose == 'remediation':
+            name = f'Targeted reinforcement: {weak_hint}'
+            description = (
+                f'Close a specific gap before continuing the core path. This branch reinforces {weak_hint} '
+                f'with focused practice and avoids repeating already-mastered examples.'
+            )
+        elif purpose == 'specialization':
+            focus_label = focus_text or strong_hint
+            name = f'Specialized focus: {focus_label}'
+            description = (
+                f'Build a focused specialization off {parent_node.name}. This branch adds distinct depth in {focus_label} '
+                'without duplicating upcoming core modules.'
+            )
+        elif purpose == 'enrichment':
+            focus_label = focus_text or parent_node.name
+            name = f'Extended perspective: {focus_label}'
+            description = (
+                f'Add an enrichment perspective connected to {parent_node.name}. This node introduces new context and '
+                'applications rather than repeating prior lesson content.'
+            )
+        else:
+            focus_label = focus_text or parent_node.name
+            name = f'Explore: {focus_label}'
+            description = (
+                f'Explore a curiosity-driven offshoot from {parent_node.name} with one concrete angle in {focus_label}. '
+                'Keep scope specific and additive to your current path.'
+            )
+
+        return SkillPlanNode(
+            key='branch_focus_1',
+            name=name[:180],
+            description=description[:600],
+            difficulty=min(5, max(1, parent_node.difficulty + (1 if purpose == 'specialization' else 0))),
+            prerequisites=['parent'],
+        )
 
     @staticmethod
     def _limit_core_prerequisites(
@@ -143,11 +627,165 @@ class SkillGraphAgent:
         _ = requested_size, branch_purpose
         return DEFAULT_OPTIONAL_BRANCH_NODE_COUNT
 
+    @staticmethod
+    def _topic_anchor_tokens(topic_text: str) -> set[str]:
+        tokens = {
+            item
+            for item in re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", topic_text.lower())
+            if item not in _TITLE_STOPWORDS
+        }
+        return tokens
+
+    @staticmethod
+    def _is_business_topic(*, topic_name: str, topic_description: str, topic_goal: str) -> bool:
+        haystack = f'{topic_name} {topic_description} {topic_goal}'.lower()
+        return any(token in haystack for token in _BUSINESS_TOPIC_HINTS)
+
+    @classmethod
+    def _title_quality_issues(
+        cls,
+        *,
+        topic_name: str,
+        topic_description: str,
+        topic_goal: str,
+        title: str,
+    ) -> list[str]:
+        cleaned = ' '.join((title or '').split()).strip()
+        lowered = cleaned.lower()
+        if not cleaned:
+            return ['empty']
+
+        issues: list[str] = []
+        words = lowered.split()
+        if len(words) < 2:
+            issues.append('too_short')
+        if len(cleaned) > 110:
+            issues.append('too_long')
+        if any(lowered.startswith(prefix) for prefix in _ABSTRACT_TITLE_PREFIXES):
+            issues.append('abstract_prefix')
+
+        has_jargon = any(term in lowered for term in _GENERIC_JARGON_TERMS)
+        business_topic = cls._is_business_topic(
+            topic_name=topic_name,
+            topic_description=topic_description,
+            topic_goal=topic_goal,
+        )
+        anchor_tokens = cls._topic_anchor_tokens(f'{topic_name} {topic_description}')
+        has_topic_anchor = any(token in lowered for token in anchor_tokens)
+
+        if has_jargon and (not business_topic or not has_topic_anchor):
+            issues.append('generic_jargon')
+
+        if not has_topic_anchor and any(token in lowered for token in ('process', 'approach', 'method', 'techniques')):
+            issues.append('underspecified')
+
+        return issues
+
+    @staticmethod
+    def _fallback_specific_title(*, topic_name: str, node_description: str, default_title: str) -> str:
+        sentence = (node_description or '').split('.')[0].strip()
+        candidate = ' '.join(sentence.split()[:9]).strip(' -:')
+        if len(candidate) >= 8:
+            return candidate[0].upper() + candidate[1:]
+        base = ' '.join(default_title.split()[:7]).strip()
+        if base:
+            return base
+        return f'{topic_name} focus area'
+
+    async def _improve_node_titles(
+        self,
+        *,
+        topic: Topic,
+        nodes: list[SkillPlanNode],
+        parent_node_name: str | None = None,
+    ) -> list[SkillPlanNode]:
+        issues_by_key: dict[str, list[str]] = {}
+        for node in nodes:
+            issues = self._title_quality_issues(
+                topic_name=topic.name,
+                topic_description=topic.description or '',
+                topic_goal=topic.goal or '',
+                title=node.name,
+            )
+            if issues:
+                issues_by_key[node.key] = issues
+
+        if not issues_by_key:
+            return nodes
+
+        payload_lines = []
+        for node in nodes:
+            payload_lines.append(
+                f'- key={node.key}; title={node.name}; description={node.description}; '
+                f'issues={",".join(issues_by_key.get(node.key, [])) or "ok"}'
+            )
+        system_prompt = (
+            'You rewrite learning node titles to sound natural, specific, and domain-appropriate. '
+            'Avoid generic consulting/business jargon unless the topic is explicitly business-focused.'
+        )
+        user_prompt = (
+            f'Topic: {topic.name}\n'
+            f'Description: {topic.description or "No description"}\n'
+            f'Goal: {topic.goal or "No goal"}\n'
+            f'Parent node context: {parent_node_name or "core path"}\n\n'
+            'Rewrite only the low-quality titles while preserving each key.\n'
+            'Title rules:\n'
+            '- Concrete and specific, not abstract.\n'
+            '- Natural human phrasing.\n'
+            '- Avoid words like optimization/framework/strategy/techniques unless topic truly requires them.\n'
+            '- Keep title length 3-80 chars.\n'
+            '- Keep scope aligned to description.\n\n'
+            f'Nodes:\n' + '\n'.join(payload_lines)
+        )
+
+        try:
+            rewrite = await self.llm_service.generate_structured(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                schema_model=SkillNodeTitleRewritePlan,
+                temperature=0.1,
+                max_tokens=900,
+            )
+            rewrite_map = {item.key: item.name.strip() for item in rewrite.nodes}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning('skill_graph.title_rewrite_failed topic_id=%s error=%s', topic.id, exc)
+            rewrite_map = {}
+
+        improved: list[SkillPlanNode] = []
+        for node in nodes:
+            candidate = rewrite_map.get(node.key, node.name).strip()
+            quality_issues = self._title_quality_issues(
+                topic_name=topic.name,
+                topic_description=topic.description or '',
+                topic_goal=topic.goal or '',
+                title=candidate,
+            )
+            if quality_issues:
+                candidate = self._fallback_specific_title(
+                    topic_name=topic.name,
+                    node_description=node.description,
+                    default_title=node.name,
+                )
+
+            improved.append(
+                SkillPlanNode(
+                    key=node.key,
+                    name=' '.join(candidate.split()),
+                    description=node.description,
+                    difficulty=node.difficulty,
+                    prerequisites=node.prerequisites,
+                )
+            )
+
+        return improved
+
     async def create_skill_tree(self, db: Session, topic: Topic) -> list[SkillNode]:
         course_depth = normalize_course_depth(topic.course_depth)
         starting_level = normalize_starting_skill_level(topic.starting_skill_level)
+        technical_depth = normalize_technical_depth(topic.technical_depth)
         min_nodes, max_nodes = depth_node_bounds(course_depth)
         level_guidance = level_prompt_guidance(starting_level)
+        technical_guidance = technical_depth_prompt_guidance(technical_depth)
 
         system_prompt = (
             'You are SkillGraphAgent. Build a practical learning skill graph for a topic. '
@@ -160,11 +798,17 @@ class SkillGraphAgent:
             f'Goal: {topic.goal or "No explicit goal"}\n\n'
             f'Course depth preference: {course_depth}\n'
             f'Starting skill level preference: {starting_level}\n'
+            f'Technical depth preference: {technical_depth}\n'
             f'Guidance: {level_guidance}\n\n'
+            f'Technical depth guidance: {technical_guidance}\n\n'
             f'Create between {min_nodes} and {max_nodes} skill nodes. '
             'Each node needs key, name, description, difficulty (1-5), '
             'and prerequisites (list of node keys). '
-            'Use at most 2 prerequisites per node, and prefer 0-1 unless absolutely needed.'
+            'Use at most 2 prerequisites per node, and prefer 0-1 unless absolutely needed.\n'
+            'Node title quality rules:\n'
+            '- Use natural, specific, domain-grounded names.\n'
+            '- Avoid vague jargon like optimization/framework/strategy/techniques unless topic is explicitly business.\n'
+            '- Prefer concrete topic language over abstract process language.'
         )
 
         graph = await self.llm_service.generate_structured(
@@ -199,6 +843,8 @@ class SkillGraphAgent:
                 )
             )
             seen_keys.add(fallback_key)
+
+        unique_nodes = await self._improve_node_titles(topic=topic, nodes=unique_nodes)
 
         key_position = {node.key: idx for idx, node in enumerate(unique_nodes)}
         prereq_map: dict[str, list[str]] = {}
@@ -273,9 +919,10 @@ class SkillGraphAgent:
         branch_origin: str = 'user_requested',
         branch_purpose: str = 'exploration',
     ) -> list[SkillNode]:
+        normalized_purpose = self._normalize_branch_purpose(branch_purpose)
         effective_branch_size = self._resolve_effective_branch_size(
             requested_size=branch_size,
-            branch_purpose=branch_purpose,
+            branch_purpose=normalized_purpose,
         )
 
         user_state = db.scalar(
@@ -285,6 +932,14 @@ class SkillGraphAgent:
             )
         )
         learner_level = self._learner_level(user_state)
+        technical_depth = normalize_technical_depth(topic.technical_depth)
+        technical_guidance = technical_depth_prompt_guidance(technical_depth)
+        curriculum_state = self._build_curriculum_state(
+            db,
+            topic=topic,
+            parent_node=parent_node,
+            user_id=user_id,
+        )
 
         existing_branch_nodes = db.scalars(
             select(SkillNode)
@@ -308,8 +963,11 @@ class SkillGraphAgent:
             f'Parent skill description: {parent_node.description}\n'
             f'Parent difficulty (1-5): {parent_node.difficulty}\n'
             f'Learner level at parent node: {learner_level}\n'
+            f'Technical depth preference: {technical_depth}\n'
+            f'Branch purpose (required): {normalized_purpose}\n'
             f'User focus request: {focus or "None"}\n'
             f'Existing optional branch nodes under this parent: {existing_branch_names}\n\n'
+            f'Curriculum memory context:\n{self._curriculum_context_text(curriculum_state)}\n\n'
             f'Generate {effective_branch_size} optional branch nodes.\n'
             'Requirements:\n'
             '- The branch must be clearly optional.\n'
@@ -318,7 +976,12 @@ class SkillGraphAgent:
             "- In prerequisites, use either sibling node keys or 'parent'.\n"
             '- Use no more than 2 prerequisites per node (including parent).\n'
             '- Keep beginner learners on foundational depth, not advanced capstone tasks.\n'
-            '- Avoid duplicate or overlapping node names.'
+            f'- Match technical rigor to this guidance: {technical_guidance}\n'
+            '- Avoid duplicate or overlapping node names.\n'
+            '- Titles must be specific and natural; avoid generic strategy/optimization jargon.\n'
+            '- Branch nodes must add distinct value relative to already taught nodes/examples.\n'
+            '- For enrichment/specialization/exploration: avoid repeating taught concepts and avoid duplicating planned future core nodes.\n'
+            '- For remediation: revisit only targeted weak areas, not broad repetition.'
         )
 
         plan = await self.llm_service.generate_structured(
@@ -341,15 +1004,37 @@ class SkillGraphAgent:
                 continue
             if normalized_name in existing_names_lower:
                 continue
+            if self._is_redundant_branch_candidate(
+                node_name=node.name,
+                node_description=node.description,
+                parent_node=parent_node,
+                purpose=normalized_purpose,
+                state=curriculum_state,
+            ):
+                continue
             seen_keys.add(node.key)
             unique_nodes.append(node)
             if len(unique_nodes) >= effective_branch_size:
                 break
 
         if len(unique_nodes) < 1:
-            raise ValueError('Deep-dive generation returned no unique optional nodes.')
+            unique_nodes = [
+                self._fallback_branch_node(
+                    topic=topic,
+                    parent_node=parent_node,
+                    focus=focus,
+                    purpose=normalized_purpose,
+                    state=curriculum_state,
+                )
+            ]
         if len(unique_nodes) < effective_branch_size:
-            raise ValueError('Deep-dive generation returned too few unique optional nodes.')
+            unique_nodes = unique_nodes[:1]
+
+        unique_nodes = await self._improve_node_titles(
+            topic=topic,
+            nodes=unique_nodes,
+            parent_node_name=parent_node.name,
+        )
 
         prereq_map = self._build_progressive_branch_prereq_map(unique_nodes)
 
@@ -364,7 +1049,7 @@ class SkillGraphAgent:
                 topic_id=topic.id,
                 node_kind='optional_branch',
                 branch_origin=branch_origin,
-                branch_purpose=branch_purpose,
+                branch_purpose=normalized_purpose,
                 branch_depth=max(1, parent_depth + index + 1),
                 branch_parent_skill_id=parent_node.id,
                 name=node.name,
@@ -447,7 +1132,7 @@ class SkillGraphAgent:
             parent_node.id,
             len(created_nodes),
             branch_origin,
-            branch_purpose,
+            normalized_purpose,
             branch_size,
             effective_branch_size,
         )
@@ -491,6 +1176,12 @@ class SkillGraphAgent:
             )
         )
         learner_level = self._learner_level(learner_state)
+        curriculum_state = self._build_curriculum_state(
+            db,
+            topic=topic,
+            parent_node=parent_node,
+            user_id=user_id,
+        )
 
         system_prompt = (
             'You are SkillGraphAgent. Suggest optional branch pathways for a selected learning node. '
@@ -503,9 +1194,16 @@ class SkillGraphAgent:
             f'Parent description: {parent_node.description}\n'
             f'Learner level: {learner_level}\n'
             f'Trigger event: {trigger_event}\n'
+            f'Curriculum memory context:\n{self._curriculum_context_text(curriculum_state)}\n'
             f'Provide exactly {limit} optional branch suggestion.\n'
             'Each suggestion must include: title, focus, rationale, purpose.\n'
-            'purpose must be one of: enrichment, remediation, specialization, exploration, assessment_prep, project.'
+            'purpose must be one of: remediation, enrichment, specialization, exploration.\n'
+            'Suggestion quality rules:\n'
+            '- Must declare why this branch exists now.\n'
+            '- Must reference learner context (strength, weakness, or progression signal).\n'
+            '- Must avoid duplicating already taught content.\n'
+            '- Must avoid overlapping obvious upcoming core nodes.\n'
+            '- Only suggest one high-signal path.'
         )
         plan = await self.llm_service.generate_structured(
             system_prompt=system_prompt,
@@ -525,10 +1223,28 @@ class SkillGraphAgent:
                 )
             ).all()
         }
+        existing_focuses.update(item.lower() for item in curriculum_state.pending_branch_focuses)
+        existing_focuses.update(item.lower() for item in curriculum_state.accepted_branch_focuses)
+
+        def _suggestion_redundant(title: str, focus: str, purpose: str) -> bool:
+            candidate = f'{title} {focus}'
+            compare_lines = curriculum_state.existing_optional_lines + curriculum_state.future_core_lines
+            if purpose != 'remediation':
+                compare_lines += curriculum_state.taught_skill_lines + curriculum_state.taught_concepts
+            for baseline in compare_lines:
+                if self._text_similarity_ratio(candidate, baseline) >= 0.84:
+                    return True
+                if self._token_overlap_ratio(candidate, baseline) >= 0.78:
+                    return True
+            return False
+
         created: list[BranchSuggestion] = []
         for item in plan.suggestions:
             focus_key = item.focus.strip().lower()
             if not focus_key or focus_key in existing_focuses:
+                continue
+            normalized_purpose = self._normalize_branch_purpose(item.purpose)
+            if _suggestion_redundant(item.title, item.focus, normalized_purpose):
                 continue
             existing_focuses.add(focus_key)
             record = BranchSuggestion(
@@ -538,7 +1254,7 @@ class SkillGraphAgent:
                 title=item.title.strip(),
                 focus=item.focus.strip(),
                 rationale=item.rationale.strip(),
-                purpose=item.purpose,
+                purpose=normalized_purpose,
                 origin='system_suggested',
                 trigger_event=trigger_event,
                 status='pending',
@@ -548,6 +1264,46 @@ class SkillGraphAgent:
             created.append(record)
             if len(created) >= limit:
                 break
+
+        if not created:
+            fallback_purpose = 'remediation' if curriculum_state.weak_areas else 'specialization' if curriculum_state.strong_areas else 'enrichment'
+            fallback_focus = (
+                curriculum_state.weak_areas[0]
+                if fallback_purpose == 'remediation' and curriculum_state.weak_areas
+                else curriculum_state.strong_areas[0]
+                if fallback_purpose == 'specialization' and curriculum_state.strong_areas
+                else parent_node.name
+            )
+            if fallback_focus.lower() not in existing_focuses:
+                fallback_rationale = (
+                    f'Suggested to address a known weakness in {fallback_focus} before advancing the core path.'
+                    if fallback_purpose == 'remediation'
+                    else f'Suggested because strong performance indicates readiness to specialize in {fallback_focus}.'
+                    if fallback_purpose == 'specialization'
+                    else f'Suggested to add an enrichment angle connected to {parent_node.name} without duplicating the core path.'
+                )
+                fallback_title = (
+                    f'Remediation focus: {fallback_focus}'
+                    if fallback_purpose == 'remediation'
+                    else f'Specialize further: {fallback_focus}'
+                    if fallback_purpose == 'specialization'
+                    else f'Enrich your understanding of {parent_node.name}'
+                )
+                record = BranchSuggestion(
+                    topic_id=topic.id,
+                    user_id=user_id,
+                    parent_skill_id=parent_node.id,
+                    title=fallback_title[:255],
+                    focus=fallback_focus[:255],
+                    rationale=fallback_rationale,
+                    purpose=fallback_purpose,
+                    origin='system_suggested',
+                    trigger_event=trigger_event,
+                    status='pending',
+                )
+                db.add(record)
+                db.flush()
+                created.append(record)
 
         db.commit()
         for row in created:

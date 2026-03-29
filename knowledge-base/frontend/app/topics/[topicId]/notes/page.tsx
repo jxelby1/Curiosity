@@ -19,6 +19,7 @@ import { DocumentItem, NoteType, PersonalNote, SkillTree, TopicJournalEntry } fr
 import { MarkdownContent, markdownToPlainText } from '@/components/markdown-content';
 import { TopicHeader } from '@/components/topic-header';
 import { NotesWorkspaceSkeleton } from '@/components/page-skeletons';
+import { ProofArtifactViewer } from '@/components/proof-artifact-viewer';
 
 const NOTE_TYPE_OPTIONS: Array<{ value: NoteType; label: string }> = [
   { value: 'personal', label: 'Personal note' },
@@ -350,17 +351,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                 </div>
                 <p className="muted mt-2 text-sm leading-relaxed">{entry.description}</p>
                 {typeof entry.metadata?.proof_url === 'string' && entry.metadata.proof_url && (
-                  <a
-                    href={
-                      (process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api').replace(/\/api\/?$/, '') +
-                      String(entry.metadata.proof_url)
-                    }
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
-                  >
-                    View artifact
-                  </a>
+                  <ProofArtifactViewer proofUrl={String(entry.metadata.proof_url)} />
                 )}
               </article>
             ))}

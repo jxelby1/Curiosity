@@ -9,6 +9,7 @@ import {
   completeExercise,
   createDeepDiveBranch,
   devCompleteSkill,
+  getDeepLesson,
   getExerciseCompletions,
   forceUnlockSkill,
   generateAssessment,
@@ -31,6 +32,7 @@ import {
   AssessmentStyle,
   AssessmentResponseInput,
   AssessmentSubmissionResult,
+  DeepLesson,
   ExerciseCompletionList,
   ExternalResource,
   BranchSuggestion,
@@ -41,22 +43,26 @@ import {
 } from '@/lib/types';
 import {
   ExamplesRenderer,
+  DeepLessonRenderer,
   ExercisesRenderer,
   LessonRenderer,
+  parseDeepLessonContent,
   parseExamplesContent,
   parseExercisesContent,
   parseLessonContent
 } from '@/components/learning-content';
 import { useAuth } from '@/components/auth-provider';
 import { SkillWorkspaceSkeleton } from '@/components/page-skeletons';
+import { ProofArtifactViewer } from '@/components/proof-artifact-viewer';
 import { TopicHeader } from '@/components/topic-header';
 
-type LearningTab = 'overview' | 'lesson' | 'examples' | 'exercises' | 'quiz' | 'resources';
+type LearningTab = 'overview' | 'lesson' | 'deep_dive' | 'examples' | 'exercises' | 'quiz' | 'resources';
 type ResourceKind = 'lesson' | 'examples' | 'exercises';
 type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified';
 
 type NodeCache = {
   resources: Partial<Record<ResourceKind, Resource>>;
+  deepLesson?: DeepLesson;
   exerciseCompletions?: ExerciseCompletionList;
   assessment?: Assessment;
   assessmentResult?: AssessmentSubmissionResult;
@@ -103,14 +109,6 @@ function sourceCopy(source: 'stored' | 'generated' | 'regenerated'): string {
   return 'Regenerated and saved';
 }
 
-function resolveBackendUrl(path: string | null | undefined): string | null {
-  if (!path) return null;
-  if (path.startsWith('http://') || path.startsWith('https://')) return path;
-  const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
-  const origin = apiBase.replace(/\/api\/?$/, '');
-  return `${origin}${path.startsWith('/') ? path : `/${path}`}`;
-}
-
 function questionTypeLabel(questionType: Assessment['questions'][number]['question_type']): string {
   if (questionType === 'multiple_choice') return 'Multiple Choice';
   if (questionType === 'short_answer') return 'Short Answer';
@@ -118,6 +116,28 @@ function questionTypeLabel(questionType: Assessment['questions'][number]['questi
   if (questionType === 'scenario') return 'Applied Scenario';
   if (questionType === 'error_spotting') return 'Error Spotting';
   return 'Reflection';
+}
+
+function isDirectImageUrl(url: string): boolean {
+  return /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url);
+}
+
+function toYouTubeEmbedUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (host.includes('youtu.be')) {
+      const id = parsed.pathname.replace('/', '').trim();
+      return id ? `https://www.youtube-nocookie.com/embed/${id}` : null;
+    }
+    if (host.includes('youtube.com')) {
+      const id = parsed.searchParams.get('v');
+      return id ? `https://www.youtube-nocookie.com/embed/${id}` : null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
 }
 
 function assessmentStyleLabel(style: AssessmentStyle | string): string {
@@ -137,6 +157,7 @@ function assessmentStyleLabel(style: AssessmentStyle | string): string {
 const tabs: Array<{ id: LearningTab; label: string }> = [
   { id: 'overview', label: 'Overview' },
   { id: 'lesson', label: 'Lesson' },
+  { id: 'deep_dive', label: 'Deep Dive' },
   { id: 'examples', label: 'Examples' },
   { id: 'exercises', label: 'Exercises' },
   { id: 'quiz', label: 'Assessment' },
@@ -194,7 +215,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const [loadingRecommendations, setLoadingRecommendations] = useState(cachedRecommendations.length === 0);
   const [deepDiveFocus, setDeepDiveFocus] = useState('');
   const [deepDivePurpose, setDeepDivePurpose] = useState<
-    'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project'
+    'exploration' | 'specialization' | 'enrichment' | 'remediation'
   >('exploration');
   const [pageError, setPageError] = useState('');
 
@@ -283,6 +304,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       void ensureResource('lesson');
       return;
     }
+    if (activeTab === 'deep_dive') {
+      void ensureDeepLesson();
+      return;
+    }
     if (activeTab === 'examples') {
       void ensureResource('examples');
       return;
@@ -355,6 +380,37 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
       setErrorState(kind, err instanceof Error ? err.message : `Failed to load ${kind}`, nodeId);
     } finally {
       setLoadingState(kind, false, nodeId);
+    }
+  }
+
+  async function ensureDeepLesson(forceRegenerate = false) {
+    if (!selectedSkill) return;
+    const nodeId = selectedSkill.id;
+    if (selectedSkill.status === 'locked') {
+      setErrorState('deep-lesson', selectedSkill.lock_reason || 'This node is locked. Complete prerequisites first.', nodeId);
+      return;
+    }
+    const existing = contentCache[nodeId]?.deepLesson;
+    if (existing && !forceRegenerate) return;
+
+    setLoadingState('deep-lesson', true, nodeId);
+    setErrorState('deep-lesson', '', nodeId);
+    try {
+      const deepLesson = await getDeepLesson(nodeId);
+      setContentCache((prev) => {
+        const nodeCache = prev[nodeId] || { resources: {} };
+        return {
+          ...prev,
+          [nodeId]: {
+            ...nodeCache,
+            deepLesson,
+          },
+        };
+      });
+    } catch (err) {
+      setErrorState('deep-lesson', err instanceof Error ? err.message : 'Failed to load deep lesson', nodeId);
+    } finally {
+      setLoadingState('deep-lesson', false, nodeId);
     }
   }
 
@@ -873,6 +929,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const canUseDevTools = !!user?.dev_tools_enabled;
 
   const lessonLoading = !!loadingByKey[keyFor('lesson', activeNodeId)];
+  const deepLessonLoading = !!loadingByKey[keyFor('deep-lesson', activeNodeId)];
   const examplesLoading = !!loadingByKey[keyFor('examples', activeNodeId)];
   const exercisesLoading = !!loadingByKey[keyFor('exercises', activeNodeId)];
   const exerciseCompletionsLoading = !!loadingByKey[keyFor('exercise-completions', activeNodeId)];
@@ -886,8 +943,10 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const branchSuggestionsActionLoading = !!loadingByKey[keyFor('branch-suggestions-action', activeNodeId)];
   const branchSuggestionsError = errorByKey[keyFor('branch-suggestions', activeNodeId)] || '';
   const exerciseCompletionsError = errorByKey[keyFor('exercise-completions', activeNodeId)] || '';
+  const deepLessonError = errorByKey[keyFor('deep-lesson', activeNodeId)] || '';
 
   const lessonResource = currentNodeCache?.resources?.lesson;
+  const deepLesson = currentNodeCache?.deepLesson;
   const examplesResource = currentNodeCache?.resources?.examples;
   const exercisesResource = currentNodeCache?.resources?.exercises;
   const exerciseCompletions = currentNodeCache?.exerciseCompletions;
@@ -900,6 +959,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const revealWarning = currentNodeCache?.revealWarning || '';
 
   const lesson = parseLessonContent(lessonResource?.structured_content);
+  const deepLessonContent = parseDeepLessonContent(deepLesson?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
   const exercises = parseExercisesContent(exercisesResource?.structured_content);
   const lessonComplete = selectedSkill.lesson_completed;
@@ -1174,8 +1234,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     <option value="specialization">Specialization</option>
                     <option value="enrichment">Enrichment</option>
                     <option value="remediation">Remediation</option>
-                    <option value="assessment_prep">Assessment prep</option>
-                    <option value="project">Project</option>
                   </select>
                   <button
                     className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm disabled:opacity-60"
@@ -1276,6 +1334,109 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
             </div>
           )}
 
+          {activeTab === 'deep_dive' && !isLocked && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center gap-2">
+                {deepLesson && (
+                  <span className="rounded-md border border-black/10 bg-white px-3 py-2 text-xs text-black/70">
+                    Source: {deepLesson.source === 'fallback' ? 'Fallback lesson' : 'Generated deep lesson'}
+                  </span>
+                )}
+                <button
+                  className="rounded-md border border-black/20 bg-white px-3 py-2 text-sm"
+                  onClick={() => ensureDeepLesson(!!deepLesson)}
+                  disabled={deepLessonLoading}
+                >
+                  {deepLessonLoading
+                    ? 'Loading...'
+                    : deepLesson
+                      ? 'Regenerate deep lesson'
+                      : 'Generate deep lesson'}
+                </button>
+              </div>
+
+              {deepLessonLoading && (
+                <p className="rounded-md border border-black/10 bg-white p-3 text-sm">
+                  Building a deeper lesson with supporting context...
+                </p>
+              )}
+              {deepLessonError && (
+                <p className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{deepLessonError}</p>
+              )}
+              {deepLessonContent && <DeepLessonRenderer content={deepLessonContent} />}
+              {!deepLessonContent && deepLesson && !deepLessonLoading && (
+                <div className="rounded-xl border border-black/10 bg-white p-4 text-sm">
+                  Deep-lesson format was invalid. Regenerate to refresh this content.
+                </div>
+              )}
+
+              {deepLesson && (
+                <section className="rounded-xl border border-black/10 bg-white p-4">
+                  <div className="mb-2">
+                    <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">
+                      Supporting media (strict relevance)
+                    </h3>
+                    <p className="muted mt-1 text-xs">
+                      Only high-confidence supporting media from established sources is shown here.
+                    </p>
+                  </div>
+                  {deepLesson.supporting_media.length === 0 ? (
+                    <p className="muted rounded-md border border-dashed border-black/15 bg-paper/40 p-3 text-sm">
+                      No clearly relevant supporting media found for this node yet.
+                    </p>
+                  ) : (
+                    <div className="space-y-3">
+                      {deepLesson.supporting_media.map((item) => {
+                        const embedUrl = item.media_type === 'video' ? toYouTubeEmbedUrl(item.url) : null;
+                        const showImage = item.media_type === 'image' && isDirectImageUrl(item.url);
+                        return (
+                          <article key={item.url} className="rounded-lg border border-black/10 bg-paper/40 p-3">
+                            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
+                              <span className="badge">{item.media_type === 'video' ? 'Video' : 'Image'}</span>
+                              <span className="badge">{item.source_domain}</span>
+                            </div>
+                            <p className="text-sm font-semibold">{item.title}</p>
+                            <p className="muted mt-1 text-xs">{item.relevance_reason}</p>
+
+                            {embedUrl && (
+                              <div className="mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5">
+                                <iframe
+                                  src={embedUrl}
+                                  title={item.title}
+                                  className="h-64 w-full"
+                                  loading="lazy"
+                                  referrerPolicy="strict-origin-when-cross-origin"
+                                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                                  allowFullScreen
+                                />
+                              </div>
+                            )}
+                            {showImage && (
+                              <img
+                                src={item.url}
+                                alt={item.title}
+                                loading="lazy"
+                                className="mt-3 max-h-80 w-full rounded-md border border-black/10 object-contain bg-white"
+                              />
+                            )}
+                            <a
+                              href={item.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
+                            >
+                              Open source
+                            </a>
+                          </article>
+                        );
+                      })}
+                    </div>
+                  )}
+                </section>
+              )}
+            </div>
+          )}
+
           {activeTab === 'examples' && !isLocked && (
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-2">
@@ -1339,7 +1500,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                     {exercises.exercises.map((exercise, index) => {
                       const completion = completionByExerciseIndex.get(index);
                       const pendingFile = exerciseProofFilesByNode[activeNodeId]?.[index] || null;
-                      const proofHref = resolveBackendUrl(completion?.proof_url);
+                      const proofHref = completion?.proof_url || null;
                       const completeLoading = !!loadingByKey[keyFor(`exercise-complete-${index}`, activeNodeId)];
                       return (
                         <article key={`${exercise.title}-${index}`} className="rounded-lg border border-black/10 bg-paper/40 p-3">
@@ -1397,16 +1558,7 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                               Selected proof: {pendingFile.name}
                             </p>
                           )}
-                          {proofHref && (
-                            <a
-                              href={proofHref}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
-                            >
-                              View uploaded proof
-                            </a>
-                          )}
+                          {proofHref && <ProofArtifactViewer proofUrl={proofHref} showPreview={false} />}
                         </article>
                       );
                     })}

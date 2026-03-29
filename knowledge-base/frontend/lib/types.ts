@@ -3,6 +3,7 @@ export type ProgressState = 'not_started' | 'learning' | 'completed' | 'verified
 export type NoteType = 'personal' | 'lesson' | 'summary' | 'reflection' | 'reminder';
 export type CourseDepth = 'light' | 'standard' | 'deep_dive';
 export type StartingSkillLevel = 'beginner' | 'intermediate' | 'advanced';
+export type TechnicalDepth = 'beginner' | 'intermediate' | 'advanced' | 'degree' | 'masters' | 'phd';
 export type TopicMode = 'factual' | 'fictional' | 'hypothetical' | 'creative';
 export type AssessmentStyle =
   | 'open_text'
@@ -55,6 +56,7 @@ export interface Topic {
   goal: string;
   course_depth: CourseDepth;
   starting_skill_level: StartingSkillLevel;
+  technical_depth: TechnicalDepth;
   assessment_styles: AssessmentStyle[];
   created_at: string;
 }
@@ -93,11 +95,13 @@ export interface TopicInitializationResult {
 }
 
 export interface TopicPlausibilityCheck {
-  status: 'pass' | 'clarify' | 'block';
+  status: 'pass' | 'clarify' | 'needs_context' | 'block';
   confidence: number;
   reason: string;
   suggested_reframe: string;
   suggested_mode: TopicMode;
+  requires_source_material: boolean;
+  context_hint: string;
 }
 
 export interface SkillNode {
@@ -208,6 +212,23 @@ export interface Resource {
   source: 'stored' | 'generated' | 'regenerated';
   version: number;
   relevance_reason: string;
+}
+
+export interface DeepLessonMediaItem {
+  title: string;
+  url: string;
+  media_type: 'image' | 'video';
+  source_domain: string;
+  relevance_reason: string;
+}
+
+export interface DeepLesson {
+  skill_node_id: number;
+  title: string;
+  summary: string;
+  structured_content: Record<string, unknown>;
+  supporting_media: DeepLessonMediaItem[];
+  source: 'generated' | 'fallback';
 }
 
 export interface ExerciseCompletion {

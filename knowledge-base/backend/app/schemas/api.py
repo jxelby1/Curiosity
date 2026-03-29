@@ -19,6 +19,7 @@ class TopicCreateRequest(BaseModel):
     topic_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
     course_depth: Literal['light', 'standard', 'deep_dive'] = 'standard'
     starting_skill_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
+    technical_depth: Literal['beginner', 'intermediate', 'advanced', 'degree', 'masters', 'phd'] = 'intermediate'
     assessment_styles: list[
         Literal[
             'open_text',
@@ -55,6 +56,7 @@ class TopicResponse(BaseModel):
     goal: str
     course_depth: Literal['light', 'standard', 'deep_dive'] = 'standard'
     starting_skill_level: Literal['beginner', 'intermediate', 'advanced'] = 'beginner'
+    technical_depth: Literal['beginner', 'intermediate', 'advanced', 'degree', 'masters', 'phd'] = 'intermediate'
     assessment_styles: list[
         Literal[
             'open_text',
@@ -106,14 +108,17 @@ class TopicPlausibilityCheckRequest(BaseModel):
     description: str = Field(default='', max_length=500)
     goal: str = Field(default='', max_length=500)
     topic_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
+    technical_depth: Literal['beginner', 'intermediate', 'advanced', 'degree', 'masters', 'phd'] = 'intermediate'
 
 
 class TopicPlausibilityCheckResponse(BaseModel):
-    status: Literal['pass', 'clarify', 'block'] = 'pass'
+    status: Literal['pass', 'clarify', 'needs_context', 'block'] = 'pass'
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     reason: str = ''
     suggested_reframe: str = ''
     suggested_mode: Literal['factual', 'fictional', 'hypothetical', 'creative'] = 'factual'
+    requires_source_material: bool = False
+    context_hint: str = ''
 
 
 class SkillNodeResponse(BaseModel):
@@ -321,6 +326,23 @@ class ResourceResponse(BaseModel):
     source: Literal['stored', 'generated', 'regenerated']
     version: int
     relevance_reason: str
+
+
+class DeepLessonMediaItem(BaseModel):
+    title: str
+    url: str
+    media_type: Literal['image', 'video']
+    source_domain: str
+    relevance_reason: str
+
+
+class DeepLessonResponse(BaseModel):
+    skill_node_id: int
+    title: str
+    summary: str
+    structured_content: dict[str, Any]
+    supporting_media: list[DeepLessonMediaItem] = Field(default_factory=list)
+    source: Literal['generated', 'fallback']
 
 
 class ExerciseCompletionResponse(BaseModel):

@@ -10,6 +10,7 @@ import {
   AuthUser,
   CourseDepth,
   ChatReply,
+  DeepLesson,
   DocumentItem,
   ExerciseCompletionList,
   ExternalResource,
@@ -25,6 +26,7 @@ import {
   Topic,
   TopicInitializationResult,
   TopicMode,
+  TechnicalDepth,
   TopicPlausibilityCheck,
   TopicInitializationStatus,
   TopicProgress,
@@ -41,6 +43,29 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/
 type RequestOptions = RequestInit & {
   auth?: boolean;
 };
+
+function toApiRequestPath(pathOrUrl: string): string {
+  const input = (pathOrUrl || '').trim();
+  if (!input) return '/';
+
+  if (input.startsWith('http://') || input.startsWith('https://')) {
+    try {
+      const target = new URL(input);
+      const apiUrl = new URL(API_BASE);
+      if (target.origin === apiUrl.origin) {
+        const relative = `${target.pathname}${target.search}`;
+        return relative.startsWith('/api/') ? relative.slice(4) : relative;
+      }
+    } catch {
+      return input;
+    }
+    return input;
+  }
+
+  if (input.startsWith('/api/')) return input.slice(4);
+  if (input.startsWith('/')) return input;
+  return `/${input}`;
+}
 
 async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   const authEnabled = options?.auth !== false;
@@ -98,6 +123,59 @@ async function request<T>(path: string, options?: RequestOptions): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function requestBlob(path: string, options?: RequestOptions): Promise<Blob> {
+  const authEnabled = options?.auth !== false;
+  const token = authEnabled ? getAuthToken() : null;
+  const headers = new Headers(options?.headers || {});
+  if (authEnabled && token) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+
+  const requestPath = toApiRequestPath(path);
+  const requestUrl =
+    requestPath.startsWith('http://') || requestPath.startsWith('https://')
+      ? requestPath
+      : `${API_BASE}${requestPath}`;
+  const response = await fetch(requestUrl, {
+    ...options,
+    headers,
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    let message = `Request failed (${response.status})`;
+    const contentType = response.headers.get('content-type') || '';
+    if (contentType.includes('application/json')) {
+      try {
+        const payload = await response.json();
+        const detail = payload?.detail;
+        if (typeof detail === 'string' && detail.trim()) {
+          message = detail;
+        } else if (typeof payload?.message === 'string' && payload.message.trim()) {
+          message = payload.message;
+        }
+      } catch {
+        const detail = await response.text();
+        if (detail.trim()) message = detail;
+      }
+    } else {
+      const detail = await response.text();
+      if (detail.trim()) message = detail;
+    }
+
+    if (response.status === 401) {
+      throw new Error(`Unauthorized: ${message}`);
+    }
+    throw new Error(message);
+  }
+
+  return response.blob();
+}
+
+export async function fetchProtectedBlob(pathOrUrl: string): Promise<Blob> {
+  return requestBlob(pathOrUrl);
 }
 
 export async function register(input: {
@@ -175,6 +253,7 @@ export async function createTopic(input: {
   topic_mode?: TopicMode;
   course_depth?: CourseDepth;
   starting_skill_level?: StartingSkillLevel;
+  technical_depth?: TechnicalDepth;
   assessment_styles?: AssessmentStyle[];
 }): Promise<Topic> {
   return request<Topic>('/topics', {
@@ -187,6 +266,7 @@ export async function createTopic(input: {
       topic_mode: input.topic_mode ?? 'factual',
       course_depth: input.course_depth ?? 'standard',
       starting_skill_level: input.starting_skill_level ?? 'beginner',
+      technical_depth: input.technical_depth ?? 'intermediate',
       assessment_styles: input.assessment_styles ?? []
     })
   });
@@ -199,6 +279,7 @@ export async function createTopicAndInitialize(input: {
   topic_mode?: TopicMode;
   course_depth?: CourseDepth;
   starting_skill_level?: StartingSkillLevel;
+  technical_depth?: TechnicalDepth;
   assessment_styles?: AssessmentStyle[];
 }): Promise<TopicInitializationResult> {
   return request<TopicInitializationResult>('/topics/create-and-initialize', {
@@ -211,6 +292,7 @@ export async function createTopicAndInitialize(input: {
       topic_mode: input.topic_mode ?? 'factual',
       course_depth: input.course_depth ?? 'standard',
       starting_skill_level: input.starting_skill_level ?? 'beginner',
+      technical_depth: input.technical_depth ?? 'intermediate',
       assessment_styles: input.assessment_styles ?? []
     })
   });
@@ -221,6 +303,7 @@ export async function checkTopicPlausibility(input: {
   description?: string;
   goal?: string;
   topic_mode?: TopicMode;
+  technical_depth?: TechnicalDepth;
 }): Promise<TopicPlausibilityCheck> {
   return request<TopicPlausibilityCheck>('/topics/plausibility-check', {
     method: 'POST',
@@ -230,6 +313,7 @@ export async function checkTopicPlausibility(input: {
       description: input.description ?? '',
       goal: input.goal ?? '',
       topic_mode: input.topic_mode ?? 'factual',
+      technical_depth: input.technical_depth ?? 'intermediate',
     }),
   });
 }
@@ -398,6 +482,10 @@ export async function generateResource(input: {
   });
 }
 
+export async function getDeepLesson(skillId: number): Promise<DeepLesson> {
+  return request<DeepLesson>(`/skills/${skillId}/deep-lesson`);
+}
+
 export async function getExternalResources(skillId: number): Promise<ExternalResource[]> {
   const data = await request<{ resources: ExternalResource[] }>(`/skills/${skillId}/resources/external`);
   return data.resources;
@@ -546,7 +634,7 @@ export async function createDeepDiveBranch(input: {
   skillId: number;
   focus?: string;
   branch_size?: number;
-  purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project';
+  purpose?: 'exploration' | 'specialization' | 'enrichment' | 'remediation';
 }): Promise<SkillTree> {
   const resolvedPurpose = input.purpose ?? 'exploration';
   const resolvedBranchSize = input.branch_size ?? 1;

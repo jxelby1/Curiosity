@@ -119,6 +119,61 @@ def _max_len_from_metadata(metadata: list[Any]) -> int | None:
     return None
 
 
+def _hard_cut_field(field_name: str) -> bool:
+    lowered = field_name.lower()
+    if lowered in {
+        'id',
+        'key',
+        'url',
+        'slug',
+        'email',
+        'token',
+        'code',
+        'filename',
+        'content_type',
+        'kind',
+        'status',
+    }:
+        return True
+    if lowered.endswith('_id') or lowered.endswith('_url') or lowered.endswith('_key'):
+        return True
+    return False
+
+
+def _truncate_text_cleanly(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    if max_len <= 1:
+        return value[:max_len]
+    if max_len <= 4:
+        return value[:max_len]
+
+    budget = max_len - 1  # reserve for ellipsis
+    window = value[:budget]
+
+    sentence_matches = list(re.finditer(r'[.!?](?=(?:["\')\]]|\s|$))', window))
+    cut_idx: int | None = None
+    if sentence_matches:
+        candidate = sentence_matches[-1].end()
+        if candidate >= int(budget * 0.55):
+            cut_idx = candidate
+
+    if cut_idx is None:
+        candidate = max(window.rfind(' '), window.rfind('\n'), window.rfind('\t'))
+        if candidate >= int(budget * 0.65):
+            cut_idx = candidate
+
+    if cut_idx is None:
+        cut_idx = budget
+
+    trimmed = window[:cut_idx].rstrip(' ,;:-')
+    if not trimmed:
+        trimmed = window.rstrip()
+    if len(trimmed) >= max_len:
+        trimmed = trimmed[: max_len - 1].rstrip()
+    return f'{trimmed}…'
+
+
 def _sanitize_payload_for_model(payload: dict[str, Any], model: type[BaseModel]) -> dict[str, Any]:
     sanitized = dict(payload)
 
@@ -132,7 +187,10 @@ def _sanitize_payload_for_model(payload: dict[str, Any], model: type[BaseModel])
         if isinstance(value, str):
             max_len = _max_len_from_metadata(list(field.metadata))
             if max_len is not None and len(value) > max_len:
-                sanitized[field_name] = value[:max_len].rstrip()
+                if _hard_cut_field(field_name):
+                    sanitized[field_name] = value[:max_len].rstrip()
+                else:
+                    sanitized[field_name] = _truncate_text_cleanly(value.rstrip(), max_len)
             continue
 
         if value is None:

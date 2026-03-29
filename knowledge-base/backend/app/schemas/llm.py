@@ -51,6 +51,20 @@ class SkillGraphPlan(BaseModel):
     nodes: list[SkillPlanNode] = Field(min_length=5, max_length=20)
 
 
+class SkillNodeTitleRewrite(BaseModel):
+    key: str = Field(min_length=1, max_length=40)
+    name: str = Field(min_length=3, max_length=120)
+
+    @field_validator('key')
+    @classmethod
+    def normalize_key(cls, value: str) -> str:
+        return value.strip().lower().replace(' ', '_').replace('-', '_')
+
+
+class SkillNodeTitleRewritePlan(BaseModel):
+    nodes: list[SkillNodeTitleRewrite] = Field(min_length=1, max_length=24)
+
+
 class DeepDivePlanNode(BaseModel):
     key: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=180)
@@ -80,6 +94,19 @@ class BranchSuggestionPlanItem(BaseModel):
     focus: str = Field(min_length=3, max_length=180)
     rationale: str = Field(min_length=20, max_length=320)
     purpose: Literal['enrichment', 'remediation', 'specialization', 'exploration', 'assessment_prep', 'project']
+
+    @field_validator('purpose', mode='before')
+    @classmethod
+    def normalize_purpose(cls, value: object) -> str:
+        normalized = str(value or '').strip().lower()
+        mapping = {
+            'assessment_prep': 'remediation',
+            'project': 'specialization',
+            'curiosity': 'exploration',
+        }
+        candidate = mapping.get(normalized, normalized or 'exploration')
+        allowed = {'enrichment', 'remediation', 'specialization', 'exploration'}
+        return candidate if candidate in allowed else 'exploration'
 
 
 class BranchSuggestionPlan(BaseModel):
@@ -139,6 +166,20 @@ class LessonPlan(BaseModel):
     next_steps: list[str] = Field(min_length=1, max_length=4)
 
 
+class DeepLessonSection(BaseModel):
+    heading: str = Field(min_length=3, max_length=160)
+    content: str = Field(min_length=80, max_length=1800)
+
+
+class DeepLessonPlan(BaseModel):
+    title: str = Field(min_length=4, max_length=180)
+    summary: str = Field(min_length=30, max_length=420)
+    essential_questions: list[str] = Field(min_length=2, max_length=6)
+    sections: list[DeepLessonSection] = Field(min_length=3, max_length=8)
+    key_terms: list[LessonKeyConcept] = Field(min_length=2, max_length=10)
+    study_prompts: list[str] = Field(min_length=2, max_length=6)
+
+
 class ExamplePlanItem(BaseModel):
     name: str = Field(min_length=3, max_length=120)
     explanation: str = Field(min_length=20, max_length=500)
@@ -179,7 +220,7 @@ class TopicRelevancePlan(BaseModel):
 
 
 class TopicPlausibilityPlan(BaseModel):
-    status: Literal['pass', 'clarify', 'block']
+    status: Literal['pass', 'clarify', 'needs_context', 'block']
     confidence: float = Field(ge=0.0, le=1.0)
     reason: str = Field(min_length=12, max_length=320)
     suggested_reframe: str = Field(min_length=12, max_length=280)

@@ -30,6 +30,7 @@ def _apply_lightweight_migrations() -> None:
         'ALTER TABLE skill_nodes ADD COLUMN IF NOT EXISTS branch_parent_skill_id INTEGER NULL',
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS course_depth VARCHAR(30) DEFAULT 'standard'",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS starting_skill_level VARCHAR(30) DEFAULT 'beginner'",
+        "ALTER TABLE topics ADD COLUMN IF NOT EXISTS technical_depth VARCHAR(30) DEFAULT 'intermediate'",
         "ALTER TABLE topics ADD COLUMN IF NOT EXISTS allowed_assessment_styles JSON DEFAULT '[\"short_answer\",\"multiple_choice\",\"flashcard\"]'::json",
         'ALTER TABLE documents ADD COLUMN IF NOT EXISTS note_id INTEGER NULL',
         "ALTER TABLE user_skill_states ADD COLUMN IF NOT EXISTS progress_state VARCHAR(40) DEFAULT 'not_started'",

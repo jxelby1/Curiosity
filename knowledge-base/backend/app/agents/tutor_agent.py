@@ -391,6 +391,7 @@ class TutorAgent:
                     skill=node.name if node else topic.name,
                     query=message,
                     limit=4,
+                    source_policy='grounding',
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning('tutor.web_search_skipped topic_id=%s reason=%s', topic.id, exc)

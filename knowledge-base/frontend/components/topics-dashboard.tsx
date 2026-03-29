@@ -17,9 +17,10 @@ import {
   COURSE_DEPTH_OPTIONS,
   DEFAULT_ASSESSMENT_STYLES,
   STARTING_SKILL_LEVEL_OPTIONS,
+  TECHNICAL_DEPTH_OPTIONS,
 } from '@/lib/course-options';
 import { formatDisplayTag } from '@/lib/display-format';
-import { AssessmentStyle, CourseDepth, StartingSkillLevel, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
+import { AssessmentStyle, CourseDepth, StartingSkillLevel, TechnicalDepth, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
 
 const TOPIC_NAME_MAX = 120;
 const TOPIC_DESC_MAX = 500;
@@ -53,6 +54,7 @@ export function TopicsDashboard() {
   const [topicMode, setTopicMode] = useState<TopicMode>('factual');
   const [courseDepth, setCourseDepth] = useState<CourseDepth>('standard');
   const [startingSkillLevel, setStartingSkillLevel] = useState<StartingSkillLevel>('beginner');
+  const [technicalDepth, setTechnicalDepth] = useState<TechnicalDepth>('intermediate');
   const [assessmentStyles, setAssessmentStyles] = useState<AssessmentStyle[]>(DEFAULT_ASSESSMENT_STYLES);
   const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
   const [plausibilityPrompt, setPlausibilityPrompt] = useState<TopicPlausibilityCheck | null>(null);
@@ -146,8 +148,12 @@ export function TopicsDashboard() {
           description: description.trim(),
           goal: goal.trim(),
           topic_mode: effectiveMode,
+          technical_depth: technicalDepth,
         });
-        if ((plausibility.status === 'clarify' || plausibility.status === 'block') && effectiveMode === 'factual') {
+        if (
+          (plausibility.status === 'clarify' || plausibility.status === 'needs_context' || plausibility.status === 'block')
+          && effectiveMode === 'factual'
+        ) {
           setPlausibilityPrompt(plausibility);
           return;
         }
@@ -160,6 +166,7 @@ export function TopicsDashboard() {
         topic_mode: effectiveMode,
         course_depth: courseDepth,
         starting_skill_level: startingSkillLevel,
+        technical_depth: technicalDepth,
         assessment_styles: assessmentStyles,
       });
       router.push(`/topics/${result.topic.id}/initializing`);
@@ -348,11 +355,11 @@ export function TopicsDashboard() {
                         {item.verified_nodes}/{item.total_nodes} verified · mastery {pct(item.mastery_average)}
                       </p>
                       {topic && (
-                        <p className="text-xs text-black/60">
-                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {topic.assessment_styles.length} Assessment Styles
-                        </p>
-                      )}
-                    </div>
+                      <p className="text-xs text-black/60">
+                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {formatDisplayTag(topic.technical_depth)} depth · {topic.assessment_styles.length} Assessment Styles
+                      </p>
+                    )}
+                  </div>
                   </Link>
                 );
               })}
@@ -469,6 +476,30 @@ export function TopicsDashboard() {
                 </div>
               </div>
 
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Technical depth</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  {TECHNICAL_DEPTH_OPTIONS.map((item) => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      onClick={() => setTechnicalDepth(item.value)}
+                      className={`rounded-md border p-2 text-left ${
+                        technicalDepth === item.value
+                          ? 'border-ink bg-white shadow-sm'
+                          : 'border-black/10 bg-white/80'
+                      }`}
+                    >
+                      <p className="text-sm font-semibold">{item.label}</p>
+                      <p className="mt-1 text-xs text-black/60">{item.description}</p>
+                    </button>
+                  ))}
+                </div>
+                <p className="mt-2 text-xs text-black/60">
+                  Controls how rigorous lessons, examples, and assessments should be.
+                </p>
+              </div>
+
               <div className="mt-3 rounded-lg border border-black/10 bg-white/75 p-2">
                 <button
                   type="button"
@@ -534,10 +565,17 @@ export function TopicsDashboard() {
 
             {plausibilityPrompt && (
               <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm">
-                <p className="font-semibold text-amber-900">This topic may need clarification</p>
+                <p className="font-semibold text-amber-900">
+                  {plausibilityPrompt.status === 'needs_context'
+                    ? 'This topic needs more grounding context'
+                    : 'This topic may need clarification'}
+                </p>
                 <p className="mt-1 text-amber-900/90">{plausibilityPrompt.reason}</p>
                 {plausibilityPrompt.suggested_reframe && (
                   <p className="mt-1 text-amber-900/80">{plausibilityPrompt.suggested_reframe}</p>
+                )}
+                {plausibilityPrompt.context_hint && (
+                  <p className="mt-1 text-amber-900/80">{plausibilityPrompt.context_hint}</p>
                 )}
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
@@ -548,7 +586,7 @@ export function TopicsDashboard() {
                       setPlausibilityPrompt(null);
                     }}
                   >
-                    Revise topic
+                    Add more context
                   </button>
                   <button
                     type="button"

@@ -51,7 +51,8 @@ class Settings(BaseSettings):
     exercise_proof_storage_dir: str = './data/exercise-proofs'
     exercise_proof_max_mb: int = 8
 
-    search_provider: Literal['serper'] = 'serper'
+    search_provider: Literal['openai_web', 'serper'] = 'openai_web'
+    openai_web_search_model: str = 'gpt-4.1-mini'
     search_api_key: str = Field(default='')
     search_base_url: str = 'https://google.serper.dev/search'
 

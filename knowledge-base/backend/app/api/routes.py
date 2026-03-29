@@ -27,6 +27,7 @@ from app.core.course_preferences import (
     normalize_assessment_styles,
     normalize_course_depth,
     normalize_starting_skill_level,
+    normalize_technical_depth,
 )
 from app.core.config import get_settings
 from app.core.exceptions import ConfigurationError, ProviderError
@@ -73,6 +74,7 @@ from app.schemas.api import (
     BranchSuggestionGenerateRequest,
     BranchSuggestionListResponse,
     BranchSuggestionResponse,
+    DeepLessonResponse,
     SaveTutorResponseToNoteRequest,
     TutorNoteSaveResponse,
     DeepDiveBranchRequest,
@@ -176,6 +178,7 @@ def _topic_to_response(topic: Topic) -> TopicResponse:
         goal=topic.goal,
         course_depth=normalize_course_depth(topic.course_depth),
         starting_skill_level=normalize_starting_skill_level(topic.starting_skill_level),
+        technical_depth=normalize_technical_depth(topic.technical_depth),
         assessment_styles=normalize_assessment_styles(topic.allowed_assessment_styles),
         created_at=topic.created_at,
     )
@@ -257,7 +260,19 @@ def _topic_init_to_response(job: TopicInitializationJob) -> TopicInitializationS
     )
 
 
-def _raise_topic_clarification(result: TopicPlausibilityCheckResponse) -> None:
+def _raise_topic_guardrail(result: TopicPlausibilityCheckResponse) -> None:
+    if result.status == 'needs_context':
+        raise HTTPException(
+            status_code=422,
+            detail={
+                'code': 'topic_needs_context',
+                'message': (
+                    'This factual topic needs more grounding before we can build a reliable course. '
+                    'Add concrete context, source notes, or reframe as fictional/hypothetical.'
+                ),
+                'plausibility': result.model_dump(),
+            },
+        )
     raise HTTPException(
         status_code=422,
         detail={
@@ -1264,6 +1279,7 @@ async def topic_plausibility_check(
         description=payload.description.strip(),
         goal=payload.goal.strip(),
         topic_mode=payload.topic_mode,
+        technical_depth=payload.technical_depth,
     )
     return result
 
@@ -1279,9 +1295,10 @@ async def create_topic(
         description=payload.description.strip(),
         goal=payload.goal.strip(),
         topic_mode=payload.topic_mode,
+        technical_depth=payload.technical_depth,
     )
-    if plausibility.status in {'clarify', 'block'} and payload.topic_mode == 'factual':
-        _raise_topic_clarification(plausibility)
+    if plausibility.status in {'clarify', 'needs_context', 'block'} and payload.topic_mode == 'factual':
+        _raise_topic_guardrail(plausibility)
 
     topic = Topic(
         user_id=current_user.id,
@@ -1290,6 +1307,7 @@ async def create_topic(
         goal=payload.goal.strip(),
         course_depth=normalize_course_depth(payload.course_depth),
         starting_skill_level=normalize_starting_skill_level(payload.starting_skill_level),
+        technical_depth=normalize_technical_depth(payload.technical_depth),
         allowed_assessment_styles=normalize_assessment_styles(payload.assessment_styles),
     )
     db.add(topic)
@@ -1322,9 +1340,10 @@ async def create_topic_and_initialize(
         description=payload.description.strip(),
         goal=payload.goal.strip(),
         topic_mode=payload.topic_mode,
+        technical_depth=payload.technical_depth,
     )
-    if plausibility.status in {'clarify', 'block'} and payload.topic_mode == 'factual':
-        _raise_topic_clarification(plausibility)
+    if plausibility.status in {'clarify', 'needs_context', 'block'} and payload.topic_mode == 'factual':
+        _raise_topic_guardrail(plausibility)
 
     topic = Topic(
         user_id=current_user.id,
@@ -1333,6 +1352,7 @@ async def create_topic_and_initialize(
         goal=payload.goal.strip(),
         course_depth=normalize_course_depth(payload.course_depth),
         starting_skill_level=normalize_starting_skill_level(payload.starting_skill_level),
+        technical_depth=normalize_technical_depth(payload.technical_depth),
         allowed_assessment_styles=normalize_assessment_styles(payload.assessment_styles),
     )
     db.add(topic)
@@ -2054,6 +2074,54 @@ async def generate_resource(
         source=source,
         version=resource.version,
         relevance_reason=resource.relevance_reason,
+    )
+
+
+@router.get('/skills/{skill_id}/deep-lesson', response_model=DeepLessonResponse)
+async def get_deep_lesson(
+    skill_id: int,
+    current_user: CurrentUser,
+    db: Session = Depends(get_db),
+) -> DeepLessonResponse:
+    skill = _get_skill_or_404(db, skill_id)
+    topic = _get_topic_or_404(db, skill.topic_id)
+    if topic.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail='Topic not found')
+    _assert_skill_unlocked_for_learning(db, user_id=current_user.id, skill=skill)
+
+    try:
+        structured_content, source = await resource_agent.generate_deep_lesson_material(
+            db,
+            user_id=current_user.id,
+            topic=topic,
+            skill_node=skill,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _raise_service_error(exc)
+
+    supporting_media: list[dict[str, str]] = []
+    try:
+        supporting_media = await resource_agent.fetch_strict_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            deep_lesson=structured_content,
+            limit=2,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            'resource.deep_lesson_media_error topic_id=%s skill_id=%s error=%s',
+            topic.id,
+            skill.id,
+            exc,
+        )
+
+    return DeepLessonResponse(
+        skill_node_id=skill.id,
+        title=str(structured_content.get('title') or f'{skill.name}: Deep dive'),
+        summary=str(structured_content.get('summary') or ''),
+        structured_content=structured_content,
+        supporting_media=supporting_media,
+        source=source,
     )
 
 

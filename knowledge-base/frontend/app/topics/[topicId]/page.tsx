@@ -239,7 +239,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
     skillId: number,
     input: {
       focus?: string;
-      purpose: 'exploration' | 'specialization' | 'enrichment' | 'remediation' | 'assessment_prep' | 'project';
+      purpose: 'exploration' | 'specialization' | 'enrichment' | 'remediation';
     }
   ) {
     setBranchActionLoading(skillId, true);
@@ -380,6 +380,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
             <span className="badge border border-black/15 bg-white">Growth Stage {retention?.tree_stage || 1}</span>
             <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.course_depth)} Course</span>
             <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.starting_skill_level)} Start</span>
+            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.technical_depth)} Depth</span>
             {retention && <span className="badge border border-black/15 bg-white">{retention.cadence === 'daily' ? 'Daily Plan' : 'Weekly Plan'}</span>}
             {!!retention?.streak_days && <span className="badge border border-black/15 bg-white">{retention.streak_days}-Day Streak</span>}
           </div>

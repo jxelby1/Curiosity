@@ -16,6 +16,8 @@ from app.core.course_preferences import (
     build_assessment_style_sequence,
     normalize_assessment_styles,
     normalize_starting_skill_level,
+    normalize_technical_depth,
+    technical_depth_prompt_guidance,
 )
 from app.db.models import (
     Assessment,
@@ -631,6 +633,7 @@ class AssessmentAgent:
         topic: Topic,
         skill_node: SkillNode,
         learner_level: str,
+        technical_depth: str,
         user_state: UserSkillState | None,
         difficulty_band: str,
         prerequisite_names: list[str],
@@ -655,6 +658,7 @@ class AssessmentAgent:
             f'Skill description: {skill_node.description}\\n'
             f'Skill difficulty (1-5): {skill_node.difficulty} ({difficulty_band})\\n'
             f'Learner level estimate: {learner_level}\\n'
+            f'Technical depth preference: {technical_depth}\\n'
             f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\\n'
             f'Prerequisites: {", ".join(prerequisite_names) if prerequisite_names else "None"}\\n'
             f'Target question count: {question_count}\\n'
@@ -679,6 +683,7 @@ class AssessmentAgent:
             '- Never return empty arrays for required conceptual fields.\\n'
             '- Keep question prompts concise and node-specific.\\n'
             '- Intro/foundation nodes must avoid advanced capstone asks.\\n\\n'
+            f'- Technical depth guidance: {technical_depth_prompt_guidance(normalize_technical_depth(technical_depth))}\\n\\n'
             'Valid example fragment:\\n'
             '{\"id\":\"q_1\",\"assessment_style\":\"short_answer\",\"question_type\":\"short_answer\",\"prompt\":\"...\",'
             '\"model_answer\":\"A concise but complete answer...\",\"hints\":[\"mention x clearly\"],\"expected_concepts\":[\"x\"],'
@@ -721,6 +726,7 @@ class AssessmentAgent:
             f'Skill node: {skill_node.name}\\n'
             f'Skill description: {skill_node.description}\\n'
             f'Learner level: {learner_level}\\n'
+            f'Technical depth: {technical_depth}\\n'
             f'Generate exactly {max(4, min(question_count, 5))} concise questions across 3-5 types.\\n'
             f'Allowed styles: {json.dumps(allowed_styles)}\\n'
             f'Style order to follow: {json.dumps(style_sequence[:max(4, min(question_count, 5))])}\\n'
@@ -887,6 +893,7 @@ class AssessmentAgent:
             )
         )
         learner_level = self._learner_level(user_state)
+        technical_depth = normalize_technical_depth(getattr(topic, 'technical_depth', None))
         difficulty_band = self._difficulty_band(skill_node.difficulty)
         allowed_styles = normalize_assessment_styles(preferred_styles or topic.allowed_assessment_styles)
         learner_level_for_styles = normalize_starting_skill_level(learner_level)
@@ -936,6 +943,7 @@ class AssessmentAgent:
             topic=topic,
             skill_node=skill_node,
             learner_level=learner_level,
+            technical_depth=technical_depth,
             user_state=user_state,
             difficulty_band=difficulty_band,
             prerequisite_names=prerequisite_names,
