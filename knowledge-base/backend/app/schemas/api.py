@@ -130,6 +130,7 @@ class SkillNodeResponse(BaseModel):
     node_kind: Literal['core', 'optional_branch'] = 'core'
     branch_origin: str = 'core'
     branch_purpose: str = 'core_curriculum'
+    instructional_role: str = 'foundational_concept'
     branch_depth: int = 0
     branch_parent_skill_id: int | None = None
     mastery_estimate: float

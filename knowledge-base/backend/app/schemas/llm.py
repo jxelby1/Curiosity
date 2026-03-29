@@ -33,6 +33,18 @@ class SkillPlanNode(BaseModel):
     key: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(min_length=10, max_length=600)
+    instructional_role: Literal[
+        'foundational_concept',
+        'conceptual_bridge',
+        'practical_application',
+        'case_deepening',
+        'comparison_contrast',
+        'assessment_preparation',
+        'synthesis_review',
+        'remediation',
+        'enrichment',
+        'specialization',
+    ] = 'foundational_concept'
     difficulty: int = Field(ge=1, le=5)
     prerequisites: list[str] = Field(default_factory=list, max_length=2)
 
@@ -69,6 +81,16 @@ class DeepDivePlanNode(BaseModel):
     key: str = Field(min_length=1, max_length=40)
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(min_length=10, max_length=600)
+    instructional_role: Literal[
+        'practical_application',
+        'case_deepening',
+        'comparison_contrast',
+        'assessment_preparation',
+        'synthesis_review',
+        'remediation',
+        'enrichment',
+        'specialization',
+    ] = 'enrichment'
     difficulty: int = Field(ge=1, le=5)
     prerequisites: list[str] = Field(default_factory=list, max_length=2)
 

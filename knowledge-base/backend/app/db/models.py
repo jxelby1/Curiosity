@@ -84,6 +84,8 @@ class Topic(Base):
     starting_skill_level: Mapped[str] = mapped_column(String(30), default='beginner')
     technical_depth: Mapped[str] = mapped_column(String(30), default='intermediate')
     allowed_assessment_styles: Mapped[list[str]] = mapped_column(JSON, default=lambda: DEFAULT_ASSESSMENT_STYLES.copy())
+    curriculum_blueprint: Mapped[dict] = mapped_column(JSON, default=dict)
+    curriculum_ledger: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped['User'] = relationship(back_populates='topics')
@@ -135,6 +137,7 @@ class SkillNode(Base):
     node_kind: Mapped[str] = mapped_column(String(40), default='core')
     branch_origin: Mapped[str] = mapped_column(String(60), default='core')
     branch_purpose: Mapped[str] = mapped_column(String(60), default='core_curriculum')
+    instructional_role: Mapped[str] = mapped_column(String(80), default='foundational_concept')
     branch_depth: Mapped[int] = mapped_column(Integer, default=0)
     branch_parent_skill_id: Mapped[int | None] = mapped_column(ForeignKey('skill_nodes.id'), nullable=True, index=True)
     name: Mapped[str] = mapped_column(String(255), index=True)

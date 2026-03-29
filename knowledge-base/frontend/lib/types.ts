@@ -113,6 +113,7 @@ export interface SkillNode {
   node_kind: 'core' | 'optional_branch';
   branch_origin: string;
   branch_purpose: string;
+  instructional_role: string;
   branch_depth: number;
   branch_parent_skill_id: number | null;
   mastery_estimate: number;

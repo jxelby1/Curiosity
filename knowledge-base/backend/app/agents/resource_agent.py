@@ -25,6 +25,8 @@ from app.schemas.llm import (
     LessonPlan,
 )
 from app.services.llm import LLMService
+from app.services.course_memory import CourseMemoryService, CourseMemorySnapshot
+from app.services.course_research import CourseResearchService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 
@@ -123,27 +125,32 @@ _VISUAL_MEDIA_HINTS = (
     'satellite',
     'atlas',
 )
-_STRICT_MEDIA_SCORE_THRESHOLD = 0.34
+_STRICT_MEDIA_SCORE_THRESHOLD = 0.28
 _RELAXED_MEDIA_SCORE_THRESHOLD = 0.2
-_LESSON_WEB_GROUNDING_SCORE_THRESHOLD = 0.28
-_LESSON_WEB_GROUNDING_KEYWORDS = (
-    'hidden gem',
-    'neighborhood',
-    'neighbourhood',
-    'local',
-    'city',
-    'region',
-    'geography',
-    'history',
-    'culture',
-    'travel',
-    'guide',
-    'venue',
-    'cafe',
-    'restaurant',
-    'event',
-    'current',
-    'latest',
+_BROAD_MEDIA_SCORE_THRESHOLD = 0.1
+_AI_SLOP_PHRASES = (
+    'in this section',
+    'it is important to note',
+    'in today',
+    'this highlights the importance',
+    'let us explore',
+    'overall,',
+    'in conclusion,',
+    'delve into',
+    'leveraging',
+    'optimization strategy',
+)
+_GENERIC_WAFFLE_TERMS = (
+    'optimization',
+    'optimisation',
+    'framework',
+    'strategy',
+    'synergy',
+    'best practice',
+    'methodology',
+    'stakeholder',
+    'roadmap',
+    'leverage',
 )
 
 
@@ -179,6 +186,10 @@ def _truncate_text_cleanly(value: str, max_len: int) -> str:
     if len(trimmed) >= max_len:
         trimmed = trimmed[: max_len - 1].rstrip()
     return f'{trimmed}…'
+
+
+def _extract_terms(text: str) -> list[str]:
+    return re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", (text or '').lower())
 
 
 def _clean_clipped_fragment(value: Any, *, max_len: int) -> str:
@@ -251,10 +262,14 @@ class ResourceAgent:
         llm_service: LLMService,
         search_service: ExternalSearchService,
         retrieval_service: RetrievalService,
+        course_memory_service: CourseMemoryService | None = None,
+        course_research_service: CourseResearchService | None = None,
     ) -> None:
         self.llm_service = llm_service
         self.search_service = search_service
         self.retrieval_service = retrieval_service
+        self.course_memory_service = course_memory_service or CourseMemoryService()
+        self.course_research_service = course_research_service or CourseResearchService(search_service)
         self.settings = get_settings()
 
     def _difficulty_band(self, difficulty: int) -> str:
@@ -286,6 +301,95 @@ class ResourceAgent:
             '- Avoid generic filler, broad motivational language, and repetitive transition phrases.\n'
             f'- Technical depth guidance: {technical_depth_prompt_guidance(technical_depth)}\n'
         )
+
+    def _course_memory_context(self, snapshot: CourseMemorySnapshot) -> str:
+        return snapshot.to_prompt_context()
+
+    def _editorial_spine_context(self, topic: Topic) -> str:
+        blueprint = topic.curriculum_blueprint if isinstance(topic.curriculum_blueprint, dict) else {}
+        core_arc = blueprint.get('core_arc')
+        if not isinstance(core_arc, list) or not core_arc:
+            return 'No editorial spine available yet.'
+        lines: list[str] = []
+        for item in core_arc[:10]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get('name') or '').strip()
+            role = str(item.get('instructional_role') or 'core').strip()
+            if name:
+                lines.append(f'- {name} ({role})')
+        return '\n'.join(lines) if lines else 'No editorial spine available yet.'
+
+    def _stable_coverage_context(self, snapshot: CourseMemorySnapshot) -> str:
+        if not snapshot.taught_node_lines:
+            return 'No completed/stable coverage yet.'
+        lines = '\n'.join(f'- {line}' for line in snapshot.taught_node_lines[:8])
+        return (
+            f'{lines}\n'
+            'Treat completed coverage as stable. Avoid re-teaching the same concepts at the same depth unless remediation is explicit.'
+        )
+
+    def _writing_slop_issues(self, structured_content: dict[str, Any], *, kind: str) -> list[str]:
+        if kind not in {'lesson', 'deep_lesson'}:
+            return []
+        text_parts: list[str] = []
+        text_parts.append(str(structured_content.get('summary') or ''))
+        sections = structured_content.get('sections')
+        if isinstance(sections, list):
+            for item in sections:
+                if isinstance(item, dict):
+                    text_parts.append(str(item.get('content') or ''))
+        blob = ' '.join(text_parts).lower()
+        issues: list[str] = []
+        hit_count = sum(1 for phrase in _AI_SLOP_PHRASES if phrase in blob)
+        if hit_count >= 2:
+            issues.append('formulaic_phrasing')
+        waffle_hits = sum(1 for term in _GENERIC_WAFFLE_TERMS if term in blob)
+        if waffle_hits >= 3:
+            issues.append('generic_abstract_language')
+        if blob.count('important') >= 4:
+            issues.append('padding_language')
+        if blob.count('example') == 0 and blob.count('for instance') == 0:
+            issues.append('missing_specific_examples')
+        return issues
+
+    def _repetition_issues(
+        self,
+        *,
+        kind: str,
+        structured_content: dict[str, Any],
+        memory: CourseMemorySnapshot,
+    ) -> list[str]:
+        issues: list[str] = []
+        if kind == 'examples':
+            examples = structured_content.get('examples')
+            if isinstance(examples, list):
+                existing = {item.lower() for item in memory.used_examples}
+                overlap = 0
+                for item in examples:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get('name') or '').strip().lower()
+                    if name and name in existing:
+                        overlap += 1
+                if overlap >= 1:
+                    issues.append('reused_examples')
+
+        if kind in {'lesson', 'deep_lesson'}:
+            summary = str(structured_content.get('summary') or '')
+            candidate_tokens = set(_extract_terms(summary))
+            taught_tokens = set(_extract_terms(' '.join(memory.taught_concepts[:16])))
+            if candidate_tokens and taught_tokens:
+                overlap_ratio = len(candidate_tokens & taught_tokens) / max(1, min(len(candidate_tokens), len(taught_tokens)))
+                if overlap_ratio >= 0.85:
+                    issues.append('summary_overlaps_prior_teaching')
+            future_tokens = set(_extract_terms(' '.join(memory.future_core_lines[:10])))
+            if candidate_tokens and future_tokens:
+                overlap_ratio = len(candidate_tokens & future_tokens) / max(1, min(len(candidate_tokens), len(future_tokens)))
+                if overlap_ratio >= 0.82:
+                    issues.append('premature_future_overlap')
+
+        return issues
 
     def _lesson_quality_signals(
         self,
@@ -882,108 +986,6 @@ class ResourceAgent:
             score += 0.05
         return min(score, 1.0)
 
-    def _grounding_relevance_score(
-        self,
-        *,
-        topic: Topic,
-        skill_node: SkillNode,
-        title: str,
-        summary: str,
-        url: str,
-        relevance_score: float,
-    ) -> float:
-        haystack = f'{title} {summary} {url}'.lower()
-        topic_tokens = [item for item in re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", topic.name.lower()) if len(item) > 3]
-        skill_tokens = [item for item in re.findall(r"[a-zA-Z][a-zA-Z'-]{2,}", skill_node.name.lower()) if len(item) > 3]
-
-        score = relevance_score
-        score += min(0.2, sum(0.05 for token in topic_tokens if token in haystack))
-        score += min(0.2, sum(0.05 for token in skill_tokens if token in haystack))
-        if any(marker in haystack for marker in _LESSON_WEB_GROUNDING_KEYWORDS):
-            score += 0.08
-        if any(marker in haystack for marker in ('official', 'museum', 'archive', 'map', 'guide')):
-            score += 0.06
-        return min(score, 1.0)
-
-    def _should_use_web_grounding(
-        self,
-        *,
-        topic: Topic,
-        skill_node: SkillNode,
-        kind: str,
-        retrieved_hits: int,
-    ) -> bool:
-        if kind not in {'lesson', 'examples'}:
-            return False
-        topic_blob = f'{topic.name} {topic.description} {topic.goal} {skill_node.name} {skill_node.description}'.lower()
-        dynamic_topic = any(marker in topic_blob for marker in _LESSON_WEB_GROUNDING_KEYWORDS)
-        return dynamic_topic or retrieved_hits < 2
-
-    async def _build_web_grounding_context(
-        self,
-        *,
-        topic: Topic,
-        skill_node: SkillNode,
-        kind: str,
-        retrieved_hits: int,
-        limit: int = 4,
-    ) -> str:
-        if not self._should_use_web_grounding(
-            topic=topic,
-            skill_node=skill_node,
-            kind=kind,
-            retrieved_hits=retrieved_hits,
-        ):
-            return ''
-
-        query = (
-            f'{topic.name} {skill_node.name} specific examples local references '
-            'trusted guides maps educational references'
-        )
-        try:
-            web_results = await self.search_service.search(
-                topic.name,
-                skill_node.name,
-                query=query,
-                limit=max(6, limit * 2),
-                source_policy='grounding',
-            )
-        except (ConfigurationError, ProviderError) as exc:
-            logger.info(
-                'resource.web_grounding_skipped topic_id=%s skill_id=%s kind=%s reason=%s',
-                topic.id,
-                skill_node.id,
-                kind,
-                exc,
-            )
-            return ''
-
-        ranked: list[tuple[float, Any]] = []
-        for item in web_results:
-            score = self._grounding_relevance_score(
-                topic=topic,
-                skill_node=skill_node,
-                title=item.title,
-                summary=item.summary,
-                url=item.url,
-                relevance_score=item.relevance_score,
-            )
-            if score < _LESSON_WEB_GROUNDING_SCORE_THRESHOLD:
-                continue
-            ranked.append((score, item))
-
-        ranked.sort(key=lambda row: row[0], reverse=True)
-        selected = [item for _, item in ranked[:limit]]
-        if not selected:
-            return ''
-
-        context_lines = []
-        for item in selected:
-            context_lines.append(
-                f'- {item.title} ({item.source_domain or self._domain_for_url(item.url)}): {item.summary[:180]} [{item.url}]'
-            )
-        return '\n'.join(context_lines)
-
     def _is_trusted_media_candidate(self, *, domain: str, title: str, summary: str, kind: str) -> bool:
         if not domain:
             return False
@@ -1030,6 +1032,12 @@ class ResourceAgent:
         skill_node: SkillNode,
     ) -> tuple[dict[str, Any], Literal['generated', 'fallback']]:
         technical_depth = self._technical_depth(topic)
+        memory_snapshot = self.course_memory_service.build_snapshot(
+            db,
+            topic=topic,
+            user_id=user_id,
+            focus_skill_id=skill_node.id,
+        )
         retrieved = await self.retrieval_service.retrieve_chunks(
             db,
             topic_id=topic.id,
@@ -1037,13 +1045,17 @@ class ResourceAgent:
             top_k=5,
         )
         notes_context = '\n\n'.join(f'- {item.text[:360]}' for item in retrieved)
-        web_grounding_context = await self._build_web_grounding_context(
+        research_insights = await self.course_research_service.gather_for_skill(
             topic=topic,
             skill_node=skill_node,
-            kind='lesson',
-            retrieved_hits=len(retrieved),
+            kind='deep_lesson',
+            memory=memory_snapshot,
+            retrieval_hits=len(retrieved),
             limit=4,
         )
+        web_grounding_context = self.course_research_service.format_prompt_context(research_insights, max_items=4)
+        memory_context = self._course_memory_context(memory_snapshot)
+        editorial_spine_context = self._editorial_spine_context(topic)
 
         concise_lesson = self._get_active_generated_resource(
             db,
@@ -1078,12 +1090,18 @@ class ResourceAgent:
             f'Technical depth guidance: {technical_depth_prompt_guidance(technical_depth)}\n\n'
             'Produce a richer, textbook-style deep lesson on this exact skill. '
             'Do not repeat generic overview text. Go deeper with context, reasoning, and concrete explanations.\n\n'
+            f'Editorial spine (keep coherence with this sequence):\n{editorial_spine_context}\n\n'
+            f'Course memory ledger:\n{memory_context}\n\n'
             f'Existing concise lesson context (if available):\n{concise_lesson_context or "None"}\n\n'
             f'Existing examples context (if available):\n{concise_examples_context or "None"}\n\n'
             f'Retrieved learner context:\n{notes_context or "No learner context available"}\n\n'
             f'Curated web grounding context (only include if directly relevant):\n'
             f'{web_grounding_context or "No high-signal web grounding selected"}\n\n'
-            'Output structured content only and stay tightly scoped to this skill node.'
+            'Output structured content only and stay tightly scoped to this skill node.\n'
+            'Quality constraints:\n'
+            '- Avoid formulaic filler phrases and generic transitions.\n'
+            '- Prefer concrete distinctions, trade-offs, and specific examples.\n'
+            '- Do not repeat examples already used in the course memory unless clearly marked as remediation.'
         )
 
         try:
@@ -1098,6 +1116,59 @@ class ResourceAgent:
                 kind='deep_lesson',
                 structured_content=structured_model.model_dump(),
             )
+            writing_issues = self._writing_slop_issues(structured_content, kind='deep_lesson')
+            writing_issues.extend(
+                self._repetition_issues(
+                    kind='deep_lesson',
+                    structured_content=structured_content,
+                    memory=memory_snapshot,
+                )
+            )
+            if writing_issues:
+                refine_prompt = (
+                    f'Topic: {topic.name}\n'
+                    f'Skill: {skill_node.name}\n'
+                    f'Technical depth: {technical_depth}\n'
+                    f'Quality issues to fix: {", ".join(sorted(set(writing_issues)))}\n\n'
+                    f'Course memory ledger:\n{memory_context}\n\n'
+                    f'Deep lesson draft JSON:\n{json.dumps(structured_content, indent=2)}'
+                )
+                try:
+                    refined_model = await self.llm_service.generate_structured(
+                        system_prompt=(
+                            'You are ResourceAgent. Rewrite this deep lesson to remove formulaic writing and '
+                            'content repetition while keeping the same scope and factual grounding.'
+                        ),
+                        user_prompt=refine_prompt,
+                        schema_model=DeepLessonPlan,
+                        temperature=0.15,
+                        max_tokens=2400,
+                    )
+                    structured_content = self._polish_structured_snippets(
+                        kind='deep_lesson',
+                        structured_content=refined_model.model_dump(),
+                    )
+                except ProviderError:
+                    pass
+            snapshot_after = self.course_memory_service.build_snapshot(
+                db,
+                topic=topic,
+                user_id=user_id,
+                focus_skill_id=skill_node.id,
+            )
+            self.course_memory_service.persist_snapshot(
+                db,
+                topic=topic,
+                snapshot=snapshot_after,
+                reason='generated_deep_lesson',
+            )
+            ledger_payload = topic.curriculum_ledger if isinstance(topic.curriculum_ledger, dict) else {}
+            ledger_payload['latest_deep_lesson_research'] = self.course_research_service.to_ledger_records(
+                research_insights,
+                limit=6,
+            )
+            topic.curriculum_ledger = ledger_payload
+            db.commit()
             return structured_content, 'generated'
         except ProviderError as exc:
             logger.warning(
@@ -1216,7 +1287,7 @@ class ResourceAgent:
             require_visual_hint=False,
             selected_urls=selected_urls,
             enforce_trusted_sources=True,
-            allow_article_fallback=False,
+            allow_article_fallback=True,
             reason_text='Selected because it directly supports this deep-dive node and comes from a trusted source.',
         )
         strict_count = len(scored)
@@ -1250,6 +1321,20 @@ class ResourceAgent:
             )
         fallback_count = max(0, len(scored) - strict_count)
         broad_count = 0
+        if len(scored) < limit and len(scored) == 0:
+            broad_results = search_results
+            scored.extend(
+                rank_candidates(
+                    broad_results,
+                    threshold=_BROAD_MEDIA_SCORE_THRESHOLD,
+                    require_visual_hint=False,
+                    selected_urls=selected_urls,
+                    enforce_trusted_sources=False,
+                    allow_article_fallback=True,
+                    reason_text='Selected from non-social public sources as a high-relevance fallback for this lesson.',
+                )
+            )
+            broad_count = max(0, len(scored) - strict_count - fallback_count)
         emergency_count = 0
 
         logger.info(
@@ -1363,6 +1448,16 @@ class ResourceAgent:
         }
         schema_model, instruction, max_tokens = prompts[kind]
 
+        memory_snapshot = self.course_memory_service.build_snapshot(
+            db,
+            topic=topic,
+            user_id=user_id,
+            focus_skill_id=skill_node.id,
+        )
+        memory_context = self._course_memory_context(memory_snapshot)
+        stable_coverage_context = self._stable_coverage_context(memory_snapshot)
+        editorial_spine_context = self._editorial_spine_context(topic)
+
         retrieved = await self.retrieval_service.retrieve_chunks(
             db,
             topic_id=topic.id,
@@ -1370,13 +1465,15 @@ class ResourceAgent:
             top_k=3,
         )
         notes_context = '\n\n'.join(f'- {item.text[:320]}' for item in retrieved)
-        web_grounding_context = await self._build_web_grounding_context(
+        research_insights = await self.course_research_service.gather_for_skill(
             topic=topic,
             skill_node=skill_node,
             kind=kind,
-            retrieved_hits=len(retrieved),
+            memory=memory_snapshot,
+            retrieval_hits=len(retrieved),
             limit=3,
         )
+        web_grounding_context = self.course_research_service.format_prompt_context(research_insights, max_items=3)
         user_state = db.scalar(
             select(UserSkillState).where(
                 UserSkillState.user_id == user_id,
@@ -1412,7 +1509,11 @@ class ResourceAgent:
             f'Learner level for this node: {learner_level}\n'
             f'Technical depth preference: {technical_depth}\n'
             f'Learner progress state: {user_state.progress_state if user_state else "not_started"}\n'
+            f'Instructional role for this node: {skill_node.instructional_role}\n'
             f'Prerequisites for this node: {", ".join(prerequisite_names) if prerequisite_names else "None"}\n\n'
+            f'Editorial spine excerpt (preserve coherence):\n{editorial_spine_context}\n\n'
+            f'Course memory ledger:\n{memory_context}\n\n'
+            f'Stable completed coverage guidance:\n{stable_coverage_context}\n\n'
             f'Retrieved learner notes:\n{notes_context or "No notes available"}\n\n'
             f'Curated web grounding references (optional; use only if directly relevant):\n'
             f'{web_grounding_context or "None"}\n\n'
@@ -1420,7 +1521,11 @@ class ResourceAgent:
             f'Formatting constraints:\n{field_length_rules}\n'
             f'Instruction: {instruction}\n\n'
             'If web references are present, use them selectively for specific examples and context. '
-            'Do not force web facts when relevance is weak. Never produce a link dump.'
+            'Do not force web facts when relevance is weak. Never produce a link dump.\n'
+            'Anti-slop rules:\n'
+            '- Avoid filler transitions, motivational fluff, and generic consulting language.\n'
+            '- Add concrete distinctions and context-specific details.\n'
+            '- Do not repeat examples already used unless remediation is explicitly required.'
         )
 
         used_fallback = False
@@ -1449,11 +1554,19 @@ class ResourceAgent:
                 learner_level=learner_level,
             )
         if kind == 'lesson' and not used_fallback:
-            is_high_quality, quality_issues = self._lesson_quality_signals(
+            _is_high_quality, quality_issues = self._lesson_quality_signals(
                 structured_content,
                 technical_depth=technical_depth,
             )
-            if not is_high_quality:
+            quality_issues.extend(self._writing_slop_issues(structured_content, kind='lesson'))
+            quality_issues.extend(
+                self._repetition_issues(
+                    kind='lesson',
+                    structured_content=structured_content,
+                    memory=memory_snapshot,
+                )
+            )
+            if quality_issues:
                 logger.info(
                     'resource.lesson_quality_refine topic_id=%s skill_id=%s technical_depth=%s issues=%s',
                     topic.id,
@@ -1490,6 +1603,34 @@ class ResourceAgent:
                         skill_node.id,
                         exc,
                     )
+        elif kind == 'examples' and not used_fallback:
+            quality_issues = self._repetition_issues(
+                kind='examples',
+                structured_content=structured_content,
+                memory=memory_snapshot,
+            )
+            if quality_issues:
+                refine_prompt = (
+                    f'Topic: {topic.name}\n'
+                    f'Skill: {skill_node.name}\n'
+                    f'Issues: {", ".join(sorted(set(quality_issues)))}\n\n'
+                    f'Course memory ledger:\n{memory_context}\n\n'
+                    f'Current examples JSON:\n{json.dumps(structured_content, indent=2)}'
+                )
+                try:
+                    refined_model = await self.llm_service.generate_structured(
+                        system_prompt=(
+                            'You are ResourceAgent. Rewrite examples to remove repetition and improve specificity '
+                            'while keeping scope tied to the same skill.'
+                        ),
+                        user_prompt=refine_prompt,
+                        schema_model=ExamplesPlan,
+                        temperature=0.2,
+                        max_tokens=max_tokens,
+                    )
+                    structured_content = refined_model.model_dump()
+                except ProviderError:
+                    pass
         if skill_node.difficulty <= 2 or learner_level == 'beginner':
             structured_content = self._enforce_foundation_scope(
                 kind=kind,
@@ -1538,6 +1679,26 @@ class ResourceAgent:
         db.refresh(resource)
 
         source: ResourceSource = 'regenerated' if existing else 'generated'
+        snapshot_after = self.course_memory_service.build_snapshot(
+            db,
+            topic=topic,
+            user_id=user_id,
+            focus_skill_id=skill_node.id,
+        )
+        self.course_memory_service.persist_snapshot(
+            db,
+            topic=topic,
+            snapshot=snapshot_after,
+            reason=f'generated_{kind}',
+        )
+        ledger_payload = topic.curriculum_ledger if isinstance(topic.curriculum_ledger, dict) else {}
+        ledger_payload[f'latest_{kind}_research'] = self.course_research_service.to_ledger_records(
+            research_insights,
+            limit=6,
+        )
+        topic.curriculum_ledger = ledger_payload
+        db.commit()
+        db.refresh(resource)
         logger.info(
             'resource.generated topic_id=%s skill_id=%s kind=%s version=%s source=%s fallback=%s',
             topic.id,

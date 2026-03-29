@@ -122,6 +122,8 @@ from app.schemas.api import (
 )
 from app.services.embedding import EmbeddingService
 from app.services.llm import LLMService
+from app.services.course_memory import CourseMemoryService
+from app.services.course_research import CourseResearchService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 from app.services.retention import RetentionService
@@ -138,13 +140,25 @@ embedding_service = EmbeddingService()
 retrieval_service = RetrievalService(embedding_service)
 llm_service = LLMService()
 search_service = ExternalSearchService()
+course_memory_service = CourseMemoryService()
+course_research_service = CourseResearchService(search_service)
 
-skill_graph_agent = SkillGraphAgent(llm_service)
+skill_graph_agent = SkillGraphAgent(
+    llm_service,
+    research_service=course_research_service,
+    course_memory_service=course_memory_service,
+)
 profile_agent = ProfileAgent()
 ingestion_agent = IngestionAgent(embedding_service)
 tutor_agent = TutorAgent(llm_service, retrieval_service, search_service)
 recommendation_agent = RecommendationAgent(llm_service, retrieval_service)
-resource_agent = ResourceAgent(llm_service, search_service, retrieval_service)
+resource_agent = ResourceAgent(
+    llm_service,
+    search_service,
+    retrieval_service,
+    course_memory_service=course_memory_service,
+    course_research_service=course_research_service,
+)
 assessment_agent = AssessmentAgent(llm_service)
 retention_service = RetentionService()
 topic_plausibility_service = TopicPlausibilityService(llm_service)
@@ -821,6 +835,7 @@ def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> Skill
                 node_kind=node.node_kind,  # type: ignore[arg-type]
                 branch_origin=node.branch_origin,
                 branch_purpose=node.branch_purpose,
+                instructional_role=node.instructional_role,
                 branch_depth=node.branch_depth,
                 branch_parent_skill_id=node.branch_parent_skill_id,
                 mastery_estimate=round(float(mastery), 3),

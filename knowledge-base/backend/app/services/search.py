@@ -424,27 +424,15 @@ class ExternalSearchService:
         )
 
         if self.settings.search_provider == 'openai_web':
-            try:
-                results = await self._search_with_openai_web(
-                    topic=topic,
-                    skill=skill,
-                    query=final_query,
-                    limit=limit,
-                    source_policy=source_policy,
-                )
-            except ProviderError as exc:
-                if self.settings.search_api_key:
-                    logger.warning('external_search.openai_web_failed_fallback_to_serper error=%s', exc)
-                    results = await self._search_with_serper(
-                        topic=topic,
-                        skill=skill,
-                        query=final_query,
-                        limit=limit,
-                        source_policy=source_policy,
-                    )
-                else:
-                    raise
+            results = await self._search_with_openai_web(
+                topic=topic,
+                skill=skill,
+                query=final_query,
+                limit=limit,
+                source_policy=source_policy,
+            )
         elif self.settings.search_provider == 'serper':
+            logger.warning('external_search.legacy_provider_active provider=serper')
             results = await self._search_with_serper(
                 topic=topic,
                 skill=skill,
