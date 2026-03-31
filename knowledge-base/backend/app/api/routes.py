@@ -17,7 +17,6 @@ from sqlalchemy.orm import Session
 from app.agents.assessment_agent import AssessmentAgent
 from app.agents.ingestion_agent import IngestionAgent
 from app.agents.profile_agent import ProfileAgent
-from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.agents.tutor_agent import TutorAgent
@@ -98,8 +97,6 @@ from app.schemas.api import (
     QuizResponse,
     QuizSubmitRequest,
     QuizSubmitResponse,
-    RecommendationItem,
-    RecommendationResponse,
     ResourceResponse,
     SkillNodeResponse,
     SkillTreeResponse,
@@ -118,6 +115,7 @@ from app.schemas.api import (
     TopicProgressResponse,
     TopicResponse,
     MilestoneEventResponse,
+    NotebookMemorySignalResponse,
     UnlockAnticipationResponse,
     UserProgressSummaryResponse,
     UserTopicProgressSummary,
@@ -155,15 +153,12 @@ skill_graph_agent = SkillGraphAgent(
 profile_agent = ProfileAgent()
 ingestion_agent = IngestionAgent(embedding_service)
 tutor_agent = TutorAgent(llm_service, retrieval_service, search_service)
-recommendation_agent = RecommendationAgent(llm_service, retrieval_service)
 resource_agent = ResourceAgent(
     llm_service,
     search_service,
     retrieval_service,
     course_memory_service=course_memory_service,
     course_research_service=course_research_service,
-    media_cache_service=media_cache_service,
-    supporting_media_enabled=False,
 )
 assessment_agent = AssessmentAgent(llm_service)
 retention_service = RetentionService()
@@ -171,7 +166,6 @@ topic_plausibility_service = TopicPlausibilityService(llm_service)
 topic_bootstrap_service = TopicBootstrapService(
     skill_graph_agent=skill_graph_agent,
     profile_agent=profile_agent,
-    recommendation_agent=recommendation_agent,
     resource_agent=resource_agent,
     assessment_agent=assessment_agent,
 )
@@ -372,6 +366,66 @@ def _markdown_to_plain_text(value: str) -> str:
             trimmed = trimmed[2:].strip()
         lines.append(trimmed)
     return ' '.join(lines).strip()
+
+
+def _notebook_lens_meta(
+    *,
+    notes_count: int,
+    reflections_logged: int,
+    comparisons_logged: int,
+    exemplars_saved: int,
+    interpretations_logged: int,
+    view_shifts_logged: int,
+    next_threads_logged: int,
+) -> tuple[str, str, str, str]:
+    if notes_count == 0:
+        return (
+            'reflection',
+            'Reflection',
+            'Start the notebook with one short reflection so your study trail begins in your own language.',
+            'Write one short reflection on what drew your attention and what still feels unresolved.',
+        )
+    if exemplars_saved == 0:
+        return (
+            'exemplar',
+            'Saved Exemplar',
+            'You have notebook activity, but no concrete exemplar saved yet.',
+            'Capture one concrete work, passage, or artifact and note why it matters to your understanding.',
+        )
+    if view_shifts_logged == 0:
+        return (
+            'view_shift',
+            'What Changed My View',
+            'The notebook has evidence, but not yet a clear record of how your view changed.',
+            'Write one short note: what changed your view today, and why?',
+        )
+    if comparisons_logged == 0:
+        return (
+            'comparison',
+            'Comparison',
+            'You have observations, but no explicit comparison yet to sharpen distinction and judgment.',
+            'Add one comparison entry between two works, interpretations, or styles.',
+        )
+    if next_threads_logged == 0:
+        return (
+            'next_thread',
+            'Explore Next',
+            'Momentum is present, but the notebook has not yet captured the next live thread of curiosity.',
+            'Record one thread you want to explore next to keep momentum in your notebook.',
+        )
+    if interpretations_logged == 0:
+        return (
+            'interpretation',
+            'Interpretation',
+            'You have examples and reflections, but not yet a clearly stated interpretation.',
+            'Write one interpretation note that states your reading clearly and grounds it in evidence.',
+        )
+    return (
+        'reflection',
+        'Reflection',
+        'The notebook is active. A short reflection will keep understanding and momentum connected.',
+        'Write one short reflection linking your latest exercise, assessment, or note to the next node.',
+    )
 
 
 def _get_topic_or_404(db: Session, topic_id: int) -> Topic:
@@ -861,13 +915,6 @@ def _build_skill_tree_response(db: Session, topic: Topic, user_id: int) -> Skill
 
     payload_nodes.sort(key=lambda item: (0 if item.node_kind == 'core' else 1, item.difficulty, item.id))
     return SkillTreeResponse(topic=_topic_to_response(topic), nodes=payload_nodes)
-
-
-def _invalidate_recommendations(db: Session, topic_id: int, user_id: int) -> None:
-    db.execute(delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == user_id))
-    db.commit()
-
-
 def _collect_unlocked_skill_ids(db: Session, *, topic_id: int, user_id: int) -> set[int]:
     rows = db.scalars(
         select(UserSkillState)
@@ -990,6 +1037,10 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         for node in db.scalars(select(SkillNode).where(SkillNode.topic_id == topic.id)).all()
     }
     entries: list[TopicJournalEntryResponse] = []
+    notes_count = 0
+    latest_note_title = ''
+    latest_note_at: datetime | None = None
+    latest_note_skill_name: str | None = None
     counts: dict[str, int] = {
         'notes_created': 0,
         'notes_updated': 0,
@@ -1016,9 +1067,14 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         .limit(160)
     ).all()
     for note in notes:
+        notes_count += 1
         snippet = _markdown_to_plain_text(note.body or '')
         snippet = snippet[:180] + ('…' if len(snippet) > 180 else '')
         note_title = note.title or 'Untitled note'
+        if latest_note_at is None:
+            latest_note_title = note_title
+            latest_note_at = note.updated_at
+            latest_note_skill_name = skill_map.get(note.skill_node_id) if note.skill_node_id else None
         note_tags = {
             str(tag).strip().lower()
             for tag in (note.tags or [])
@@ -1291,20 +1347,19 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
     mastery_average = round(mean(mastery_values), 3) if mastery_values else 0.0
 
     evidence_entries_count = sum(1 for entry in entries if entry.evidence_strength == 'direct')
-    if evidence_entries_count == 0:
-        reflection_prompt = 'Capture one concrete work, passage, or artifact and note why it matters to your understanding.'
-    elif counts['view_shifts_logged'] == 0:
-        reflection_prompt = 'Write one short note: what changed your view today, and why?'
-    elif counts['comparisons_logged'] == 0:
-        reflection_prompt = 'Add one comparison entry between two works, interpretations, or styles.'
-    elif counts['next_threads_logged'] == 0:
-        reflection_prompt = 'Record one thread you want to explore next to keep momentum in your notebook.'
-    elif counts['assessments_taken'] == 0:
+    recommended_lens, recommended_lens_label, recommended_lens_reason, reflection_prompt = _notebook_lens_meta(
+        notes_count=notes_count,
+        reflections_logged=counts['reflections_logged'],
+        comparisons_logged=counts['comparisons_logged'],
+        exemplars_saved=counts['exemplars_saved'],
+        interpretations_logged=counts['interpretations_logged'],
+        view_shifts_logged=counts['view_shifts_logged'],
+        next_threads_logged=counts['next_threads_logged'],
+    )
+    if notes_count > 0 and counts['assessments_taken'] == 0 and evidence_entries_count > 0:
         reflection_prompt = 'You have strong activity evidence. Add one verification step to confirm mastery.'
-    elif counts['branches_accepted'] > 0:
+    elif notes_count > 0 and counts['branches_accepted'] > 0 and counts['next_threads_logged'] == 0:
         reflection_prompt = 'Review whether your accepted branch is helping your main goal and note one insight.'
-    else:
-        reflection_prompt = 'Write one short reflection linking your latest exercise or assessment to the next node.'
 
     growth_signal_parts: list[str] = []
     if counts['lessons_completed'] > 0:
@@ -1393,6 +1448,7 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
         summary={
             'total_entries': len(entries),
             'evidence_entries': evidence_entries_count,
+            'notes_count': notes_count,
             'notes_created': counts['notes_created'],
             'notes_updated': counts['notes_updated'],
             'lessons_completed': counts['lessons_completed'],
@@ -1415,6 +1471,12 @@ def _topic_journal_response(db: Session, *, topic: Topic, user_id: int) -> Topic
             'latest_activity_at': latest_activity_at,
             'reflection_prompt': reflection_prompt,
             'growth_signal': growth_signal,
+            'recommended_lens': recommended_lens,
+            'recommended_lens_label': recommended_lens_label,
+            'recommended_lens_reason': recommended_lens_reason,
+            'latest_note_title': latest_note_title,
+            'latest_note_at': latest_note_at,
+            'latest_note_skill_name': latest_note_skill_name,
         },
         chapters=chapter_responses,
         entries=visible_entries,
@@ -1721,6 +1783,7 @@ def delete_topic(
 
     db.execute(delete(ChatMessage).where(ChatMessage.topic_id == topic_id))
     db.execute(delete(ChatSession).where(ChatSession.topic_id == topic_id))
+    # Legacy cleanup only: active recommendation generation has been removed.
     db.execute(
         delete(Recommendation).where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
     )
@@ -1859,7 +1922,6 @@ async def upload_document(
         _raise_service_error(exc)
 
     profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
-    _invalidate_recommendations(db, topic_id, current_user.id)
 
     return DocumentUploadResponse(document_id=doc.id, filename=doc.filename, chunks_created=chunks)
 
@@ -1900,7 +1962,6 @@ def delete_document(
     db.delete(document)
     db.commit()
     profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
-    _invalidate_recommendations(db, topic_id, current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -2159,7 +2220,6 @@ async def save_tutor_response_to_note(
 
     await _reindex_note_document(db, note=note)
     profile_agent.infer_mastery_from_notes(db, current_user.id, topic_id)
-    _invalidate_recommendations(db, topic_id, current_user.id)
 
     return TutorNoteSaveResponse(
         note=_note_to_response(note),
@@ -2230,67 +2290,12 @@ async def append_tutor_response_to_existing_note(
     db.refresh(note)
     await _reindex_note_document(db, note=note)
     profile_agent.infer_mastery_from_notes(db, current_user.id, note.topic_id)
-    _invalidate_recommendations(db, note.topic_id, current_user.id)
 
     return TutorNoteSaveResponse(
         note=_note_to_response(note),
         duplicate_warning=duplicate_warning,
         appended=True,
     )
-
-
-@router.get('/topics/{topic_id}/recommendations', response_model=RecommendationResponse)
-async def get_recommendations(
-    topic_id: int,
-    current_user: CurrentUser,
-    refresh: bool = Query(default=False),
-    db: Session = Depends(get_db),
-) -> RecommendationResponse:
-    topic = _get_topic_or_404(db, topic_id)
-    if topic.user_id != current_user.id:
-        raise HTTPException(status_code=404, detail='Topic not found')
-
-    profile_agent.ensure_states_for_topic(db, current_user.id, topic_id)
-    profile_agent.recompute_unlocks(db, current_user.id, topic_id)
-
-    records: list[Recommendation]
-    if not refresh:
-        freshness_cutoff = datetime.utcnow() - timedelta(minutes=3)
-        cached = db.scalars(
-            select(Recommendation)
-            .where(Recommendation.topic_id == topic_id, Recommendation.user_id == current_user.id)
-            .order_by(Recommendation.created_at.desc())
-        ).all()
-        if cached and cached[0].created_at >= freshness_cutoff:
-            records = cached
-        else:
-            try:
-                records = await recommendation_agent.generate_recommendations(db, topic, current_user.id)
-            except Exception as exc:  # noqa: BLE001
-                _raise_service_error(exc)
-    else:
-        try:
-            records = await recommendation_agent.generate_recommendations(db, topic, current_user.id)
-        except Exception as exc:  # noqa: BLE001
-            _raise_service_error(exc)
-
-    node_map = {node.id: node for node in db.scalars(select(SkillNode).where(SkillNode.topic_id == topic_id)).all()}
-
-    payload: list[RecommendationItem] = []
-    for rec in records[:1]:
-        resource_mode = 'external' if rec.action_type == 'study_external' else 'generated'
-        payload.append(
-            RecommendationItem(
-                skill_node_id=rec.skill_node_id,
-                skill_name=node_map[rec.skill_node_id].name if rec.skill_node_id in node_map else 'Unknown node',
-                rationale=rec.rationale,
-                action_type=rec.action_type,
-                resource_mode=resource_mode,
-                confidence=round(rec.confidence, 3),
-            )
-        )
-
-    return RecommendationResponse(recommendations=payload)
 
 
 @router.post('/skills/{skill_id}/resources/generate', response_model=ResourceResponse)
@@ -2419,21 +2424,14 @@ async def get_deep_lesson(
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    supporting_media: list[dict[str, str]] = []
     if isinstance(structured_content, dict):
-        structured_content['supporting_media'] = []
-    logger.info(
-        'resource.deep_lesson_media_disabled topic_id=%s skill_id=%s reason=feature_temporarily_disabled',
-        topic.id,
-        skill.id,
-    )
+        structured_content.pop('supporting_media', None)
 
     return DeepLessonResponse(
         skill_node_id=skill.id,
         title=str(structured_content.get('title') or f'{skill.name}: Deep dive'),
         summary=str(structured_content.get('summary') or ''),
         structured_content=structured_content,
-        supporting_media=supporting_media,
         source=source,
     )
 
@@ -2593,7 +2591,6 @@ async def complete_exercise(
         state.last_activity_at = now
         db.commit()
 
-    _invalidate_recommendations(db, topic.id, current_user.id)
     unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
     newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
     if newly_unlocked_ids:
@@ -2817,7 +2814,6 @@ async def submit_assessment(
             mastery_delta=scored.mastery_delta,
             confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
         )
-        _invalidate_recommendations(db, skill.topic_id, current_user.id)
 
         tree = _build_skill_tree_response(db, topic, current_user.id)
         unlocked_skill_ids = [node.id for node in tree.nodes if node.status != SkillStatus.locked]
@@ -2999,7 +2995,6 @@ async def submit_quiz_compat(
             mastery_delta=scored.mastery_delta,
             confidence_signal=scored.confidence_avg if scored.confidence_avg > 0 else None,
         )
-        _invalidate_recommendations(db, skill.topic_id, current_user.id)
         unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
         newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
         if newly_unlocked_ids:
@@ -3060,7 +3055,6 @@ async def update_progress(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    _invalidate_recommendations(db, skill.topic_id, current_user.id)
     unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
     newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
     if newly_unlocked_ids:
@@ -3105,7 +3099,6 @@ async def force_unlock_skill(
     db.commit()
     db.refresh(state)
 
-    _invalidate_recommendations(db, topic.id, current_user.id)
     topic_bootstrap_service.prepare_unlocked_nodes(
         topic_id=topic.id,
         user_id=current_user.id,
@@ -3142,7 +3135,6 @@ async def dev_complete_skill(
         skill_node=skill,
     )
 
-    _invalidate_recommendations(db, topic.id, current_user.id)
     unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
     newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
     if newly_unlocked_ids:
@@ -3240,12 +3232,29 @@ def get_topic_retention_loop(
         user_id=current_user.id,
         tree_stage=tree_stage,
     )
+    journal = _topic_journal_response(db, topic=topic, user_id=current_user.id)
     cadence = loop['cadence']
-    plan_summary = (
-        'Today: focus on your top immediate actions and keep momentum.'
-        if cadence == 'daily'
-        else 'This week: complete key actions and target your next unlock.'
-    )
+    lead_action = loop['next_actions'][0] if loop['next_actions'] else None
+    unlock_anticipation = loop['unlock_anticipation']
+    period_label = 'Today' if cadence == 'daily' else 'This week'
+    if lead_action and unlock_anticipation:
+        plan_summary = (
+            f'{period_label}: {lead_action.title}. '
+            f'That keeps {unlock_anticipation.skill_name} {unlock_anticipation.status_label}.'
+        )
+    elif lead_action:
+        plan_summary = f'{period_label}: {lead_action.title}. Let the notebook hold what shifts as you move forward.'
+    elif unlock_anticipation:
+        plan_summary = (
+            f'{period_label}: work toward {unlock_anticipation.skill_name}. '
+            f'It is {unlock_anticipation.status_label}.'
+        )
+    else:
+        plan_summary = (
+            'Today: follow one clear next move, then capture the strongest insight in your notebook.'
+            if cadence == 'daily'
+            else 'This week: keep one clear focus, then let the notebook hold what changed and what comes next.'
+        )
 
     return TopicRetentionLoopResponse(
         topic_id=topic.id,
@@ -3268,6 +3277,23 @@ def get_topic_retention_loop(
         streak_days=loop['streak_days'],
         activity_days_last_14=loop['activity_days_last_14'],
         latest_activity_at=loop['latest_activity_at'],
+        notebook_memory=NotebookMemorySignalResponse(
+            notes_count=journal.summary.notes_count,
+            reflections_logged=journal.summary.reflections_logged,
+            comparisons_logged=journal.summary.comparisons_logged,
+            exemplars_saved=journal.summary.exemplars_saved,
+            interpretations_logged=journal.summary.interpretations_logged,
+            view_shifts_logged=journal.summary.view_shifts_logged,
+            next_threads_logged=journal.summary.next_threads_logged,
+            prompt=journal.summary.reflection_prompt,
+            growth_signal=journal.summary.growth_signal,
+            recommended_lens=journal.summary.recommended_lens,
+            recommended_lens_label=journal.summary.recommended_lens_label,
+            recommended_lens_reason=journal.summary.recommended_lens_reason,
+            latest_note_title=journal.summary.latest_note_title,
+            latest_note_at=journal.summary.latest_note_at,
+            latest_note_skill_name=journal.summary.latest_note_skill_name,
+        ),
         dev_unlock_enabled=_current_user_can_force_unlock(current_user),
     )
 
@@ -3331,6 +3357,21 @@ def get_user_progress_summary(
         profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
         profile_agent.recompute_unlocks(db, current_user.id, topic.id)
         tree = _build_skill_tree_response(db, topic, current_user.id)
+        states = db.scalars(
+            select(UserSkillState)
+            .join(SkillNode, UserSkillState.skill_node_id == SkillNode.id)
+            .where(UserSkillState.user_id == current_user.id, SkillNode.topic_id == topic.id)
+        ).all()
+        latest_activity_at = max((state.last_activity_at for state in states if state.last_activity_at), default=None)
+        notes_count = len(
+            db.scalars(
+                select(Note.id).where(
+                    Note.user_id == current_user.id,
+                    Note.topic_id == topic.id,
+                )
+            ).all()
+        )
+        branch_count = sum(1 for node in tree.nodes if node.node_kind == 'optional_branch')
         verified_nodes = sum(1 for node in tree.nodes if node.progress_state == 'verified')
         available_nodes = sum(1 for node in tree.nodes if node.status != SkillStatus.locked)
         avg_mastery = round(mean(node.mastery_estimate for node in tree.nodes), 3) if tree.nodes else 0.0
@@ -3350,6 +3391,9 @@ def get_user_progress_summary(
                 verified_nodes=verified_nodes,
                 mastery_average=avg_mastery,
                 tree_stage=tree_stage,
+                branch_count=branch_count,
+                notes_count=notes_count,
+                latest_activity_at=latest_activity_at,
             )
         )
 
@@ -3395,7 +3439,6 @@ async def create_deep_dive_branch(
 
     profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
     profile_agent.recompute_unlocks(db, current_user.id, topic.id)
-    _invalidate_recommendations(db, topic.id, current_user.id)
     unlocked_after = _collect_unlocked_skill_ids(db, topic_id=topic.id, user_id=current_user.id)
     newly_unlocked_ids = sorted(unlocked_after - unlocked_before)
     if newly_unlocked_ids:
@@ -3537,7 +3580,6 @@ async def accept_branch_suggestion(
 
     profile_agent.ensure_states_for_topic(db, current_user.id, topic.id)
     profile_agent.recompute_unlocks(db, current_user.id, topic.id)
-    _invalidate_recommendations(db, topic.id, current_user.id)
     _ensure_topic_milestone_events(db, topic=topic, user_id=current_user.id)
     return _build_skill_tree_response(db, topic, current_user.id)
 

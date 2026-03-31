@@ -153,6 +153,7 @@ def test_topic_journal_merges_notes_exercises_assessments_and_milestones() -> No
     assert journal.topic_name == topic.name
     assert journal.summary.total_entries >= len(journal.entries)
     assert journal.summary.evidence_entries >= 1
+    assert journal.summary.notes_count == 1
     assert journal.summary.exercises_completed == 1
     assert journal.summary.assessments_taken == 1
     assert journal.summary.milestones_reached == 1
@@ -167,6 +168,12 @@ def test_topic_journal_merges_notes_exercises_assessments_and_milestones() -> No
     assert journal.summary.verified_nodes in {0, 1}
     assert journal.summary.growth_signal
     assert journal.summary.reflection_prompt
+    assert journal.summary.recommended_lens
+    assert journal.summary.recommended_lens_label
+    assert journal.summary.recommended_lens_reason
+    assert journal.summary.latest_note_title == 'My takeaway'
+    assert journal.summary.latest_note_at is not None
+    assert journal.summary.latest_note_skill_name == 'Knife skills'
     assert len(journal.chapters) >= 1
     note_created_entries = [
         entry

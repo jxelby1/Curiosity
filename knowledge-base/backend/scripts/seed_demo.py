@@ -6,7 +6,6 @@ from sqlalchemy import select
 
 from app.agents.ingestion_agent import IngestionAgent
 from app.agents.profile_agent import ProfileAgent
-from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.core.config import get_settings
 from app.core.security import hash_password
@@ -15,7 +14,6 @@ from app.db.init_db import init_db
 from app.db.models import SkillNode, Topic, User
 from app.services.embedding import EmbeddingService
 from app.services.llm import LLMService
-from app.services.retrieval import RetrievalService
 
 
 async def run() -> None:
@@ -79,9 +77,6 @@ async def run() -> None:
         )
 
         profile_agent.infer_mastery_from_notes(db, user.id, topic.id)
-
-        recommendation_agent = RecommendationAgent(llm_service, RetrievalService(embedding_service))
-        await recommendation_agent.generate_recommendations(db, topic, user.id)
 
         print('Seeded demo data successfully.')
     finally:

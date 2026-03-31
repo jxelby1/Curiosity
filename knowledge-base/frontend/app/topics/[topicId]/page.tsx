@@ -152,7 +152,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
       derivePrimaryTopicNextStep({
         topicId,
         retention,
-        recommendations: [],
         tree,
       }),
     [retention, topicId, tree]
@@ -162,6 +161,14 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
   const unlockedNodes = retention?.available_nodes ?? tree?.nodes.filter((node) => node.status !== 'locked').length ?? 0;
   const verifiedNodes = retention?.verified_nodes ?? tree?.nodes.filter((node) => node.progress_state === 'verified').length ?? 0;
   const masteryAvg = Math.round((retention?.mastery_average ?? 0) * 100);
+  const reminderHref =
+    retention?.reminder?.action_skill_node_id != null
+      ? `/topics/${topicId}/skills/${retention.reminder.action_skill_node_id}?tab=${retention.reminder.action_tab}`
+      : null;
+  const unlockNextHref =
+    retention?.unlock_anticipation?.next_step_skill_node_id != null
+      ? `/topics/${topicId}/skills/${retention.unlock_anticipation.next_step_skill_node_id}?tab=${retention.unlock_anticipation.next_step_tab}`
+      : null;
 
   async function refreshEverything() {
     setError('');
@@ -334,8 +341,8 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
 
   return (
     <main className="mx-auto w-full max-w-[1320px] px-4 py-6 sm:px-6 md:py-8 lg:px-8">
-      <header className="mb-5 flex flex-wrap items-start justify-between gap-4">
-        <div>
+      <header className="mb-6 flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+        <div className="max-w-3xl">
           <div className="flex items-center gap-2 text-xs uppercase tracking-[0.14em] text-black/58">
             <Link href="/topics" className="underline underline-offset-4">
               Studies
@@ -349,142 +356,304 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="badge border border-black/15 bg-white">Study Stage {retention?.tree_stage || 1}</span>
-            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.course_depth)} Course</span>
-            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.starting_skill_level)} Start</span>
-            <span className="badge border border-black/15 bg-white">{formatDisplayTag(tree.topic.technical_depth)} Depth</span>
             {retention && <span className="badge border border-black/15 bg-white">{retention.cadence === 'daily' ? 'Daily Plan' : 'Weekly Plan'}</span>}
             {!!retention?.streak_days && <span className="badge border border-black/15 bg-white">{retention.streak_days}-Day Streak</span>}
           </div>
         </div>
 
-        <div className="flex flex-wrap gap-2">
-          <Link href="/garden" className="studio-button-secondary px-3 py-2 text-sm">
-            Garden
+        <div className="flex flex-wrap items-start gap-2">
+          <Link href={primaryNextStep.href} className="studio-button-primary px-3 py-2 text-sm">
+            {primaryNextStep.label}
           </Link>
           <Link href={`/topics/${topicId}/notes`} className="studio-button-secondary px-3 py-2 text-sm">
             Notebook
           </Link>
-          <Link href={`/topics/${topicId}/chat`} className="studio-button-secondary px-3 py-2 text-sm">
-            Dialogue
-          </Link>
-          <Link href={primaryNextStep.href} className="studio-button-primary px-3 py-2 text-sm">
-            {primaryNextStep.label}
-          </Link>
-            <button
-              type="button"
-              className="studio-button-secondary px-3 py-2 text-sm"
-              onClick={() => refreshEverything()}
-            >
-              Refresh
-            </button>
-          <button
-            type="button"
-            className="rounded-md border border-red-300 bg-white px-3 py-2 text-sm text-red-700"
-            onClick={() => {
-              setShowDeleteConfirm((prev) => !prev);
-              setDeleteConfirmInput('');
-            }}
-          >
-            {showDeleteConfirm ? 'Cancel delete' : 'Delete topic'}
-          </button>
+          <details className="group relative">
+            <summary className="studio-button-secondary flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm [&::-webkit-details-marker]:hidden">
+              Study tools
+              <span className="text-xs text-black/45 transition group-open:rotate-180">▾</span>
+            </summary>
+            <div className="absolute right-0 z-20 mt-2 w-[320px] rounded-2xl border border-black/10 bg-white p-4 shadow-[0_18px_42px_rgba(16,19,33,0.16)]">
+              <div className="space-y-2">
+                <Link
+                  href={`/topics/${topicId}/chat`}
+                  className="flex items-center justify-between rounded-lg border border-black/10 bg-paper/25 px-3 py-2 text-sm text-black/82 hover:bg-black/[0.03]"
+                >
+                  <span>Dialogue</span>
+                  <span className="text-xs uppercase tracking-[0.12em] text-black/45">Companion</span>
+                </Link>
+                <Link
+                  href="/garden"
+                  className="flex items-center justify-between rounded-lg border border-black/10 bg-paper/25 px-3 py-2 text-sm text-black/82 hover:bg-black/[0.03]"
+                >
+                  <span>Garden</span>
+                  <span className="text-xs uppercase tracking-[0.12em] text-black/45">Overview</span>
+                </Link>
+                <button
+                  type="button"
+                  className="flex w-full items-center justify-between rounded-lg border border-black/10 bg-paper/25 px-3 py-2 text-sm text-black/82 hover:bg-black/[0.03]"
+                  onClick={() => refreshEverything()}
+                >
+                  <span>Refresh study home</span>
+                  <span className="text-xs uppercase tracking-[0.12em] text-black/45">Sync</span>
+                </button>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-black/10 bg-paper/35 p-3">
+                <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Study frame</p>
+                <div className="mt-2 flex flex-wrap gap-1.5">
+                  <span className="badge border border-black/10 bg-white">{formatDisplayTag(tree.topic.course_depth)} Course</span>
+                  <span className="badge border border-black/10 bg-white">{formatDisplayTag(tree.topic.starting_skill_level)} Start</span>
+                  <span className="badge border border-black/10 bg-white">{formatDisplayTag(tree.topic.technical_depth)} Depth</span>
+                </div>
+              </div>
+
+              <div className="mt-4 border-t border-black/10 pt-4">
+                <button
+                  type="button"
+                  className="text-sm font-medium text-red-700 underline underline-offset-4"
+                  onClick={() => {
+                    setShowDeleteConfirm((prev) => !prev);
+                    setDeleteConfirmInput('');
+                  }}
+                >
+                  {showDeleteConfirm ? 'Cancel delete' : 'Delete study'}
+                </button>
+
+                {showDeleteConfirm && (
+                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50 p-3">
+                    <p className="text-sm text-red-800">
+                      This removes the study, tree, generated content, assessment history, notes, and source documents.
+                    </p>
+                    <p className="mt-2 text-sm text-red-800">
+                      Type <span className="font-semibold">{tree.topic.name}</span> to confirm.
+                    </p>
+                    <div className="mt-3 grid gap-2">
+                      <input
+                        value={deleteConfirmInput}
+                        onChange={(event) => setDeleteConfirmInput(event.target.value)}
+                        className="w-full rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
+                        placeholder="Enter study name"
+                      />
+                      <button
+                        type="button"
+                        className="rounded-md bg-red-700 px-3 py-2 text-sm text-white disabled:opacity-60"
+                        disabled={deletingTopic}
+                        onClick={onDeleteTopic}
+                      >
+                        {deletingTopic ? 'Deleting...' : 'Confirm delete'}
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </details>
         </div>
       </header>
 
-      {retention?.reminder && (
-        <section className="mb-4 rounded-xl border border-amber-300 bg-amber-50 p-4">
+      <section className="mb-7 grid gap-4 xl:grid-cols-[minmax(0,1.38fr)_minmax(320px,0.92fr)]">
+        <article className="rounded-[28px] border border-black/10 bg-[linear-gradient(165deg,rgba(255,255,255,0.97),rgba(241,249,236,0.9))] p-5 shadow-[0_20px_52px_rgba(16,19,33,0.14)] md:p-6">
           <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-amber-900">{retention.reminder.title}</p>
-              <p className="mt-1 text-sm text-amber-900">{retention.reminder.message}</p>
+            <div className="max-w-2xl">
+              <p className="text-xs uppercase tracking-[0.18em] text-black/55">Primary Next Step</p>
+              <h2 className="mt-3 text-3xl font-semibold tracking-tight text-black md:text-[2.15rem]">{primaryNextStep.label}</h2>
+              <p className="mt-3 text-sm leading-relaxed text-black/72 md:text-base">{primaryNextStep.reason}</p>
             </div>
-            <div className="flex gap-2">
-              {retention.reminder.action_skill_node_id && (
-                <Link
-                  href={`/topics/${topicId}/skills/${retention.reminder.action_skill_node_id}?tab=${retention.reminder.action_tab}`}
-                  className="rounded-md bg-amber-700 px-3 py-2 text-sm text-white"
-                >
-                  Return to study
-                </Link>
+            <div className="rounded-2xl border border-black/10 bg-white/85 px-4 py-3">
+              <p className="text-[10px] uppercase tracking-[0.14em] text-black/48">Why now</p>
+              <p className="mt-1 max-w-[220px] text-sm text-black/72">
+                {retention?.next_actions?.[0]?.description || 'This move keeps the core path clear and the study home trustworthy.'}
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 flex flex-wrap gap-2">
+            <Link href={primaryNextStep.href} className="rounded-md bg-ink px-4 py-2.5 text-sm font-semibold text-white">
+              Start now
+            </Link>
+            <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-4 py-2.5 text-sm text-black/80">
+              Open notebook
+            </Link>
+          </div>
+
+          {retention?.plan_summary && <p className="mt-4 text-sm text-black/60">{retention.plan_summary}</p>}
+
+          <div className="mt-5 grid gap-4 md:grid-cols-[0.92fr_1.08fr]">
+            <div className="rounded-2xl border border-black/10 bg-white p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-black/55">At a glance</p>
+              <div className="mt-3 space-y-3">
+                <CompactProgressBar label="Unlocked nodes" value={unlockedNodes} total={totalNodes} tone="cyan" />
+                <CompactProgressBar label="Verified nodes" value={verifiedNodes} total={totalNodes} tone="emerald" />
+              </div>
+              <div className="mt-4 grid grid-cols-3 gap-2">
+                <div className="rounded-lg border border-black/10 bg-paper/30 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Total</p>
+                  <p className="mt-1 text-lg font-semibold">{totalNodes}</p>
+                </div>
+                <div className="rounded-lg border border-black/10 bg-paper/30 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Unlocked</p>
+                  <p className="mt-1 text-lg font-semibold">{unlockedNodes}</p>
+                </div>
+                <div className="rounded-lg border border-black/10 bg-paper/30 px-3 py-2.5">
+                  <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Mastery</p>
+                  <p className="mt-1 text-lg font-semibold">{masteryAvg}%</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-black/10 bg-white p-4">
+              <p className="text-xs uppercase tracking-[0.16em] text-black/55">Studio Loop</p>
+              <ol className="mt-3 space-y-2 text-sm">
+                {LEARNING_LOOP_LABELS.map((item, index) => {
+                  const active = item.id === primaryNextStep.loopStep;
+                  return (
+                    <li
+                      key={item.id}
+                      className={`rounded-md border px-3 py-2 ${
+                        active ? 'border-ink bg-ink/5 text-black' : 'border-black/10 bg-paper/25 text-black/68'
+                      }`}
+                    >
+                      <span className="mr-2 text-xs text-black/55">{index + 1}.</span>
+                      {item.label}
+                    </li>
+                  );
+                })}
+              </ol>
+              <p className="mt-3 text-xs text-black/60">
+                Keep one clear move in front, let the notebook hold what changes, and treat branches as deliberate side paths.
+              </p>
+            </div>
+          </div>
+        </article>
+
+        <div className="grid gap-4">
+          <article className="panel p-5">
+            <p className="text-xs uppercase tracking-[0.16em] text-black/55">Notebook Memory</p>
+            <h2 className="mt-2 text-xl font-semibold">{retention?.notebook_memory?.recommended_lens_label || 'Reflection'}</h2>
+            <p className="muted mt-2 text-sm">
+              {retention?.notebook_memory?.recommended_lens_reason ||
+                'Keep one living record of what changed, what deserves comparison, and what you want to follow next.'}
+            </p>
+            <div className="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-emerald-900/70">Current prompt</p>
+              <p className="mt-1 text-sm text-emerald-950">
+                {retention?.notebook_memory?.prompt || 'Capture the strongest insight from this topic in your notebook.'}
+              </p>
+            </div>
+            <p className="mt-3 text-xs text-black/62">
+              {retention?.notebook_memory?.growth_signal || 'The notebook is ready for its next high-signal capture.'}
+            </p>
+            {retention?.notebook_memory?.latest_note_title && (
+              <p className="mt-2 text-xs text-black/58">
+                Latest memory: <span className="font-medium text-black/72">{retention.notebook_memory.latest_note_title}</span>
+                {retention.notebook_memory.latest_note_skill_name
+                  ? ` · ${retention.notebook_memory.latest_note_skill_name}`
+                  : ''}
+              </p>
+            )}
+            <div className="mt-4 flex flex-wrap gap-2">
+              <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+                Open notebook
+              </Link>
+              <Link href={`/topics/${topicId}/chat`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
+                Capture from dialogue
+              </Link>
+            </div>
+          </article>
+
+          <article className="panel p-5">
+            <p className="text-xs uppercase tracking-[0.16em] text-black/55">Study Signals</p>
+            <div className="mt-3 space-y-3">
+              {loadingRetention && !retention && <p className="text-sm text-black/58">Aligning your study home…</p>}
+
+              {topMilestone && (
+                <div className="rounded-xl border border-emerald-300 bg-emerald-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.14em] text-emerald-900/70">Milestone</p>
+                      <p className="mt-1 text-sm font-semibold text-emerald-950">{topMilestone.title}</p>
+                      <p className="mt-1 text-sm text-emerald-900">{topMilestone.message}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md border border-emerald-300 bg-white px-3 py-2 text-xs text-emerald-900"
+                      onClick={() => onAcknowledgeMilestone(topMilestone.id)}
+                    >
+                      Mark seen
+                    </button>
+                  </div>
+                </div>
               )}
-              <button
-                type="button"
-                className="rounded-md border border-amber-300 bg-white px-3 py-2 text-sm text-amber-900"
-                onClick={onDismissReminder}
-              >
-                Dismiss
-              </button>
+
+              {retention?.reminder && (
+                <div className="rounded-xl border border-amber-300 bg-amber-50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.14em] text-amber-900/70">Return cue</p>
+                      <p className="mt-1 text-sm font-semibold text-amber-950">{retention.reminder.title}</p>
+                      <p className="mt-1 text-sm text-amber-900">{retention.reminder.message}</p>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      {reminderHref && (
+                        <Link
+                          href={reminderHref}
+                          className="rounded-md bg-amber-700 px-3 py-2 text-xs font-medium text-white"
+                        >
+                          Resume
+                        </Link>
+                      )}
+                      <button
+                        type="button"
+                        className="rounded-md border border-amber-300 bg-white px-3 py-2 text-xs text-amber-900"
+                        onClick={onDismissReminder}
+                      >
+                        Dismiss
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {retention?.unlock_anticipation && (
+                <div className="rounded-xl border border-black/10 bg-paper/35 p-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Unlock horizon</p>
+                      <p className="mt-1 text-sm font-semibold text-black">{retention.unlock_anticipation.skill_name}</p>
+                    </div>
+                    <span className="rounded-full border border-black/15 bg-white px-2.5 py-1 text-[10px] uppercase tracking-[0.12em] text-black/62">
+                      {retention.unlock_anticipation.status_label}
+                    </span>
+                  </div>
+                  <p className="mt-2 text-sm text-black/68">{retention.unlock_anticipation.why_locked}</p>
+                  <ul className="mt-2 space-y-1 text-xs text-black/62">
+                    {retention.unlock_anticipation.steps.slice(0, 2).map((step) => (
+                      <li key={step} className="flex gap-2">
+                        <span className="mt-[2px] text-black/38">•</span>
+                        <span>{step}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {unlockNextHref && (
+                    <Link
+                      href={unlockNextHref}
+                      className="mt-3 inline-flex rounded-md border border-black/15 bg-white px-3 py-2 text-xs text-black/80"
+                    >
+                      Prep the unlock
+                    </Link>
+                  )}
+                </div>
+              )}
+
+              {!topMilestone && !retention?.reminder && !retention?.unlock_anticipation && !loadingRetention && (
+                <p className="text-sm text-black/58">
+                  Your study home is in rhythm. The primary next step is the clearest move right now.
+                </p>
+              )}
             </div>
-          </div>
-        </section>
-      )}
-
-      {topMilestone && (
-        <section className="mb-4 rounded-xl border border-emerald-300 bg-emerald-50 p-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p className="text-sm font-semibold text-emerald-900">{topMilestone.title}</p>
-              <p className="mt-1 text-sm text-emerald-800">{topMilestone.message}</p>
-            </div>
-            <button
-              type="button"
-              className="rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm text-emerald-900"
-              onClick={() => onAcknowledgeMilestone(topMilestone.id)}
-            >
-              Acknowledge
-            </button>
-          </div>
-        </section>
-      )}
-
-      {showDeleteConfirm && (
-        <section className="mb-6 rounded-xl border border-red-300 bg-red-50 p-4">
-          <p className="text-sm text-red-800">
-            This deletes the topic, skill tree, generated content, assessment history, notes, and source documents.
-          </p>
-          <p className="mt-2 text-sm text-red-800">
-            Type <span className="font-semibold">{tree.topic.name}</span> to confirm.
-          </p>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <input
-              value={deleteConfirmInput}
-              onChange={(event) => setDeleteConfirmInput(event.target.value)}
-              className="w-full max-w-sm rounded-md border border-red-200 bg-white px-3 py-2 text-sm"
-              placeholder="Enter topic name"
-            />
-            <button
-              type="button"
-              className="rounded-md bg-red-700 px-3 py-2 text-sm text-white disabled:opacity-60"
-              disabled={deletingTopic}
-              onClick={onDeleteTopic}
-            >
-              {deletingTopic ? 'Deleting...' : 'Confirm delete'}
-            </button>
-          </div>
-        </section>
-      )}
-
-      <section className="mb-5 grid gap-3 lg:grid-cols-[1.4fr_1fr]">
-        <article className="panel p-4">
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-[0.14em] text-black/62">Study progression</h2>
-          <div className="space-y-3">
-            <CompactProgressBar label="Unlocked nodes" value={unlockedNodes} total={totalNodes} tone="cyan" />
-            <CompactProgressBar label="Verified nodes" value={verifiedNodes} total={totalNodes} tone="emerald" />
-          </div>
-        </article>
-        <article className="panel grid grid-cols-3 gap-3 p-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.14em] text-black/58">Total</p>
-            <p className="mt-1 text-xl font-semibold">{totalNodes}</p>
-          </div>
-          <div>
-            <p className="text-xs uppercase tracking-[0.14em] text-black/58">Unlocked</p>
-            <p className="mt-1 text-xl font-semibold">{unlockedNodes}</p>
-          </div>
-          <div>
-            <p className="text-xs uppercase tracking-[0.14em] text-black/58">Mastery</p>
-            <p className="mt-1 text-xl font-semibold">{masteryAvg}%</p>
-          </div>
-        </article>
+          </article>
+        </div>
       </section>
 
       <section className="mb-7 grid items-start gap-4 lg:grid-cols-[minmax(0,1.5fr)_minmax(320px,1fr)] xl:grid-cols-[minmax(0,1.68fr)_minmax(340px,1fr)]">
@@ -492,17 +661,17 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
           <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
             <div>
               <p className="text-xs uppercase tracking-[0.18em] text-black/58">Living Study Constellation</p>
-              <p className="mt-1 text-sm text-black/66">Follow the core trunk, then open selective branches for context, comparison, and creative practice.</p>
-              <p className="mt-1 text-xs text-black/52">
-                Select an unlocked node to continue. Branch opportunities are intentionally sparse and shown one at a time.
+              <p className="mt-1 text-sm text-black/66">
+                Follow the core trunk, inspect context here, then open the workspace when you are ready to study.
               </p>
+              <p className="mt-1 text-xs text-black/52">Branch opportunities are intentionally sparse and shown one at a time.</p>
             </div>
             {selectedNode && (
               <Link
                 href={`/topics/${topicId}/skills/${selectedNode.id}`}
                 className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm text-black/80 hover:bg-black/[0.03]"
               >
-                Open workspace
+                Open selected workspace
               </Link>
             )}
           </div>
@@ -524,7 +693,7 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
               <span className="inline-flex h-2 w-2 rounded-full bg-violet-400" /> Optional branch
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <span className="inline-flex h-2 w-2 rounded-full bg-fuchsia-400" /> Recommended branch (active)
+              <span className="inline-flex h-2 w-2 rounded-full bg-fuchsia-400" /> Suggested branch (active)
             </span>
           </div>
 
@@ -561,49 +730,6 @@ export default function TopicOverviewPage({ params }: { params: { topicId: strin
             onForceUnlock={onForceUnlock}
           />
         </div>
-      </section>
-
-      <section className="grid gap-4 lg:grid-cols-[1.25fr_1fr]">
-        <article className="panel p-5">
-          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
-          <h2 className="mt-2 text-2xl font-semibold">{primaryNextStep.label}</h2>
-          <p className="muted mt-2 text-sm">{primaryNextStep.reason}</p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <Link href={primaryNextStep.href} className="rounded-md bg-ink px-3 py-2 text-sm text-white">
-              Start now
-            </Link>
-            <Link href={`/topics/${topicId}/notes`} className="rounded-md border border-black/15 bg-white px-3 py-2 text-sm">
-              Reflect in notebook
-            </Link>
-          </div>
-          {retention?.plan_summary && <p className="mt-3 text-xs text-black/58">{retention.plan_summary}</p>}
-        </article>
-
-        <article className="panel p-5">
-          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Studio Loop</p>
-          <ol className="mt-3 space-y-2 text-sm">
-            {LEARNING_LOOP_LABELS.map((item, index) => {
-              const active = item.id === primaryNextStep.loopStep;
-              return (
-                <li
-                  key={item.id}
-                  className={`rounded-md border px-3 py-2 ${
-                    active ? 'border-ink bg-ink/5 text-black' : 'border-black/10 bg-white text-black/68'
-                  }`}
-                >
-                  <span className="mr-2 text-xs text-black/55">{index + 1}.</span>
-                  {item.label}
-                </li>
-              );
-            })}
-          </ol>
-          {retention?.unlock_anticipation && (
-            <div className="mt-4 rounded-md border border-black/10 bg-white p-3 text-xs text-black/68">
-              <p className="font-semibold">{retention.unlock_anticipation.skill_name}</p>
-              <p className="mt-1">{retention.unlock_anticipation.why_locked}</p>
-            </div>
-          )}
-        </article>
       </section>
 
       {error && <p className="mt-5 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</p>}

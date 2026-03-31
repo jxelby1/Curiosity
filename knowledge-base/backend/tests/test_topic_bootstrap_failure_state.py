@@ -29,7 +29,6 @@ def _service() -> TopicBootstrapService:
     return TopicBootstrapService(
         skill_graph_agent=object(),  # type: ignore[arg-type]
         profile_agent=object(),  # type: ignore[arg-type]
-        recommendation_agent=object(),  # type: ignore[arg-type]
         resource_agent=object(),  # type: ignore[arg-type]
         assessment_agent=object(),  # type: ignore[arg-type]
     )

@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.db.models import (
     MilestoneEvent,
-    Recommendation,
     SkillEdge,
     SkillNode,
     SkillStatus,
@@ -57,9 +56,6 @@ class RetentionService:
             return 'not_started'
         return state.progress_state
 
-    def _examples_ready(self, state: UserSkillState | None) -> bool:
-        return bool(state and state.examples_generated_at)
-
     def _lesson_done(self, state: UserSkillState | None) -> bool:
         return bool(state and state.lesson_completed_at)
 
@@ -96,25 +92,11 @@ class RetentionService:
         activity_days_last_14 = sum(1 for day in unique_days if day >= cutoff)
         return latest, streak_days, activity_days_last_14
 
-    def _recommendation_rank(self, db: Session, *, topic_id: int, user_id: int) -> dict[int, int]:
-        rows = db.scalars(
-            select(Recommendation)
-            .where(Recommendation.topic_id == topic_id, Recommendation.user_id == user_id)
-            .order_by(Recommendation.created_at.desc())
-        ).all()
-        rank: dict[int, int] = {}
-        for rec in rows:
-            if rec.skill_node_id in rank:
-                continue
-            rank[rec.skill_node_id] = len(rank)
-        return rank
-
     def _action_candidates(
         self,
         *,
         nodes: list[SkillNode],
         state_map: dict[int, UserSkillState],
-        recommendation_rank: dict[int, int],
     ) -> list[ActionSuggestion]:
         candidates: list[ActionSuggestion] = []
         now = datetime.utcnow()
@@ -126,17 +108,12 @@ class RetentionService:
             if status == SkillStatus.locked:
                 continue
 
-            recommendation_bonus = 0.0
-            if node.id in recommendation_rank:
-                recommendation_bonus = max(0.0, 18.0 - (recommendation_rank[node.id] * 4.0))
-
-            status_bonus = 24.0 if status == SkillStatus.in_progress else 16.0 if status == SkillStatus.available else 8.0
-            base_priority = 40.0 + recommendation_bonus + status_bonus + max(0.0, 8.0 - float(node.difficulty))
+            status_bonus = 24.0 if status == SkillStatus.in_progress else 12.0 if status == SkillStatus.available else 8.0
+            base_priority = 40.0 + status_bonus + max(0.0, 8.0 - float(node.difficulty))
             if node.node_kind == 'core':
                 base_priority += 5.0
 
             lesson_done = self._lesson_done(state)
-            examples_ready = self._examples_ready(state)
             exercises_done = self._exercises_done(state)
             quiz_taken = self._quiz_taken(state)
             best_quiz = self._best_quiz_score(state)
@@ -154,19 +131,6 @@ class RetentionService:
                     )
                 )
 
-            if lesson_done and not examples_ready:
-                candidates.append(
-                    ActionSuggestion(
-                        skill_node_id=node.id,
-                        skill_name=node.name,
-                        action_type='review_examples',
-                        title=f'Review examples for {node.name}',
-                        description='Examples help bridge core concepts to practical pattern recognition.',
-                        tab='examples',
-                        priority=base_priority + 22.0,
-                    )
-                )
-
             if lesson_done and not exercises_done:
                 candidates.append(
                     ActionSuggestion(
@@ -180,7 +144,7 @@ class RetentionService:
                     )
                 )
 
-            if lesson_done and (not quiz_taken or best_quiz < VERIFY_THRESHOLD):
+            if lesson_done and exercises_done and not quiz_taken:
                 candidates.append(
                     ActionSuggestion(
                         skill_node_id=node.id,
@@ -193,14 +157,14 @@ class RetentionService:
                     )
                 )
 
-            if quiz_taken and best_quiz < VERIFY_THRESHOLD:
+            if lesson_done and quiz_taken and best_quiz < VERIFY_THRESHOLD:
                 candidates.append(
                     ActionSuggestion(
                         skill_node_id=node.id,
                         skill_name=node.name,
                         action_type='review_and_retry',
                         title=f'Review and retry {node.name}',
-                        description='Your last assessment is below verification threshold; focus weak areas and retry.',
+                        description='Your last assessment is below verification threshold; revisit the lesson, then retry with a clearer grasp of weak areas.',
                         tab='lesson',
                         priority=base_priority + 18.0,
                     )
@@ -363,9 +327,11 @@ class RetentionService:
             title = f'Pick up where you left off in {topic.name}'
             message_parts = []
             if lead_action:
-                message_parts.append(lead_action.title)
+                message_parts.append(f'Next move: {lead_action.title}.')
             if unlock_anticipation:
-                message_parts.append(f'You are {unlock_anticipation.status_label} from unlocking {unlock_anticipation.skill_name}.')
+                message_parts.append(
+                    f'After that, {unlock_anticipation.skill_name} is {unlock_anticipation.status_label}.'
+                )
             if not message_parts:
                 message_parts.append('A short focused session will help you regain momentum.')
             reminder = UserReminder(
@@ -589,13 +555,11 @@ class RetentionService:
         state_map = {state.skill_node_id: state for state in states}
         node_by_id = {node.id: node for node in nodes}
 
-        recommendation_rank = self._recommendation_rank(db, topic_id=topic.id, user_id=user_id)
         action_candidates = self._action_candidates(
             nodes=nodes,
             state_map=state_map,
-            recommendation_rank=recommendation_rank,
         )
-        next_actions = action_candidates[:3]
+        next_actions = action_candidates[:1]
         unlock_anticipation = self._unlock_anticipation(
             nodes=nodes,
             state_map=state_map,
@@ -628,7 +592,11 @@ class RetentionService:
         if latest_activity_at is None:
             cadence = 'weekly'
 
-        plan_items = list(next_actions[:3])
+        plan_items = list(next_actions)
+        for item in action_candidates[1:4]:
+            if any(existing.skill_node_id == item.skill_node_id and existing.action_type == item.action_type for existing in plan_items):
+                continue
+            plan_items.append(item)
         if unlock_anticipation:
             plan_items.append(
                 ActionSuggestion(

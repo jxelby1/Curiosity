@@ -428,6 +428,8 @@ def test_branch_suggestion_generation_and_performance_suggestion_dedup() -> None
     assert len(created) == 1
     assert all(item.status == 'pending' for item in created)
     assert all(item.origin == 'system_suggested' for item in created)
+    assert created[0].title.startswith('Style / Technique Practice:')
+    assert created[0].rationale.startswith('Why now:')
 
     practice = agent.create_performance_branch_suggestion(
         db,
@@ -438,6 +440,7 @@ def test_branch_suggestion_generation_and_performance_suggestion_dedup() -> None
     )
     assert practice is not None
     assert practice.purpose == 'style_technique_practice'
+    assert practice.rationale.startswith('Why now:')
 
     practice_again = agent.create_performance_branch_suggestion(
         db,
@@ -665,3 +668,35 @@ def test_suggest_branch_paths_returns_only_one_pending_per_parent() -> None:
     stale_row = db.scalar(select(BranchSuggestion).where(BranchSuggestion.id == stale.id))
     assert stale_row is not None
     assert stale_row.status == 'rejected'
+
+
+def test_performance_branch_suggestion_skips_when_same_focus_was_already_accepted() -> None:
+    db = _session()
+    user, topic, parent = _seed(db)
+    db.add(
+        BranchSuggestion(
+            topic_id=topic.id,
+            user_id=user.id,
+            parent_skill_id=parent.id,
+            title='Style / Technique Practice: Beat matching basics technique',
+            focus='Beat matching basics technique',
+            rationale='Why now: recent work exposed a narrow weakness. Study move: focused drills.',
+            purpose='style_technique_practice',
+            origin='system_suggested',
+            trigger_event='manual',
+            status='accepted',
+        )
+    )
+    db.commit()
+
+    agent = SkillGraphAgent(_BranchLLMStub())  # type: ignore[arg-type]
+
+    practice = agent.create_performance_branch_suggestion(
+        db,
+        topic=topic,
+        parent_node=parent,
+        user_id=user.id,
+        score=0.2,
+    )
+
+    assert practice is None

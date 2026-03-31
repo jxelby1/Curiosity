@@ -10,5 +10,6 @@ def test_topic_creation_persists_custom_assessment_style_selection() -> None:
 
     assert 'setAssessmentStyles' in content
     assert 'assessment_styles: assessmentStyles' in content
-    assert 'Customize' in content
+    assert 'Refine setup' in content
+    assert 'Refine' in content
     assert 'Reset to defaults' in content

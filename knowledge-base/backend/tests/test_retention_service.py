@@ -7,7 +7,6 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db.models import (
     MilestoneEvent,
-    Recommendation,
     SkillEdge,
     SkillNode,
     SkillStatus,
@@ -26,7 +25,6 @@ def _session() -> Session:
     SkillNode.__table__.create(bind=engine)
     SkillEdge.__table__.create(bind=engine)
     UserSkillState.__table__.create(bind=engine)
-    Recommendation.__table__.create(bind=engine)
     UserReminder.__table__.create(bind=engine)
     MilestoneEvent.__table__.create(bind=engine)
     SessionLocal = sessionmaker(bind=engine)
@@ -97,24 +95,16 @@ def test_retention_plan_generates_actionable_items_and_unlock_anticipation() -> 
             last_activity_at=datetime.utcnow(),
         )
     )
-    db.add(
-        Recommendation(
-            topic_id=topic.id,
-            user_id=user.id,
-            skill_node_id=node_b.id,
-            rationale='Start this next.',
-            action_type='study_generated',
-            confidence=0.9,
-        )
-    )
     db.commit()
 
     service = RetentionService()
     payload = service.build_topic_loop(db, topic=topic, user_id=user.id, tree_stage=2)
 
     assert payload['cadence'] == 'daily'
-    assert len(payload['next_actions']) >= 1
-    assert payload['next_actions'][0].skill_node_id is not None
+    assert len(payload['next_actions']) == 1
+    assert payload['next_actions'][0].skill_node_id == node_a.id
+    assert payload['next_actions'][0].action_type == 'complete_exercises'
+    assert len(payload['plan_items']) >= 1
     assert payload['unlock_anticipation'] is not None
     assert payload['unlock_anticipation'].skill_node_id == node_c.id
     assert payload['unlock_anticipation'].steps
@@ -154,6 +144,7 @@ def test_inactivity_reminder_triggers_only_after_threshold() -> None:
     service = RetentionService()
     stale_payload = service.build_topic_loop(db, topic=topic, user_id=user.id, tree_stage=1)
     assert stale_payload['reminder'] is not None
+    assert stale_payload['reminder'].message.startswith('Next move:')
 
     state = db.scalar(
         select(UserSkillState).where(UserSkillState.user_id == user.id, UserSkillState.skill_node_id == node.id)

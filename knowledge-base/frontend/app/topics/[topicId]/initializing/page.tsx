@@ -8,12 +8,12 @@ import { PRODUCT_NAME } from '@/lib/brand';
 import { TopicInitializationStatus } from '@/lib/types';
 
 const FALLBACK_STEPS = [
-  'Creating your learning path',
-  'Setting up your starting path',
+  'Setting the trunk of your study',
+  'Opening your starting path',
   'Preparing your first lesson',
-  'Getting examples ready',
-  'Preparing your first activities',
-  'Finalising your starting point'
+  'Getting your first exemplars ready',
+  'Preparing your first practice',
+  'Finalising your opening session'
 ];
 
 const STAGE_PROGRESS_BOUNDS: Record<string, { min: number; max: number }> = {
@@ -31,18 +31,33 @@ const STAGE_PROGRESS_BOUNDS: Record<string, { min: number; max: number }> = {
 };
 
 const STAGE_HINTS: Record<string, string[]> = {
-  setup: ['Setting up your topic workspace...'],
-  path: ['Building your skill tree...', 'Mapping a sensible progression path...'],
-  unlocks: ['Unlocking your first node sequence...', 'Preparing your entry path...'],
-  lesson: ['Designing your first lesson...', 'Shaping clear learning objectives...'],
+  setup: ['Setting up your study workspace...'],
+  path: ['Building the trunk of your skill tree...', 'Mapping a calm opening progression...'],
+  unlocks: ['Opening your first node sequence...', 'Preparing the first clear move...'],
+  lesson: ['Designing your opening lesson...', 'Shaping a concrete starting point...'],
   examples: ['Gathering exemplar works...', 'Preparing concrete references for close observation...'],
-  activities: ['Preparing your first studio exercises...', 'Crafting high-signal try-it practice prompts...'],
-  finalising: ['Connecting recommendations and milestones...', 'Final quality checks before launch...'],
+  activities: ['Preparing your first practice prompts...', 'Crafting the first hands-on studio move...'],
+  finalising: ['Connecting your notebook cue and milestones...', 'Final quality checks before launch...'],
   ready: ['Your first module is ready. Launching your workspace...'],
   preloading: ['Preparing extra lessons in the background...', 'Warming up likely next modules...'],
   complete: ['Topic fully prepared. Enjoy your learning path.'],
   failed: ['Setup hit an issue. You can retry safely.'],
 };
+
+const READY_PREVIEW = [
+  {
+    title: 'First lesson',
+    description: 'A concrete opening lesson that leads with observation, interpretation, and a clear through-line.',
+  },
+  {
+    title: 'First practice',
+    description: 'A small, high-signal exercise so you can begin through doing instead of staying in setup mode.',
+  },
+  {
+    title: 'Notebook cue',
+    description: 'A reflective prompt to capture what changed, what you noticed, or what you want to follow next.',
+  },
+];
 
 function stepFromStatus(status: TopicInitializationStatus | null): string {
   if (!status) return FALLBACK_STEPS[0];
@@ -202,13 +217,28 @@ export default function TopicInitializingPage({ params }: { params: { topicId: s
       <section className="panel w-full overflow-hidden">
         <div className="border-b border-black/10 bg-white/70 p-6 md:p-8">
           <p className="badge mb-3">Studio Setup</p>
-          <h1 className="text-2xl md:text-3xl">Preparing your studio path in {PRODUCT_NAME}</h1>
+          <h1 className="text-2xl md:text-3xl">Preparing your first study session in {PRODUCT_NAME}</h1>
           <p className="muted mt-2 max-w-2xl text-sm md:text-base">
-            We are preparing your first lesson, exemplar set, and hands-on prompts so you can begin through practice, not just reading.
+            We&apos;re setting the trunk of your study, opening the first node, and preparing a concrete lesson, exemplar trail, and practice cue.
           </p>
         </div>
 
         <div className="space-y-5 p-6 md:p-8">
+          <div className="rounded-xl border border-black/10 bg-white/75 p-4">
+            <p className="text-xs uppercase tracking-[0.14em] text-black/55">What happens here</p>
+            <p className="mt-2 text-sm text-black/75">
+              No setup choices are needed now. We&apos;ll open your workspace as soon as the first study step is ready.
+            </p>
+            <div className="mt-3 grid gap-3 md:grid-cols-3">
+              {READY_PREVIEW.map((item) => (
+                <article key={item.title} className="rounded-lg border border-black/10 bg-white p-3">
+                  <p className="text-sm font-semibold text-black">{item.title}</p>
+                  <p className="mt-1 text-xs text-black/65">{item.description}</p>
+                </article>
+              ))}
+            </div>
+          </div>
+
           <div>
             <div className="mb-2 flex items-center justify-between gap-3 text-xs text-black/65">
               <span>{stepFromStatus(status)}</span>

@@ -20,7 +20,6 @@ import {
   ProgressUpdateResult,
   Quiz,
   QuizSubmissionResult,
-  RecommendationItem,
   Resource,
   SkillTree,
   Topic,
@@ -458,13 +457,6 @@ export async function chatTopic(input: {
       include_web_resources: input.include_web_resources ?? false
     })
   });
-}
-
-export async function getRecommendations(topicId: string | number, refresh = false): Promise<RecommendationItem[]> {
-  const data = await request<{ recommendations: RecommendationItem[] }>(
-    `/topics/${topicId}/recommendations${refresh ? '?refresh=true' : ''}`
-  );
-  return data.recommendations;
 }
 
 export async function generateResource(input: {

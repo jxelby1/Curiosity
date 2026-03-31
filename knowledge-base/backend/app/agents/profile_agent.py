@@ -392,13 +392,13 @@ class ProfileAgent:
         if status == SkillStatus.locked:
             return 'Verify prerequisite nodes first to unlock this node.'
         if not state:
-            return 'Start by generating and completing the lesson.'
-        if state.progress_state == 'not_started':
-            return 'Complete the lesson to begin progression.'
-        if state.progress_state == 'learning':
-            if not state.exercises_completed_at:
-                return 'Complete exercises to move this node to completed.'
-            return 'Finish remaining learning steps, then take the quiz.'
-        if state.progress_state == 'completed':
-            return 'Take the quiz and score at least 70% to verify mastery.'
-        return 'Node is verified. Move to dependent skills.'
+            return 'Study the lesson first so this node is grounded before practice.'
+        if state.lesson_completed_at is None:
+            return 'Study the lesson before moving into practice or verification.'
+        if state.exercises_completed_at is None:
+            return 'Practice this node to turn the lesson into working skill.'
+        if state.quiz_taken_at is None:
+            return 'Take the assessment to verify mastery and unlock what follows.'
+        if state.best_quiz_score < QUIZ_VERIFY_THRESHOLD:
+            return 'Review the lesson, then retry the assessment to verify mastery.'
+        return 'Node is verified. Reflect briefly, then continue the core path or open a selective branch.'

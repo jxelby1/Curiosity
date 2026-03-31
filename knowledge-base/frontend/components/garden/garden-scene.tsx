@@ -25,8 +25,87 @@ type BedBand = {
   opacity: number;
 };
 
+function parseLatestActivity(value: string | null): Date | null {
+  if (!value) return null;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function activityWeight(value: string | null): number {
+  const latest = parseLatestActivity(value);
+  if (!latest) return 0;
+  const hours = (Date.now() - latest.getTime()) / (1000 * 60 * 60);
+  if (hours <= 36) return 40;
+  if (hours <= 120) return 24;
+  if (hours <= 336) return 12;
+  return 4;
+}
+
+function momentumMeta(topic: UserTopicProgressSummary): {
+  label: string;
+  badgeClass: string;
+  glow: string;
+  glowOpacity: number;
+} {
+  const latest = parseLatestActivity(topic.latest_activity_at);
+  if (!latest) {
+    return {
+      label: 'Just planted',
+      badgeClass: 'border-stone-300 bg-stone-100 text-stone-700',
+      glow: 'radial-gradient(circle, rgba(184,170,152,0.35), rgba(184,170,152,0) 68%)',
+      glowOpacity: 0.14,
+    };
+  }
+  const hours = (Date.now() - latest.getTime()) / (1000 * 60 * 60);
+  if (hours <= 36) {
+    return {
+      label: 'Recently tended',
+      badgeClass: 'border-emerald-300 bg-emerald-100 text-emerald-800',
+      glow: 'radial-gradient(circle, rgba(110,231,183,0.5), rgba(110,231,183,0) 68%)',
+      glowOpacity: 0.32,
+    };
+  }
+  if (hours <= 120) {
+    return {
+      label: 'In motion',
+      badgeClass: 'border-cyan-300 bg-cyan-100 text-cyan-800',
+      glow: 'radial-gradient(circle, rgba(125,211,252,0.42), rgba(125,211,252,0) 68%)',
+      glowOpacity: 0.24,
+    };
+  }
+  if (hours <= 336) {
+    return {
+      label: 'Resting',
+      badgeClass: 'border-amber-300 bg-amber-100 text-amber-800',
+      glow: 'radial-gradient(circle, rgba(253,230,138,0.38), rgba(253,230,138,0) 68%)',
+      glowOpacity: 0.18,
+    };
+  }
+  return {
+    label: 'Ready to revisit',
+    badgeClass: 'border-violet-300 bg-violet-100 text-violet-800',
+    glow: 'radial-gradient(circle, rgba(196,181,253,0.4), rgba(196,181,253,0) 68%)',
+    glowOpacity: 0.18,
+  };
+}
+
+function layeringLine(topic: UserTopicProgressSummary): string {
+  if (topic.notes_count > 0 && topic.branch_count > 0) {
+    return `${topic.notes_count} notebook note${topic.notes_count === 1 ? '' : 's'} · ${topic.branch_count} branch path${topic.branch_count === 1 ? '' : 's'}`;
+  }
+  if (topic.notes_count > 0) {
+    return `${topic.notes_count} notebook note${topic.notes_count === 1 ? '' : 's'} gathered here`;
+  }
+  if (topic.branch_count > 0) {
+    return `${topic.branch_count} branch path${topic.branch_count === 1 ? '' : 's'} opened here`;
+  }
+  return 'Core path still taking shape';
+}
+
 function buildGardenLayout(topics: UserTopicProgressSummary[]): { nodes: GardenNode[]; width: number; height: number; rows: number } {
   const ranked = [...topics].sort((a, b) => {
+    const activityDelta = activityWeight(b.latest_activity_at) - activityWeight(a.latest_activity_at);
+    if (activityDelta !== 0) return activityDelta;
     if (a.tree_stage !== b.tree_stage) return b.tree_stage - a.tree_stage;
     if (a.mastery_average !== b.mastery_average) return b.mastery_average - a.mastery_average;
     return a.topic_id - b.topic_id;
@@ -82,8 +161,10 @@ export function GardenScene({ topics }: { topics: UserTopicProgressSummary[] }) 
   return (
     <section className="panel relative overflow-hidden rounded-3xl p-0">
       <div className="border-b border-black/10 px-5 py-4 md:px-6">
-        <h2 className="text-xl font-semibold">Growing garden</h2>
-        <p className="mt-1 text-sm text-black/65">Each topic grows as its own tree plot. Keep momentum to cultivate a fuller garden.</p>
+        <h2 className="text-xl font-semibold">Living grove</h2>
+        <p className="mt-1 text-sm text-black/65">
+          Each plot carries its own rhythm. Warmer trees mark recent attention; notebook trails and branch paths show where a study has become more layered.
+        </p>
       </div>
 
       <div className="relative overflow-auto px-2 pb-6 pt-3 md:px-4">
@@ -115,7 +196,9 @@ export function GardenScene({ topics }: { topics: UserTopicProgressSummary[] }) 
 
           {layout.nodes.map(({ topic, x, y, scale, row, z }) => {
             const stageLabel = treeStageLabel(topic.tree_stage);
-            const masteryPct = Math.round(topic.mastery_average * 100);
+            const momentum = momentumMeta(topic);
+            const memoryLine = layeringLine(topic);
+            const glowOpacity = Math.min(0.42, momentum.glowOpacity + Math.min(topic.notes_count, 4) * 0.03);
 
             return (
               <Link
@@ -125,6 +208,10 @@ export function GardenScene({ topics }: { topics: UserTopicProgressSummary[] }) 
                 style={{ left: `${x}px`, top: `${y}px`, zIndex: z }}
               >
                 <div className="pointer-events-none relative">
+                  <span
+                    className="absolute left-1/2 top-[18px] h-[116px] w-[116px] -translate-x-1/2 rounded-full blur-2xl"
+                    style={{ background: momentum.glow, opacity: glowOpacity }}
+                  />
                   <span className="absolute bottom-4 left-1/2 h-7 w-[122px] -translate-x-1/2 rounded-[999px] bg-black/20 blur-[9px]" />
                   <span
                     className="absolute bottom-5 left-1/2 h-6 w-[120px] -translate-x-1/2 rotate-[-2deg] rounded-[999px] border border-emerald-900/20"
@@ -151,10 +238,13 @@ export function GardenScene({ topics }: { topics: UserTopicProgressSummary[] }) 
 
                 <div className="mt-1.5 w-48 rounded-xl border border-black/10 bg-white/92 px-3 py-2 shadow-[0_10px_20px_rgba(16,19,33,0.12)] backdrop-blur">
                   <p className="line-clamp-1 text-sm font-semibold text-black">{topic.topic_name}</p>
-                  <p className="mt-0.5 text-[11px] uppercase tracking-[0.12em] text-black/55">{stageLabel}</p>
-                  <p className="mt-0.5 text-xs text-black/62">
-                    {topic.verified_nodes}/{topic.total_nodes} verified · {masteryPct}% mastery
-                  </p>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-[0.12em] ${momentum.badgeClass}`}>
+                      {momentum.label}
+                    </span>
+                    <span className="text-[10px] uppercase tracking-[0.12em] text-black/55">{stageLabel}</span>
+                  </div>
+                  <p className="mt-1 text-xs text-black/62">{memoryLine}</p>
                 </div>
               </Link>
             );

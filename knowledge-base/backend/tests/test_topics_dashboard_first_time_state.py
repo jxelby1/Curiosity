@@ -15,10 +15,10 @@ def test_topics_dashboard_has_polished_first_time_state() -> None:
     assert content.count('Start your first study') >= 1
 
 
-def test_topics_dashboard_offers_local_dev_tools_upgrade_action() -> None:
+def test_topics_dashboard_hides_local_dev_tools_upgrade_action_from_main_entry_flow() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     dashboard_path = repo_root / 'frontend' / 'components' / 'topics-dashboard.tsx'
     content = dashboard_path.read_text(encoding='utf-8')
 
-    assert 'upgradeMyAccountToDev' in content
-    assert 'Enable dev tools (local)' in content
+    assert 'upgradeMyAccountToDev' not in content
+    assert 'Enable dev tools (local)' not in content

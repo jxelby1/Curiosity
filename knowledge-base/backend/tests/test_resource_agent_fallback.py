@@ -133,6 +133,55 @@ def test_deep_lesson_generation_uses_fallback_when_llm_fails() -> None:
     assert content['title']
     assert len(content['sections']) >= 3
     assert len(content['study_prompts']) >= 2
+    assert content['sections'][0]['heading'] == 'Start from one anchor exemplar'
+    assert content['sections'][0]['role'] == 'example'
+    assert any('response' in section['heading'].lower() or 'transfer' in section['heading'].lower() for section in content['sections'])
+    assert any(section['role'] == 'comparison' for section in content['sections'])
+
+
+def test_examples_generation_fallback_produces_anchor_contrast_and_transfer_cases() -> None:
+    db = _session()
+    user = User(email='examples-fallback@test.local', hashed_password='x', display_name='Examples Fallback User')
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    topic = Topic(user_id=user.id, name='Grammar', description='Sentence control', goal='Write more clearly')
+    db.add(topic)
+    db.commit()
+    db.refresh(topic)
+
+    skill = SkillNode(topic_id=topic.id, name='Comma splice repair', description='Fix comma splice errors', difficulty=2, mastery_estimate=0.0)
+    db.add(skill)
+    db.commit()
+    db.refresh(skill)
+
+    agent = ResourceAgent(
+        llm_service=_FailingLLM(),  # type: ignore[arg-type]
+        search_service=_SearchStub(),  # type: ignore[arg-type]
+        retrieval_service=_RetrievalStub(),  # type: ignore[arg-type]
+    )
+
+    resource, content, source = asyncio.run(
+        agent.generate_material(
+            db,
+            user_id=user.id,
+            topic=topic,
+            skill_node=skill,
+            kind='examples',
+            regenerate=False,
+        )
+    )
+
+    assert source == 'generated'
+    assert resource.content_json is not None
+    assert content is not None
+    assert len(content['examples']) == 3
+    assert content['examples'][0]['role'] == 'anchor'
+    assert content['examples'][0]['name'].lower().startswith('anchor')
+    assert any('contrast' in example['name'].lower() for example in content['examples'])
+    assert any('transfer' in example['name'].lower() for example in content['examples'])
+    assert any(example['role'] == 'transfer' for example in content['examples'])
 
 
 def test_existing_resource_is_reused_without_regeneration() -> None:

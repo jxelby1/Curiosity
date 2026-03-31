@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.core.branching import (
     CANONICAL_BRANCH_PURPOSES,
+    branch_purpose_label,
+    branch_purpose_summary,
     normalize_branch_purpose,
 )
 from app.core.course_preferences import (
@@ -127,6 +129,16 @@ _CONTENT_OVERLAP_STOPWORDS = {
     'overview',
     'introduction',
 }
+_GENERIC_BRANCH_FOCUSES = {
+    'more practice',
+    'advanced practice',
+    'deeper dive',
+    'deep dive',
+    'extra practice',
+    'further study',
+    'optional branch',
+    'new branch',
+}
 _CORE_ROLE_FALLBACK_ORDER = (
     'foundational_concept',
     'conceptual_bridge',
@@ -222,6 +234,96 @@ class SkillGraphAgent:
             if len(deduped) >= limit:
                 break
         return deduped
+
+    @staticmethod
+    def _trim_text(value: str | None, *, limit: int) -> str:
+        text = ' '.join((value or '').split()).strip()
+        if len(text) <= limit:
+            return text
+        trimmed = text[: limit - 1].rstrip(' ,;:-')
+        if not trimmed:
+            trimmed = text[: limit - 1].rstrip()
+        return f'{trimmed}…'
+
+    def _default_branch_focus(
+        self,
+        *,
+        parent_node: SkillNode,
+        purpose: str,
+        state: BranchCurriculumState,
+        requested_focus: str | None = None,
+    ) -> str:
+        requested = self._trim_text(requested_focus, limit=180)
+        if requested and requested.lower() not in _GENERIC_BRANCH_FOCUSES:
+            return requested
+
+        if purpose == 'style_technique_practice':
+            focus = state.weak_areas[0] if state.weak_areas else f'{parent_node.name} technique'
+        elif purpose == 'creative_response':
+            focus = state.strong_areas[0] if state.strong_areas else f'{parent_node.name} response study'
+        elif purpose == 'study_exemplar':
+            focus = requested or f'{parent_node.name} through one concrete exemplar'
+        elif purpose == 'compare_contrast':
+            focus = requested or f'{parent_node.name} across two contrasting examples'
+        elif purpose == 'context_influence':
+            focus = requested or f'{parent_node.name} in surrounding context'
+        elif purpose == 'follow_lineage':
+            focus = requested or f'lineage around {parent_node.name}'
+        else:
+            focus = requested or f'a deeper read of {parent_node.name}'
+        return self._trim_text(focus, limit=180)
+
+    def _format_branch_suggestion_title(
+        self,
+        *,
+        topic: Topic,
+        parent_node: SkillNode,
+        purpose: str,
+        focus: str,
+        proposed_title: str | None,
+    ) -> str:
+        cleaned = self._trim_text(proposed_title, limit=160)
+        issues = self._title_quality_issues(
+            topic_name=topic.name,
+            topic_description=topic.description or '',
+            topic_goal=topic.goal or '',
+            title=cleaned,
+        )
+        label = branch_purpose_label(purpose)
+        focus_label = self._trim_text(focus, limit=120) or parent_node.name
+        if not cleaned or issues:
+            return self._trim_text(f'{label}: {focus_label}', limit=160)
+        if cleaned.lower().startswith(label.lower()):
+            return cleaned
+        return self._trim_text(f'{label}: {focus_label}', limit=160)
+
+    def _compose_branch_suggestion_rationale(
+        self,
+        *,
+        parent_node: SkillNode,
+        purpose: str,
+        focus: str,
+        state: BranchCurriculumState,
+        trigger_event: str,
+    ) -> str:
+        if purpose == 'style_technique_practice' and state.weak_areas:
+            why_now = f'recent work exposed a narrow weakness around {state.weak_areas[0]}'
+        elif purpose == 'creative_response' and state.strong_areas:
+            why_now = f'recent progress suggests you are ready to turn understanding into authorship around {state.strong_areas[0]}'
+        elif trigger_event == 'completion':
+            why_now = f'you have enough footing in {parent_node.name} to open one adjacent move without crowding the main path'
+        elif trigger_event == 'interest':
+            why_now = f'curiosity is pointing toward a distinct side path connected to {parent_node.name}'
+        elif state.future_core_lines:
+            why_now = 'there is room for one distinct side path without stepping on the upcoming core sequence'
+        else:
+            why_now = f'this adds a distinct way to study {parent_node.name} right now without replacing the main path'
+
+        move = branch_purpose_summary(purpose)
+        return self._trim_text(
+            f'Why now: {why_now}. Study move: {move} Focus it on {focus}, and keep the core path primary.',
+            limit=320,
+        )
 
     def _build_curriculum_state(
         self,
@@ -327,6 +429,37 @@ class SkillGraphAgent:
             if self._token_overlap_ratio(candidate, parent_signature) >= 0.8:
                 return True
 
+        return False
+
+    def _is_redundant_branch_suggestion_candidate(
+        self,
+        *,
+        title: str,
+        focus: str,
+        purpose: str,
+        state: BranchCurriculumState,
+    ) -> bool:
+        candidate = f'{title} {focus}'.strip()
+        compare_lines = (
+            state.existing_optional_lines
+            + state.future_core_lines
+            + state.accepted_branch_focuses
+            + state.pending_branch_focuses
+        )
+        if not self._purpose_allows_revisit(purpose):
+            compare_lines += state.taught_skill_lines + state.taught_concepts
+        focus_clean = ' '.join((focus or '').lower().split())
+        title_clean = ' '.join((title or '').lower().split())
+        for baseline in compare_lines:
+            baseline_clean = ' '.join((baseline or '').lower().split())
+            if focus_clean and focus_clean in baseline_clean:
+                return True
+            if title_clean and title_clean in baseline_clean:
+                return True
+            if self._text_similarity_ratio(candidate, baseline) >= 0.84:
+                return True
+            if self._token_overlap_ratio(candidate, baseline) >= 0.78:
+                return True
         return False
 
     def _fallback_branch_node(
@@ -1279,6 +1412,7 @@ class SkillGraphAgent:
             '- Must declare why this branch exists now.\n'
             '- Must clearly match the selected branch move type.\n'
             '- Must reference learner context (strength, weakness, or progression signal).\n'
+            '- Focus should name a concrete work, question, technique, contrast, or response move instead of a generic deep dive.\n'
             '- Prefer actionable moves: try this, compare this, study one exemplar, or make a response.\n'
             '- If proposing context/influence, tie it to a concrete seeing/listening/writing/making action.\n'
             '- Must avoid duplicating already taught content unless the move is style_technique_practice.\n'
@@ -1306,34 +1440,47 @@ class SkillGraphAgent:
         existing_focuses.update(item.lower() for item in curriculum_state.pending_branch_focuses)
         existing_focuses.update(item.lower() for item in curriculum_state.accepted_branch_focuses)
 
-        def _suggestion_redundant(title: str, focus: str, purpose: str) -> bool:
-            candidate = f'{title} {focus}'
-            compare_lines = curriculum_state.existing_optional_lines + curriculum_state.future_core_lines
-            if not self._purpose_allows_revisit(purpose):
-                compare_lines += curriculum_state.taught_skill_lines + curriculum_state.taught_concepts
-            for baseline in compare_lines:
-                if self._text_similarity_ratio(candidate, baseline) >= 0.84:
-                    return True
-                if self._token_overlap_ratio(candidate, baseline) >= 0.78:
-                    return True
-            return False
-
         created: list[BranchSuggestion] = []
         for item in plan.suggestions:
-            focus_key = item.focus.strip().lower()
+            normalized_purpose = self._normalize_branch_purpose(item.purpose)
+            normalized_focus = self._default_branch_focus(
+                parent_node=parent_node,
+                purpose=normalized_purpose,
+                state=curriculum_state,
+                requested_focus=item.focus,
+            )
+            normalized_title = self._format_branch_suggestion_title(
+                topic=topic,
+                parent_node=parent_node,
+                purpose=normalized_purpose,
+                focus=normalized_focus,
+                proposed_title=item.title,
+            )
+            rationale = self._compose_branch_suggestion_rationale(
+                parent_node=parent_node,
+                purpose=normalized_purpose,
+                focus=normalized_focus,
+                state=curriculum_state,
+                trigger_event=trigger_event,
+            )
+            focus_key = normalized_focus.strip().lower()
             if not focus_key or focus_key in existing_focuses:
                 continue
-            normalized_purpose = self._normalize_branch_purpose(item.purpose)
-            if _suggestion_redundant(item.title, item.focus, normalized_purpose):
+            if self._is_redundant_branch_suggestion_candidate(
+                title=normalized_title,
+                focus=normalized_focus,
+                purpose=normalized_purpose,
+                state=curriculum_state,
+            ):
                 continue
             existing_focuses.add(focus_key)
             record = BranchSuggestion(
                 topic_id=topic.id,
                 user_id=user_id,
                 parent_skill_id=parent_node.id,
-                title=item.title.strip(),
-                focus=item.focus.strip(),
-                rationale=item.rationale.strip(),
+                title=normalized_title,
+                focus=normalized_focus,
+                rationale=rationale,
                 purpose=normalized_purpose,
                 origin='system_suggested',
                 trigger_event=trigger_event,
@@ -1361,19 +1508,25 @@ class SkillGraphAgent:
                 else parent_node.name
             )
             if fallback_focus.lower() not in existing_focuses:
-                fallback_rationale = (
-                    f'Suggested to strengthen a specific weak area in {fallback_focus} through focused technique practice.'
-                    if fallback_purpose == 'style_technique_practice'
-                    else f'Suggested because strong recent performance indicates readiness for an original creative response in {fallback_focus}.'
-                    if fallback_purpose == 'creative_response'
-                    else f'Suggested to place {parent_node.name} in broader context and influence arcs without duplicating the core path.'
+                fallback_focus = self._default_branch_focus(
+                    parent_node=parent_node,
+                    purpose=fallback_purpose,
+                    state=curriculum_state,
+                    requested_focus=fallback_focus,
                 )
-                fallback_title = (
-                    f'Style / Technique Practice: {fallback_focus}'
-                    if fallback_purpose == 'style_technique_practice'
-                    else f'Creative Response: {fallback_focus}'
-                    if fallback_purpose == 'creative_response'
-                    else f'Context & Influence: {parent_node.name}'
+                fallback_rationale = self._compose_branch_suggestion_rationale(
+                    parent_node=parent_node,
+                    purpose=fallback_purpose,
+                    focus=fallback_focus,
+                    state=curriculum_state,
+                    trigger_event=trigger_event,
+                )
+                fallback_title = self._format_branch_suggestion_title(
+                    topic=topic,
+                    parent_node=parent_node,
+                    purpose=fallback_purpose,
+                    focus=fallback_focus,
+                    proposed_title=f'{branch_purpose_label(fallback_purpose)}: {fallback_focus}',
                 )
                 record = BranchSuggestion(
                     topic_id=topic.id,
@@ -1412,14 +1565,10 @@ class SkillGraphAgent:
         focus = ''
         if score <= 0.45:
             purpose = 'style_technique_practice'
-            title = f'Style / Technique Practice: {parent_node.name}'
             focus = f'Targeted technique drills for {parent_node.name}'
-            rationale = 'Recent assessment signals targeted execution gaps. A focused technique-practice branch can strengthen foundations.'
         elif score >= 0.85:
             purpose = 'creative_response'
-            title = f'Creative Response: {parent_node.name}'
             focus = f'Original response work inspired by {parent_node.name}'
-            rationale = 'Strong performance detected. A creative-response branch can convert understanding into authored work and interpretation.'
 
         if not purpose:
             return None
@@ -1435,6 +1584,40 @@ class SkillGraphAgent:
         )
         if existing_pending:
             return existing_pending
+
+        curriculum_state = self._build_curriculum_state(
+            db,
+            topic=topic,
+            parent_node=parent_node,
+            user_id=user_id,
+        )
+        focus = self._default_branch_focus(
+            parent_node=parent_node,
+            purpose=purpose,
+            state=curriculum_state,
+            requested_focus=focus,
+        )
+        title = self._format_branch_suggestion_title(
+            topic=topic,
+            parent_node=parent_node,
+            purpose=purpose,
+            focus=focus,
+            proposed_title=f'{branch_purpose_label(purpose)}: {focus}',
+        )
+        rationale = self._compose_branch_suggestion_rationale(
+            parent_node=parent_node,
+            purpose=purpose,
+            focus=focus,
+            state=curriculum_state,
+            trigger_event='assessment_performance',
+        )
+        if self._is_redundant_branch_suggestion_candidate(
+            title=title,
+            focus=focus,
+            purpose=purpose,
+            state=curriculum_state,
+        ):
+            return None
 
         suggestion = BranchSuggestion(
             topic_id=topic.id,

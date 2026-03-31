@@ -1672,7 +1672,7 @@ export function PremiumSkillTree({
             const isOptional = node.node_kind === 'optional_branch';
             const isSuggested = isOptional && node.branch_origin === 'system_suggested';
             const size = milestone ? 56 : 48;
-            const branchTag = isOptional ? (isSuggested ? 'Recommended' : 'Optional') : 'Core';
+            const branchTag = isOptional ? (isSuggested ? 'Suggested' : 'Optional') : 'Core';
             const revealNode = revealedNodeSet.has(node.id);
 
             return (

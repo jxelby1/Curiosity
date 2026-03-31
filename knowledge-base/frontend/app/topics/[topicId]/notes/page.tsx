@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
@@ -15,6 +16,7 @@ import {
 } from '@/lib/api';
 import { readSkillTreeCache, writeSkillTreeCache } from '@/lib/cache';
 import { formatDisplayTag } from '@/lib/display-format';
+import { getNotebookLensOption, NOTEBOOK_LENS_OPTIONS, NotebookLens } from '@/lib/notebook';
 import {
   DocumentItem,
   NoteType,
@@ -36,57 +38,6 @@ const NOTE_TYPE_OPTIONS: Array<{ value: NoteType; label: string }> = [
   { value: 'summary', label: 'Synthesis' },
   { value: 'reflection', label: 'Reflection' },
   { value: 'reminder', label: 'Next-step prompt' }
-];
-type NotebookLens = 'reflection' | 'comparison' | 'exemplar' | 'interpretation' | 'view_shift' | 'next_thread';
-const NOTE_LENS_OPTIONS: Array<{
-  tag: NotebookLens;
-  label: string;
-  noteType: NoteType;
-  promptTitle: string;
-  starter: string;
-}> = [
-  {
-    tag: 'reflection',
-    label: 'Reflection',
-    noteType: 'reflection',
-    promptTitle: 'Reflection',
-    starter: 'What became clearer today?\n- \nWhat still feels unresolved?\n- ',
-  },
-  {
-    tag: 'comparison',
-    label: 'Comparison',
-    noteType: 'summary',
-    promptTitle: 'Comparison',
-    starter: 'Compare two works or interpretations:\n- Similarities:\n- Differences:\n- Why the contrast matters:',
-  },
-  {
-    tag: 'exemplar',
-    label: 'Saved Exemplar',
-    noteType: 'lesson',
-    promptTitle: 'Exemplar',
-    starter: 'Work or artifact:\nContext:\nWhat to study closely:\nWhy this is a reference point:',
-  },
-  {
-    tag: 'interpretation',
-    label: 'Interpretation',
-    noteType: 'summary',
-    promptTitle: 'Interpretation',
-    starter: 'My interpretation:\nEvidence from the work:\nAlternative reading worth considering:',
-  },
-  {
-    tag: 'view_shift',
-    label: 'What Changed My View',
-    noteType: 'reflection',
-    promptTitle: 'View shift',
-    starter: 'What changed my view:\nWhat triggered the shift:\nWhat I now notice differently:',
-  },
-  {
-    tag: 'next_thread',
-    label: 'Explore Next',
-    noteType: 'reminder',
-    promptTitle: 'Explore next',
-    starter: 'What I want to explore next:\nWhy this thread matters now:\nFirst concrete step:',
-  },
 ];
 
 const JOURNAL_LENS_FILTERS: Array<{ id: 'all' | NotebookLens; label: string }> = [
@@ -139,6 +90,11 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
   const selectedNote = useMemo(
     () => (selectedNoteId ? notes.find((note) => note.id === selectedNoteId) || null : null),
     [notes, selectedNoteId]
+  );
+  const skillNameById = useMemo(() => new Map((tree?.nodes || []).map((node) => [node.id, node.name])), [tree]);
+  const recommendedLens = useMemo(
+    () => getNotebookLensOption(journalSummary?.recommended_lens || 'reflection'),
+    [journalSummary?.recommended_lens]
   );
 
   const journalEntriesByChapter = useMemo(() => {
@@ -319,19 +275,16 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     });
   }
 
-  function applyNotebookLens(tag: NotebookLens) {
-    const lens = NOTE_LENS_OPTIONS.find((item) => item.tag === tag);
-    if (!lens) return;
+  function seedNotebookEntry(tag: NotebookLens, skillId?: string) {
+    const lens = getNotebookLensOption(tag);
+    setSelectedNoteId(null);
+    setTitle(lens.promptTitle);
+    setBody(lens.starter);
     setNoteType(lens.noteType);
-    setNoteTags((prev) => normalizeTags([...prev, lens.tag]));
-    if (!title.trim()) setTitle(lens.promptTitle);
-    setBody((prev) => {
-      const trimmed = prev.trim();
-      if (!trimmed) return lens.starter;
-      if (trimmed.includes(lens.starter.split('\n')[0])) return prev;
-      return `${prev.trim()}\n\n${lens.starter}`;
-    });
+    setLinkedSkillId(skillId || '');
+    setNoteTags(normalizeTags([lens.tag]));
     setIsEditingNote(true);
+    setActiveView('notes');
   }
 
   function entryTags(entry: TopicJournalEntry): string[] {
@@ -463,6 +416,81 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
     <main className="mx-auto max-w-7xl p-6 md:p-10">
       <TopicHeader topicId={topicId} topicName={tree.topic.name} subtitle="Notebook, commonplace archive, and source materials" />
 
+      <section className="mb-5 grid gap-4 lg:grid-cols-[1.25fr_1fr]">
+        <article className="panel p-5">
+          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Notebook Signals</p>
+          <h2 className="mt-2 text-2xl font-semibold">{recommendedLens.label}</h2>
+          <p className="muted mt-2 text-sm">
+            {journalSummary?.recommended_lens_reason ||
+              'Use the notebook to hold what changed, what deserves comparison, and what you want to explore next.'}
+          </p>
+          <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <p className="text-xs uppercase tracking-[0.12em] text-emerald-900/70">Current prompt</p>
+            <p className="mt-1 text-sm text-emerald-950">
+              {journalSummary?.reflection_prompt || 'Capture the strongest idea from this study and make it your own.'}
+            </p>
+            <p className="mt-2 text-xs text-emerald-900/80">
+              {journalSummary?.growth_signal || 'The notebook is empty. Start with one high-signal capture.'}
+            </p>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              className="studio-button-primary px-3 py-2 text-sm"
+              onClick={() => seedNotebookEntry(recommendedLens.tag)}
+            >
+              Capture {recommendedLens.shortLabel.toLowerCase()}
+            </button>
+            <button
+              type="button"
+              className="studio-button-secondary px-3 py-2 text-sm"
+              onClick={() => seedNotebookEntry('reflection')}
+            >
+              Write reflection
+            </button>
+            <button
+              type="button"
+              className="studio-button-secondary px-3 py-2 text-sm"
+              onClick={() => setActiveView('journal')}
+            >
+              Open timeline
+            </button>
+          </div>
+        </article>
+
+        <article className="panel p-5">
+          <p className="text-xs uppercase tracking-[0.16em] text-black/55">Memory Balance</p>
+          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-lg border border-black/10 bg-white p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-black/55">Notebook</p>
+              <p className="mt-1 text-lg font-semibold">{journalSummary?.notes_count ?? notes.length} entries</p>
+              <p className="mt-1 text-xs text-black/62">
+                {journalSummary?.reflections_logged ?? 0} reflections · {journalSummary?.comparisons_logged ?? 0} comparisons
+              </p>
+            </div>
+            <div className="rounded-lg border border-black/10 bg-white p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-black/55">Taste Signals</p>
+              <p className="mt-1 text-lg font-semibold">{journalSummary?.exemplars_saved ?? 0} exemplars</p>
+              <p className="mt-1 text-xs text-black/62">
+                {journalSummary?.view_shifts_logged ?? 0} view shifts · {journalSummary?.next_threads_logged ?? 0} next threads
+              </p>
+            </div>
+            <div className="sm:col-span-2 rounded-lg border border-black/10 bg-white p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-black/55">Latest Memory</p>
+              <p className="mt-1 text-sm font-semibold text-black">
+                {journalSummary?.latest_note_title || 'No notebook entry captured yet'}
+              </p>
+              <p className="mt-1 text-xs text-black/62">
+                {journalSummary?.latest_note_skill_name
+                  ? `Linked to ${journalSummary.latest_note_skill_name}`
+                  : 'Topic-level notebook thread'}
+                {journalSummary?.latest_note_at ? ` · ${new Date(journalSummary.latest_note_at).toLocaleString()}` : ''}
+              </p>
+            </div>
+          </div>
+        </article>
+      </section>
+
       <div className="mb-4 flex flex-wrap gap-2">
         <button
           type="button"
@@ -471,7 +499,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('journal')}
         >
-          Notebook timeline
+          Notebook
         </button>
         <button
           type="button"
@@ -480,7 +508,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('notes')}
         >
-          Notebook editor
+          Write
         </button>
         <button
           type="button"
@@ -489,7 +517,7 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
           }`}
           onClick={() => setActiveView('documents')}
         >
-          Source materials
+          Sources
         </button>
       </div>
 
@@ -502,13 +530,22 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                 Your commonplace timeline: evidence, reflection, branch decisions, and turning points in understanding.
               </p>
             </div>
-            <button
-              type="button"
-              className="studio-button-secondary px-3 py-1.5 text-xs"
-              onClick={loadJournal}
-            >
-              Refresh
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="studio-button-secondary px-3 py-1.5 text-xs"
+                onClick={() => seedNotebookEntry(recommendedLens.tag)}
+              >
+                Capture {recommendedLens.shortLabel.toLowerCase()}
+              </button>
+              <button
+                type="button"
+                className="studio-button-secondary px-3 py-1.5 text-xs"
+                onClick={loadJournal}
+              >
+                Refresh
+              </button>
+            </div>
           </div>
 
           {journalSummary && (
@@ -715,9 +752,14 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                   <p className="font-semibold">{note.title}</p>
                   <p className="muted mt-1 line-clamp-2 text-xs">{markdownToPlainText(note.body)}</p>
                   <div className="mt-2 flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-1">
+                    <div className="flex flex-wrap items-center gap-1">
                       <span className="badge">{formatDisplayTag(note.note_type)}</span>
                       <span className="badge">{formatDisplayTag(note.source_type)}</span>
+                      {note.skill_node_id && (
+                        <span className="badge border border-black/15 bg-white text-black/70">
+                          {skillNameById.get(note.skill_node_id) || `Skill ${note.skill_node_id}`}
+                        </span>
+                      )}
                       {note.tags.slice(0, 2).map((tag) => (
                         <span key={`${note.id}-${tag}`} className="badge border border-black/15 bg-white text-black/70">
                           {formatDisplayTag(tag)}
@@ -745,15 +787,32 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                     <p className="muted mt-1 text-sm">
                       {formatDisplayTag(selectedNote.note_type)} · {new Date(selectedNote.updated_at).toLocaleString()}
                     </p>
-                    {selectedNote.tags.length > 0 && (
-                      <div className="mt-2 flex flex-wrap gap-1.5">
-                        {selectedNote.tags.map((tag) => (
-                          <span key={`${selectedNote.id}-tag-${tag}`} className="badge border border-black/15 bg-white text-black/70">
-                            {formatDisplayTag(tag)}
-                          </span>
-                        ))}
-                      </div>
-                    )}
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      <span className="badge border border-black/15 bg-white text-black/70">
+                        {formatDisplayTag(selectedNote.source_type)}
+                      </span>
+                      {selectedNote.skill_node_id && (
+                        <Link
+                          href={`/topics/${topicId}/skills/${selectedNote.skill_node_id}`}
+                          className="badge border border-black/15 bg-white text-black/70 hover:bg-black/[0.03]"
+                        >
+                          {skillNameById.get(selectedNote.skill_node_id) || `Skill ${selectedNote.skill_node_id}`}
+                        </Link>
+                      )}
+                      {selectedNote.source_type === 'tutor_generated' && (
+                        <Link
+                          href={`/topics/${topicId}/chat`}
+                          className="badge border border-black/15 bg-white text-black/70 hover:bg-black/[0.03]"
+                        >
+                          Open dialogue
+                        </Link>
+                      )}
+                      {selectedNote.tags.map((tag) => (
+                        <span key={`${selectedNote.id}-tag-${tag}`} className="badge border border-black/15 bg-white text-black/70">
+                          {formatDisplayTag(tag)}
+                        </span>
+                      ))}
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
                   <button
@@ -780,7 +839,9 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
             ) : (
               <>
                 <h2 className="text-lg font-semibold">{selectedNoteId ? 'Edit entry' : 'Create entry'}</h2>
-                <p className="muted mt-1 text-sm">Capture takeaways, comparisons, interpretations, and what changed your view.</p>
+                <p className="muted mt-1 text-sm">
+                  Capture takeaways, comparisons, interpretations, and what changed your view. Keep the notebook close to the work itself.
+                </p>
 
                 <form className="mt-4 space-y-3" onSubmit={onSaveNote}>
                   <input
@@ -820,28 +881,39 @@ export default function TopicNotesPage({ params }: { params: { topicId: string }
                   </div>
 
                   <div className="rounded-lg border border-black/10 bg-white p-3">
-                    <p className="text-xs uppercase tracking-[0.12em] text-black/58">Quick Notebook Templates</p>
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      {NOTE_LENS_OPTIONS.map((lens) => (
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-xs uppercase tracking-[0.12em] text-black/58">Write From a Notebook Lens</p>
+                        <p className="mt-1 text-[11px] text-black/58">
+                          Templates keep reflection, comparison, interpretation, and next-thread thinking visible.
+                        </p>
+                      </div>
+                      <span className="badge border border-black/15 bg-white text-black/70">
+                        Suggested: {recommendedLens.label}
+                      </span>
+                    </div>
+                    <div className="mt-3 grid gap-2 md:grid-cols-2">
+                      {NOTEBOOK_LENS_OPTIONS.map((lens) => (
                         <button
                           key={`template-${lens.tag}`}
                           type="button"
-                          className="rounded-full border border-black/15 bg-white px-3 py-1 text-xs text-black/75 hover:bg-black/[0.03]"
-                          onClick={() => applyNotebookLens(lens.tag)}
+                          className="rounded-lg border border-black/15 bg-white p-3 text-left hover:bg-black/[0.02]"
+                          onClick={() => seedNotebookEntry(lens.tag, linkedSkillId)}
                         >
-                          {lens.label}
+                          <p className="text-sm font-medium text-black">{lens.label}</p>
+                          <p className="mt-1 text-[11px] text-black/60">{lens.description}</p>
                         </button>
                       ))}
                     </div>
                     <p className="mt-2 text-[11px] text-black/58">
-                      Templates seed reflection/comparison/exemplar structures, and add matching notebook tags.
+                      Templates seed matching tags and keep the notebook legible as an archive of understanding, taste, and next threads.
                     </p>
                   </div>
 
                   <div className="rounded-lg border border-black/10 bg-white p-3">
                     <p className="text-xs uppercase tracking-[0.12em] text-black/58">Notebook Tags</p>
                     <div className="mt-2 flex flex-wrap gap-2">
-                      {NOTE_LENS_OPTIONS.map((lens) => {
+                      {NOTEBOOK_LENS_OPTIONS.map((lens) => {
                         const active = noteTags.includes(lens.tag);
                         return (
                           <button

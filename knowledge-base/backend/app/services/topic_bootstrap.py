@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.agents.assessment_agent import AssessmentAgent
 from app.agents.profile_agent import ProfileAgent
-from app.agents.recommendation_agent import RecommendationAgent
 from app.agents.resource_agent import ResourceAgent
 from app.agents.skill_graph_agent import SkillGraphAgent
 from app.core.course_preferences import assessment_question_count_for_depth, normalize_course_depth
@@ -42,13 +41,11 @@ class TopicBootstrapService:
         *,
         skill_graph_agent: SkillGraphAgent,
         profile_agent: ProfileAgent,
-        recommendation_agent: RecommendationAgent,
         resource_agent: ResourceAgent,
         assessment_agent: AssessmentAgent,
     ) -> None:
         self.skill_graph_agent = skill_graph_agent
         self.profile_agent = profile_agent
-        self.recommendation_agent = recommendation_agent
         self.resource_agent = resource_agent
         self.assessment_agent = assessment_agent
         self._tasks: dict[int, asyncio.Task[None]] = {}
@@ -588,11 +585,6 @@ class TopicBootstrapService:
                         node.id,
                         exc,
                     )
-
-            try:
-                await self.recommendation_agent.generate_recommendations(db, topic=topic, user_id=job.user_id, limit=1)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning('topic_bootstrap.recommendation_refresh_failed topic_id=%s error=%s', topic.id, exc)
 
             self._update_job(
                 db,

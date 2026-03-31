@@ -73,7 +73,6 @@ def _service() -> TopicBootstrapService:
     return TopicBootstrapService(
         skill_graph_agent=object(),  # type: ignore[arg-type]
         profile_agent=object(),  # type: ignore[arg-type]
-        recommendation_agent=object(),  # type: ignore[arg-type]
         resource_agent=object(),  # type: ignore[arg-type]
         assessment_agent=object(),  # type: ignore[arg-type]
     )
@@ -202,7 +201,6 @@ def test_prepare_first_node_starter_content_includes_examples() -> None:
     service = TopicBootstrapService(
         skill_graph_agent=object(),  # type: ignore[arg-type]
         profile_agent=object(),  # type: ignore[arg-type]
-        recommendation_agent=object(),  # type: ignore[arg-type]
         resource_agent=resource_agent,  # type: ignore[arg-type]
         assessment_agent=assessment_agent,  # type: ignore[arg-type]
     )

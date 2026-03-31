@@ -9,6 +9,7 @@ def test_skill_workspace_examples_tab_supports_exemplar_and_compare_modes() -> N
     content = page_path.read_text(encoding='utf-8')
 
     assert 'Study Mode' in content
+    assert 'Concrete sequence' in content
     assert 'Exemplar-first' in content
     assert 'Compare mode' in content
     assert 'Generate exemplar study' in content

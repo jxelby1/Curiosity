@@ -24,6 +24,6 @@ def test_post_login_dashboard_has_motivating_home_composition() -> None:
 
     assert '{PRODUCT_NAME} Studio' in content
     assert 'Welcome back' in content
-    assert 'Studio pulse' in content
-    assert 'Active studies' in content
-    assert 'Start a new study path' in content
+    assert 'At a glance' in content
+    assert 'Continue your studies' in content
+    assert 'Begin a new study' in content

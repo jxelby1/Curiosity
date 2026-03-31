@@ -14,7 +14,6 @@ type LessonShape = {
   observation_prompts: string[];
   response_prompts: string[];
   practice_hooks: string[];
-  supporting_media: SupportingMediaShape[];
   takeaways: string[];
   next_steps: string[];
 };
@@ -28,7 +27,6 @@ type ExamplesShape = {
   observation_prompts: string[];
   response_prompts: string[];
   practice_hooks: string[];
-  supporting_media: SupportingMediaShape[];
 };
 
 type ExercisesShape = {
@@ -55,26 +53,7 @@ type DeepLessonShape = {
   practice_hooks: string[];
   key_terms: Array<{ term: string; description: string }>;
   study_prompts: string[];
-  supporting_media: SupportingMediaShape[];
 };
-
-type SupportingMediaShape = {
-  title: string;
-  url: string;
-  media_type: 'image' | 'video';
-  preview_url?: string;
-  source_domain: string;
-  relevance_reason: string;
-};
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
-const API_ORIGIN = (() => {
-  try {
-    return new URL(API_BASE).origin;
-  } catch {
-    return '';
-  }
-})();
 
 const LESSON_SUMMARY_MAX = 300;
 const LESSON_KEY_CONCEPT_DESC_MAX = 260;
@@ -95,32 +74,6 @@ function toStringArray(value: unknown): string[] {
 function toObjectArray(value: unknown): Array<Record<string, unknown>> {
   if (!Array.isArray(value)) return [];
   return value.filter((item): item is Record<string, unknown> => !!item && typeof item === 'object');
-}
-
-function toSupportingMediaArray(value: unknown): SupportingMediaShape[] {
-  if (!Array.isArray(value)) return [];
-  return value
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const raw = item as Record<string, unknown>;
-      const mediaType = String(raw.media_type || '').trim().toLowerCase();
-      if (mediaType !== 'image' && mediaType !== 'video') return null;
-      const url = String(raw.url || '').trim();
-      const previewUrl = resolveApiMediaUrl(String(raw.preview_url || '').trim());
-      if (!url) return null;
-      if (mediaType === 'image' && !isDirectImageUrl(url) && !isDirectImageUrl(previewUrl)) return null;
-      const normalized: SupportingMediaShape = {
-        title: String(raw.title || '').trim() || 'Supporting reference',
-        url,
-        media_type: mediaType as 'image' | 'video',
-        source_domain: String(raw.source_domain || '').trim(),
-        relevance_reason: normalizeCardSnippet(raw.relevance_reason, 220),
-      };
-      if (previewUrl) normalized.preview_url = previewUrl;
-      return normalized;
-    })
-    .filter((item): item is SupportingMediaShape => !!item)
-    .slice(0, 4);
 }
 
 function hasSentenceClosure(text: string): boolean {
@@ -233,7 +186,6 @@ export function parseLessonContent(value: unknown): LessonShape | null {
     observation_prompts: toStringArray(input.observation_prompts),
     response_prompts: toStringArray(input.response_prompts),
     practice_hooks: toStringArray(input.practice_hooks),
-    supporting_media: toSupportingMediaArray(input.supporting_media),
     takeaways: toStringArray(input.takeaways),
     next_steps: toStringArray(input.next_steps)
   };
@@ -263,7 +215,6 @@ export function parseExamplesContent(value: unknown): ExamplesShape | null {
     observation_prompts: toStringArray(input.observation_prompts),
     response_prompts: toStringArray(input.response_prompts),
     practice_hooks: toStringArray(input.practice_hooks),
-    supporting_media: toSupportingMediaArray(input.supporting_media),
   };
 
   if (!result.title || result.examples.length === 0) return null;
@@ -331,28 +282,10 @@ export function parseDeepLessonContent(value: unknown): DeepLessonShape | null {
     practice_hooks: toStringArray(input.practice_hooks),
     key_terms: keyTerms,
     study_prompts: toStringArray(input.study_prompts),
-    supporting_media: toSupportingMediaArray(input.supporting_media),
   };
 
   if (!result.title || result.sections.length === 0) return null;
   return result;
-}
-
-function resolveApiMediaUrl(url: string): string {
-  const trimmed = (url || '').trim();
-  if (!trimmed) return '';
-  if (trimmed.startsWith('/api/')) {
-    return API_ORIGIN ? `${API_ORIGIN}${trimmed}` : trimmed;
-  }
-  return trimmed;
-}
-
-function isMediaProxyUrl(url: string): boolean {
-  return /\/api\/media-cache\/proxy\//i.test((url || '').trim());
-}
-
-function isDirectImageUrl(url: string): boolean {
-  return /\.(png|jpe?g|webp|gif|svg|avif)(\?.*)?$/i.test(url) || isMediaProxyUrl(url);
 }
 
 function StudioPromptPanel({
@@ -380,6 +313,63 @@ function StudioPromptPanel({
   );
 }
 
+function StudySequenceSection({
+  title,
+  subtitle,
+  exemplarFocus,
+  observationPrompts,
+  comparisonPrompts,
+  responsePrompts,
+  practiceHooks,
+}: {
+  title: string;
+  subtitle: string;
+  exemplarFocus: string[];
+  observationPrompts: string[];
+  comparisonPrompts: string[];
+  responsePrompts: string[];
+  practiceHooks: string[];
+}) {
+  const hasContent =
+    exemplarFocus.length > 0 ||
+    observationPrompts.length > 0 ||
+    comparisonPrompts.length > 0 ||
+    responsePrompts.length > 0 ||
+    practiceHooks.length > 0;
+
+  if (!hasContent) return null;
+
+  return (
+    <section className="rounded-xl border border-black/10 bg-white p-5">
+      <div className="space-y-2">
+        <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">{title}</h3>
+        <p className="muted text-sm leading-relaxed">{subtitle}</p>
+      </div>
+
+      {exemplarFocus.length > 0 && (
+        <div className="mt-4 rounded-xl border border-black/10 bg-paper/45 p-4">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Anchor Exemplar</p>
+          <ul className="mt-3 space-y-2 text-sm leading-relaxed">
+            {exemplarFocus.map((item) => (
+              <li key={item} className="flex gap-2">
+                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-ink" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <StudioPromptPanel title="Notice" items={observationPrompts} markerClass="bg-ink" />
+        <StudioPromptPanel title="Compare" items={comparisonPrompts} markerClass="bg-moss" />
+        <StudioPromptPanel title="Respond" items={responsePrompts} markerClass="bg-brass" />
+        <StudioPromptPanel title="Try" items={practiceHooks} markerClass="bg-emerald-500" />
+      </div>
+    </section>
+  );
+}
+
 export function LessonRenderer({ content }: { content: LessonShape }) {
   return (
     <div className="space-y-6">
@@ -387,20 +377,6 @@ export function LessonRenderer({ content }: { content: LessonShape }) {
         <h2 className="text-2xl font-semibold leading-tight">{content.title}</h2>
         <p className="muted max-w-3xl text-sm leading-relaxed">{content.summary}</p>
       </div>
-
-      {content.exemplar_focus.length > 0 && (
-        <section className="rounded-xl border border-black/10 bg-white p-4">
-          <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Exemplar Focus</h3>
-          <ul className="mt-3 space-y-2 text-sm leading-relaxed">
-            {content.exemplar_focus.map((item) => (
-              <li key={item} className="flex gap-2">
-                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-ink" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
 
       <section className="rounded-xl border border-black/10 bg-white p-5">
         <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Learning Objectives</h3>
@@ -432,6 +408,16 @@ export function LessonRenderer({ content }: { content: LessonShape }) {
         ))}
       </section>
 
+      <StudySequenceSection
+        title="Study Sequence"
+        subtitle="Use the lesson first, then move from observation to interpretation, comparison, and transfer with evidence in view."
+        exemplarFocus={content.exemplar_focus}
+        observationPrompts={content.observation_prompts}
+        comparisonPrompts={content.comparison_prompts}
+        responsePrompts={content.response_prompts}
+        practiceHooks={content.practice_hooks}
+      />
+
       <section className="grid gap-4 md:grid-cols-2">
         <article className="rounded-xl border border-black/10 bg-white p-4">
           <h4 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Takeaways</h4>
@@ -457,18 +443,6 @@ export function LessonRenderer({ content }: { content: LessonShape }) {
           </ul>
         </article>
       </section>
-
-      {(content.observation_prompts.length > 0 ||
-        content.comparison_prompts.length > 0 ||
-        content.response_prompts.length > 0 ||
-        content.practice_hooks.length > 0) && (
-        <section className="grid gap-4 md:grid-cols-2">
-          <StudioPromptPanel title="Notice This" items={content.observation_prompts} markerClass="bg-ink" />
-          <StudioPromptPanel title="Compare This" items={content.comparison_prompts} markerClass="bg-moss" />
-          <StudioPromptPanel title="Respond" items={content.response_prompts} markerClass="bg-brass" />
-          <StudioPromptPanel title="Try This" items={content.practice_hooks} markerClass="bg-emerald-500" />
-        </section>
-      )}
     </div>
   );
 }
@@ -480,20 +454,6 @@ export function ExamplesRenderer({ content }: { content: ExamplesShape }) {
         <h2 className="text-2xl font-semibold">{content.title}</h2>
         <p className="muted mt-2 max-w-3xl text-sm leading-relaxed">{content.intro}</p>
       </div>
-
-      {content.exemplar_focus.length > 0 && (
-        <section className="rounded-xl border border-black/10 bg-white p-4">
-          <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Exemplar Focus</h3>
-          <ul className="mt-3 space-y-2 text-sm leading-relaxed">
-            {content.exemplar_focus.map((item) => (
-              <li key={item} className="flex gap-2">
-                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-ink" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
 
       <div className="space-y-3">
         {content.examples.map((example) => (
@@ -508,17 +468,15 @@ export function ExamplesRenderer({ content }: { content: ExamplesShape }) {
         ))}
       </div>
 
-      {(content.observation_prompts.length > 0 ||
-        content.comparison_prompts.length > 0 ||
-        content.response_prompts.length > 0 ||
-        content.practice_hooks.length > 0) && (
-        <section className="grid gap-4 md:grid-cols-2">
-          <StudioPromptPanel title="Notice This" items={content.observation_prompts} markerClass="bg-ink" />
-          <StudioPromptPanel title="Compare This" items={content.comparison_prompts} markerClass="bg-moss" />
-          <StudioPromptPanel title="Respond" items={content.response_prompts} markerClass="bg-brass" />
-          <StudioPromptPanel title="Try This" items={content.practice_hooks} markerClass="bg-emerald-500" />
-        </section>
-      )}
+      <StudySequenceSection
+        title="Example Sequence"
+        subtitle="Read the examples as a progression: anchor case, contrast case, then transfer. Use the prompts only after the examples have done real teaching work."
+        exemplarFocus={content.exemplar_focus}
+        observationPrompts={content.observation_prompts}
+        comparisonPrompts={content.comparison_prompts}
+        responsePrompts={content.response_prompts}
+        practiceHooks={content.practice_hooks}
+      />
     </div>
   );
 }
@@ -577,20 +535,6 @@ export function DeepLessonRenderer({ content }: { content: DeepLessonShape }) {
         <p className="muted max-w-4xl text-sm leading-relaxed">{content.summary}</p>
       </div>
 
-      {content.exemplar_focus.length > 0 && (
-        <section className="rounded-xl border border-black/10 bg-white p-4">
-          <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Exemplar Focus</h3>
-          <ul className="mt-3 space-y-2 text-sm leading-relaxed">
-            {content.exemplar_focus.map((item) => (
-              <li key={item} className="flex gap-2">
-                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-ink" />
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
       <section className="rounded-xl border border-black/10 bg-white p-5">
         <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Essential Questions</h3>
         <ul className="mt-3 space-y-2 text-sm leading-relaxed">
@@ -611,6 +555,16 @@ export function DeepLessonRenderer({ content }: { content: DeepLessonShape }) {
           </article>
         ))}
       </section>
+
+      <StudySequenceSection
+        title="How to Read This Deep Dive"
+        subtitle="Keep the evidence in view first, then move through close reading, context, comparison, and transfer."
+        exemplarFocus={content.exemplar_focus}
+        observationPrompts={content.observation_prompts}
+        comparisonPrompts={content.comparison_prompts}
+        responsePrompts={content.response_prompts}
+        practiceHooks={content.practice_hooks}
+      />
 
       <section className="grid gap-4 md:grid-cols-2">
         <article className="rounded-xl border border-black/10 bg-white p-4">
@@ -637,18 +591,6 @@ export function DeepLessonRenderer({ content }: { content: DeepLessonShape }) {
           </ul>
         </article>
       </section>
-
-      {(content.observation_prompts.length > 0 ||
-        content.comparison_prompts.length > 0 ||
-        content.response_prompts.length > 0 ||
-        content.practice_hooks.length > 0) && (
-        <section className="grid gap-4 md:grid-cols-2">
-          <StudioPromptPanel title="Notice This" items={content.observation_prompts} markerClass="bg-ink" />
-          <StudioPromptPanel title="Compare This" items={content.comparison_prompts} markerClass="bg-moss" />
-          <StudioPromptPanel title="Respond" items={content.response_prompts} markerClass="bg-brass" />
-          <StudioPromptPanel title="Try This" items={content.practice_hooks} markerClass="bg-emerald-500" />
-        </section>
-      )}
     </div>
   );
 }

@@ -10,10 +10,14 @@ def test_garden_scene_component_maps_topic_progress_to_visual_nodes() -> None:
 
     assert 'buildGardenLayout' in content
     assert 'buildBedBands' in content
+    assert 'activityWeight' in content
+    assert 'momentumMeta' in content
+    assert 'layeringLine' in content
     assert 'treeStageAsset' in content
     assert 'treeStageLabel' in content
-    assert 'verified_nodes' in content
-    assert 'mastery_average' in content
+    assert 'latest_activity_at' in content
+    assert 'notes_count' in content
+    assert 'branch_count' in content
     assert 'walkwayPath' not in content
 
 
@@ -24,4 +28,6 @@ def test_garden_page_uses_visual_scene_as_primary_experience() -> None:
 
     assert 'GardenScene' in content
     assert '<GardenScene topics={summary.topics} />' in content
-    assert 'Topic index' in content
+    assert 'Recently tended' in content
+    assert 'Memory in bloom' in content
+    assert 'Plots in the grove' in content

@@ -16,12 +16,18 @@ def test_learning_renderers_include_exemplar_compare_response_sections_without_m
     assert 'observation_prompts: string[]' in content
     assert 'response_prompts: string[]' in content
     assert 'practice_hooks: string[]' in content
-    assert 'supporting_media: SupportingMediaShape[]' in content
+    assert 'SupportingMediaShape' not in content
+    assert 'supporting_media:' not in content
     assert 'function SupportingMediaSection' not in content
     assert 'Visual References' not in content
-    assert 'Notice This' in content
-    assert 'Compare This' in content
-    assert 'Try This' in content
+    assert 'function StudySequenceSection' in content
+    assert 'Study Sequence' in content
+    assert 'Example Sequence' in content
+    assert 'How to Read This Deep Dive' in content
+    assert 'Anchor Exemplar' in content
+    assert 'Notice' in content
+    assert 'Compare' in content
+    assert 'Try' in content
 
 
 def test_skill_workspace_does_not_render_deep_lesson_media_fallback_section() -> None:

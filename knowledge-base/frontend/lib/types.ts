@@ -192,15 +192,6 @@ export interface TutorNoteSaveResult {
   appended: boolean;
 }
 
-export interface RecommendationItem {
-  skill_node_id: number;
-  skill_name: string;
-  rationale: string;
-  action_type: string;
-  resource_mode: 'generated' | 'external';
-  confidence: number;
-}
-
 export interface Resource {
   id: number;
   skill_node_id: number;
@@ -215,21 +206,11 @@ export interface Resource {
   relevance_reason: string;
 }
 
-export interface DeepLessonMediaItem {
-  title: string;
-  url: string;
-  media_type: 'image' | 'video';
-  preview_url?: string | null;
-  source_domain: string;
-  relevance_reason: string;
-}
-
 export interface DeepLesson {
   skill_node_id: number;
   title: string;
   summary: string;
   structured_content: Record<string, unknown>;
-  supporting_media: DeepLessonMediaItem[];
   source: 'generated' | 'fallback';
 }
 
@@ -489,7 +470,26 @@ export interface TopicRetentionLoop {
   streak_days: number;
   activity_days_last_14: number;
   latest_activity_at: string | null;
+  notebook_memory: NotebookMemorySignal;
   dev_unlock_enabled: boolean;
+}
+
+export interface NotebookMemorySignal {
+  notes_count: number;
+  reflections_logged: number;
+  comparisons_logged: number;
+  exemplars_saved: number;
+  interpretations_logged: number;
+  view_shifts_logged: number;
+  next_threads_logged: number;
+  prompt: string;
+  growth_signal: string;
+  recommended_lens: 'reflection' | 'comparison' | 'exemplar' | 'interpretation' | 'view_shift' | 'next_thread';
+  recommended_lens_label: string;
+  recommended_lens_reason: string;
+  latest_note_title: string;
+  latest_note_at: string | null;
+  latest_note_skill_name: string | null;
 }
 
 export interface TopicJournalEntry {
@@ -518,6 +518,7 @@ export interface TopicJournalChapter {
 export interface TopicJournalSummary {
   total_entries: number;
   evidence_entries: number;
+  notes_count: number;
   notes_created: number;
   notes_updated: number;
   lessons_completed: number;
@@ -540,6 +541,12 @@ export interface TopicJournalSummary {
   latest_activity_at: string | null;
   reflection_prompt: string;
   growth_signal: string;
+  recommended_lens: 'reflection' | 'comparison' | 'exemplar' | 'interpretation' | 'view_shift' | 'next_thread';
+  recommended_lens_label: string;
+  recommended_lens_reason: string;
+  latest_note_title: string;
+  latest_note_at: string | null;
+  latest_note_skill_name: string | null;
 }
 
 export interface TopicJournal {
@@ -557,6 +564,9 @@ export interface UserTopicProgressSummary {
   verified_nodes: number;
   mastery_average: number;
   tree_stage: number;
+  branch_count: number;
+  notes_count: number;
+  latest_activity_at: string | null;
 }
 
 export interface UserProgressSummary {

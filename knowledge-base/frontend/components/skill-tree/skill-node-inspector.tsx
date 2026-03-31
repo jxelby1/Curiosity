@@ -83,7 +83,7 @@ export function SkillNodeInspector({
   if (!node) {
     return (
       <aside className="rounded-2xl border border-black/10 bg-white/85 p-5 text-sm text-black/70 shadow-[0_10px_26px_rgba(16,19,33,0.08)]">
-        Select a node to inspect context, open study materials, or add a focused branch.
+        Select a node in the constellation to inspect context here, then open the workspace when you are ready to study.
       </aside>
     );
   }
@@ -118,7 +118,7 @@ export function SkillNodeInspector({
 
       <section className="mt-3 rounded-xl border border-black/10 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Connections</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Prerequisites &amp; context</p>
           <span className="text-[10px] uppercase tracking-[0.14em] text-black/40">{prerequisites.length} prerequisite(s)</span>
         </div>
 
@@ -177,64 +177,22 @@ export function SkillNodeInspector({
 
       <section className="mt-3 rounded-xl border border-black/10 bg-white p-3">
         <div className="flex items-center justify-between gap-2">
-          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Branch move</p>
+          <p className="text-[10px] uppercase tracking-[0.14em] text-black/52">Optional branch</p>
           <button
             type="button"
             className="rounded-md border border-black/15 bg-white px-2 py-1 text-[11px] disabled:opacity-60"
             onClick={onGenerateSuggestions}
             disabled={branchDisabled}
           >
-            {branchSuggestionsLoading ? 'Loading...' : 'Suggest one'}
+            {branchSuggestionsLoading ? 'Loading...' : 'Request branch suggestion'}
           </button>
         </div>
         <p className="mt-1 text-[11px] text-black/64">
-          Open a focused branch when it deepens your study. Keep branch decisions sparse and intentional.
+          Open a branch only when it gives this node a distinct study move. Keep branch decisions sparse and intentional.
         </p>
         <p className="mt-1 text-[11px] text-black/56">
-          Each branch type is a distinct study move with a clear intent.
+          A branch should deepen the work, not compete with the core path.
         </p>
-
-        <div className="mt-2.5 grid gap-2">
-          <input
-            value={branchFocus}
-            onChange={(event) => setBranchFocus(event.target.value)}
-            className="w-full rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
-            placeholder="Branch focus (work, question, technique)"
-            maxLength={180}
-            disabled={branchDisabled}
-          />
-          <div className="flex gap-2">
-            <select
-              value={branchPurpose}
-              onChange={(event) => setBranchPurpose(event.target.value as BranchPurpose)}
-              className="min-w-0 flex-1 rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
-              disabled={branchDisabled}
-            >
-              {BRANCH_PURPOSE_OPTIONS.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="rounded-md bg-ink px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
-              onClick={() => {
-                onCreateBranch({
-                  focus: branchFocus.trim() || undefined,
-                  purpose: branchPurpose,
-                });
-                setBranchFocus('');
-              }}
-              disabled={branchDisabled}
-            >
-              Create
-            </button>
-          </div>
-          <p className="text-[11px] text-black/56">{selectedPurposeMeta.summary}</p>
-        </div>
-
-        {branchError && <p className="mt-2 text-xs text-red-700">{branchError}</p>}
 
         <div className="mt-2.5 space-y-2">
           {branchSuggestions.map((suggestion) => {
@@ -247,10 +205,12 @@ export function SkillNodeInspector({
                     {suggestionMeta.label}
                   </span>
                 </div>
+                <p className="mt-1 text-[11px] text-black/62">Focus: {suggestion.focus}</p>
                 <p className="mt-1 text-[11px] text-black/68">{suggestion.rationale}</p>
-                <p className="mt-1 text-[11px] text-black/58">{suggestionMeta.summary}</p>
-                <p className="mt-1 text-[11px] text-black/58">
-                  Suggested path. Accept to activate it inside your study tree.
+                <p className="mt-1 text-[11px] text-black/58">Study move: {suggestionMeta.summary}</p>
+                <p className="mt-1 text-[11px] text-black/58">Best when: {suggestionMeta.whenToUse}.</p>
+                <p className="mt-1 text-[11px] text-black/52">
+                  Keep the core path primary. {suggestionMeta.keepCorePrimary}.
                 </p>
                 <div className="mt-2 flex gap-2">
                   <button
@@ -259,7 +219,7 @@ export function SkillNodeInspector({
                     onClick={() => onAcceptSuggestion(suggestion.id)}
                     disabled={branchDisabled}
                   >
-                    Activate path
+                    Add branch to tree
                   </button>
                   <button
                     type="button"
@@ -274,26 +234,75 @@ export function SkillNodeInspector({
             );
           })}
           {branchSuggestions.length === 0 && !branchSuggestionsLoading && (
-            <p className="text-[11px] text-black/58">No recommended branch opportunity right now.</p>
+            <p className="text-[11px] text-black/58">No high-signal branch move right now.</p>
           )}
         </div>
+
+        <details className="mt-3 rounded-lg border border-black/10 bg-paper/25 p-2.5">
+          <summary className="cursor-pointer text-xs font-medium text-black">Create a custom branch move</summary>
+          <div className="mt-2.5 grid gap-2">
+            <input
+              value={branchFocus}
+              onChange={(event) => setBranchFocus(event.target.value)}
+              className="w-full rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
+              placeholder="Focused work, question, or technique"
+              maxLength={180}
+              disabled={branchDisabled}
+            />
+            <div className="flex gap-2">
+              <select
+                value={branchPurpose}
+                onChange={(event) => setBranchPurpose(event.target.value as BranchPurpose)}
+                className="min-w-0 flex-1 rounded-md border border-black/15 bg-white px-2.5 py-2 text-xs"
+                disabled={branchDisabled}
+              >
+                {BRANCH_PURPOSE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className="rounded-md bg-ink px-3 py-2 text-xs font-semibold text-white disabled:opacity-60"
+                onClick={() => {
+                  onCreateBranch({
+                    focus: branchFocus.trim() || undefined,
+                    purpose: branchPurpose,
+                  });
+                  setBranchFocus('');
+                }}
+                disabled={branchDisabled}
+              >
+                Create
+              </button>
+            </div>
+            <p className="text-[11px] text-black/56">{selectedPurposeMeta.summary}</p>
+            <p className="text-[11px] text-black/52">Best when: {selectedPurposeMeta.whenToUse}.</p>
+          </div>
+        </details>
+
+        {branchError && <p className="mt-2 text-xs text-red-700">{branchError}</p>}
       </section>
 
-      {canForceUnlock && isLocked && (
-        <div className="mt-3 rounded-xl border border-fuchsia-300/70 bg-fuchsia-50 p-3">
-          <p className="text-[11px] text-fuchsia-800">Developer override</p>
-          <button
-            type="button"
-            className="mt-1.5 rounded-md border border-fuchsia-300 bg-fuchsia-100 px-3 py-1.5 text-xs text-fuchsia-800 disabled:opacity-60"
-            onClick={() => onForceUnlock(node.id)}
-            disabled={forcingUnlock}
-          >
-            {forcingUnlock ? 'Unlocking...' : 'Force unlock node'}
-          </button>
-        </div>
+      {(canForceUnlock || node.force_unlocked) && (
+        <details className="mt-3 rounded-xl border border-fuchsia-300/70 bg-fuchsia-50 p-3">
+          <summary className="cursor-pointer text-[11px] font-medium text-fuchsia-800">Developer tools</summary>
+          <div className="mt-2 space-y-2">
+            {canForceUnlock && isLocked && (
+              <button
+                type="button"
+                className="rounded-md border border-fuchsia-300 bg-fuchsia-100 px-3 py-1.5 text-xs text-fuchsia-800 disabled:opacity-60"
+                onClick={() => onForceUnlock(node.id)}
+                disabled={forcingUnlock}
+              >
+                {forcingUnlock ? 'Unlocking...' : 'Force unlock node'}
+              </button>
+            )}
+            {node.force_unlocked && <p className="text-[11px] text-fuchsia-700">Developer override active for this node.</p>}
+          </div>
+        </details>
       )}
-
-      {node.force_unlocked && <p className="mt-2 text-[11px] text-fuchsia-700">Dev override active for this node.</p>}
     </aside>
   );
 }

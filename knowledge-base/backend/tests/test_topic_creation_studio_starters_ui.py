@@ -24,4 +24,5 @@ def test_topic_creation_includes_cultural_and_creative_studio_starters() -> None
     assert 'Photograph with Intention' in content
     assert 'Listening Like a Curator' in content
     assert 'Creative Neighborhood Exploration Studio' in content
-    assert 'practice-forward starters' in content.lower()
+    assert 'Practice-forward starting points' in content
+    assert 'Selecting a starter fills the study title and intent.' in content

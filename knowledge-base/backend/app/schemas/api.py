@@ -302,21 +302,6 @@ class TutorNoteSaveResponse(BaseModel):
     note: NoteResponse
     duplicate_warning: str | None = None
     appended: bool = False
-
-
-class RecommendationItem(BaseModel):
-    skill_node_id: int
-    skill_name: str
-    rationale: str
-    action_type: str
-    resource_mode: Literal['generated', 'external']
-    confidence: float
-
-
-class RecommendationResponse(BaseModel):
-    recommendations: list[RecommendationItem]
-
-
 class GenerateResourceRequest(BaseModel):
     kind: Literal['lesson', 'examples', 'exercises']
     study_mode: Literal['standard', 'exemplar', 'compare'] = 'standard'
@@ -350,21 +335,11 @@ class ResourceResponse(BaseModel):
     relevance_reason: str
 
 
-class DeepLessonMediaItem(BaseModel):
-    title: str
-    url: str
-    media_type: Literal['image', 'video']
-    preview_url: str | None = None
-    source_domain: str
-    relevance_reason: str
-
-
 class DeepLessonResponse(BaseModel):
     skill_node_id: int
     title: str
     summary: str
     structured_content: dict[str, Any]
-    supporting_media: list[DeepLessonMediaItem] = Field(default_factory=list)
     source: Literal['generated', 'fallback']
 
 
@@ -604,6 +579,7 @@ class TopicJournalChapterResponse(BaseModel):
 class TopicJournalSummaryResponse(BaseModel):
     total_entries: int = 0
     evidence_entries: int = 0
+    notes_count: int = 0
     notes_created: int = 0
     notes_updated: int = 0
     lessons_completed: int = 0
@@ -626,6 +602,12 @@ class TopicJournalSummaryResponse(BaseModel):
     latest_activity_at: datetime | None = None
     reflection_prompt: str = ''
     growth_signal: str = ''
+    recommended_lens: Literal['reflection', 'comparison', 'exemplar', 'interpretation', 'view_shift', 'next_thread'] = 'reflection'
+    recommended_lens_label: str = 'Reflection'
+    recommended_lens_reason: str = ''
+    latest_note_title: str = ''
+    latest_note_at: datetime | None = None
+    latest_note_skill_name: str | None = None
 
 
 class TopicJournalResponse(BaseModel):
@@ -664,6 +646,9 @@ class UserTopicProgressSummary(BaseModel):
     verified_nodes: int
     mastery_average: float
     tree_stage: int = Field(ge=1, le=6)
+    branch_count: int = 0
+    notes_count: int = 0
+    latest_activity_at: datetime | None = None
 
 
 class UserProgressSummaryResponse(BaseModel):
@@ -714,6 +699,24 @@ class MilestoneEventResponse(BaseModel):
     created_at: datetime
 
 
+class NotebookMemorySignalResponse(BaseModel):
+    notes_count: int = 0
+    reflections_logged: int = 0
+    comparisons_logged: int = 0
+    exemplars_saved: int = 0
+    interpretations_logged: int = 0
+    view_shifts_logged: int = 0
+    next_threads_logged: int = 0
+    prompt: str = ''
+    growth_signal: str = ''
+    recommended_lens: Literal['reflection', 'comparison', 'exemplar', 'interpretation', 'view_shift', 'next_thread'] = 'reflection'
+    recommended_lens_label: str = 'Reflection'
+    recommended_lens_reason: str = ''
+    latest_note_title: str = ''
+    latest_note_at: datetime | None = None
+    latest_note_skill_name: str | None = None
+
+
 class TopicRetentionLoopResponse(BaseModel):
     topic_id: int
     topic_name: str
@@ -735,4 +738,5 @@ class TopicRetentionLoopResponse(BaseModel):
     streak_days: int = 0
     activity_days_last_14: int = 0
     latest_activity_at: datetime | None = None
+    notebook_memory: NotebookMemorySignalResponse = Field(default_factory=NotebookMemorySignalResponse)
     dev_unlock_enabled: bool = False

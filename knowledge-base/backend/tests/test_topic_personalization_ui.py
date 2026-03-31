@@ -8,12 +8,13 @@ def test_topic_creation_ui_exposes_course_personalization_controls() -> None:
     dashboard_path = repo_root / 'frontend' / 'components' / 'topics-dashboard.tsx'
     content = dashboard_path.read_text(encoding='utf-8')
 
-    assert 'Quick start defaults' in content
-    assert 'Advanced options' in content
-    assert 'Refine framing and rigor before starting if you want tighter control.' in content
+    assert 'Studio defaults' in content
+    assert 'Advanced setup' in content
+    assert 'Refine setup' in content
+    assert 'Most studies can begin well from here.' in content
     assert 'Course depth' in content
     assert 'Starting skill level' in content
     assert 'Technical depth' in content
     assert 'Assessment methods' in content
     assert 'Select all' in content
-    assert 'Default: multiple choice.' in content
+    assert 'Default: a balanced set of recall and explanation checks.' in content

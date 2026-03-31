@@ -318,7 +318,6 @@ Notes now include a richer topic project journal view:
 - `GET /api/skills/{skill_id}/exercises/completions`
 - `POST /api/skills/{skill_id}/exercises/{exercise_index}/complete`
 - `GET /api/exercise-completions/{completion_id}/proof`
-- `GET /api/topics/{topic_id}/recommendations`
 - `POST /api/skills/{skill_id}/progress/update`
 - `POST /api/skills/{skill_id}/deep-dive`
 - `GET /api/users/me/progress-summary` (includes per-topic tree stage for Garden)

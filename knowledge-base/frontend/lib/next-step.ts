@@ -1,4 +1,4 @@
-import { RecommendationItem, SkillNode, SkillTree, TopicActionItem, TopicRetentionLoop } from '@/lib/types';
+import { SkillNode, SkillTree, TopicActionItem, TopicRetentionLoop } from '@/lib/types';
 
 export type LearningLoopStep = 'learn' | 'practice' | 'verify' | 'reflect' | 'continue_or_branch';
 
@@ -8,7 +8,7 @@ export type PrimaryNextStep = {
   href: string;
   tab?: string;
   skillNodeId: number | null;
-  source: 'retention' | 'recommendation' | 'skill_state' | 'fallback';
+  source: 'retention' | 'skill_state' | 'fallback';
   loopStep: LearningLoopStep;
 };
 
@@ -31,20 +31,6 @@ function stepFromTab(tab: string | undefined): LearningLoopStep {
   if (tab === 'quiz') return 'verify';
   if (tab === 'resources') return 'reflect';
   return 'continue_or_branch';
-}
-
-function stepFromRecommendationType(actionType: string): LearningLoopStep {
-  if (actionType === 'practice_quiz') return 'verify';
-  if (actionType === 'study_external') return 'practice';
-  return 'learn';
-}
-
-function preferredTabForNode(node: SkillNode): string {
-  if (node.status === 'locked') return 'overview';
-  if (!node.lesson_completed) return 'lesson';
-  if (!node.exercises_completed) return 'exercises';
-  if (!node.quiz_taken || node.progress_state !== 'verified') return 'quiz';
-  return 'overview';
 }
 
 export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): PrimaryNextStep {
@@ -84,7 +70,7 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
     };
   }
 
-  if (!node.quiz_taken || node.progress_state !== 'verified') {
+  if (!node.quiz_taken) {
     return {
       label: 'Verify understanding',
       reason: 'A verified result unlocks progression and confirms mastery for this node.',
@@ -93,6 +79,18 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
       skillNodeId: node.id,
       source: 'skill_state',
       loopStep: 'verify',
+    };
+  }
+
+  if (node.progress_state !== 'verified') {
+    return {
+      label: 'Review and retry',
+      reason: 'Revisit the lesson to tighten weak spots, then retry verification with a clearer read on the node.',
+      href: `/topics/${topicId}/skills/${node.id}?tab=lesson`,
+      tab: 'lesson',
+      skillNodeId: node.id,
+      source: 'skill_state',
+      loopStep: 'learn',
     };
   }
 
@@ -110,12 +108,10 @@ export function derivePrimaryNodeNextStep(topicId: string, node: SkillNode): Pri
 export function derivePrimaryTopicNextStep({
   topicId,
   retention,
-  recommendations,
   tree,
 }: {
   topicId: string;
   retention: TopicRetentionLoop | null;
-  recommendations: RecommendationItem[];
   tree: SkillTree | null;
 }): PrimaryNextStep {
   const firstRetentionAction = retention?.next_actions?.[0];
@@ -125,27 +121,12 @@ export function derivePrimaryTopicNextStep({
       label,
       reason:
         firstRetentionAction.description ||
-        'Recommended from your current progression state.',
+        'Chosen from your current progression state.',
       href: actionHref(topicId, firstRetentionAction),
       tab: firstRetentionAction.tab,
       skillNodeId: firstRetentionAction.skill_node_id,
       source: 'retention',
       loopStep: stepFromTab(firstRetentionAction.tab),
-    };
-  }
-
-  const firstRecommendation = recommendations[0];
-  if (firstRecommendation) {
-    const node = tree?.nodes.find((item) => item.id === firstRecommendation.skill_node_id);
-    const tab = node ? preferredTabForNode(node) : 'overview';
-    return {
-      label: `Continue ${firstRecommendation.skill_name}`,
-      reason: firstRecommendation.rationale || 'Recommended based on your current momentum.',
-      href: `/topics/${topicId}/skills/${firstRecommendation.skill_node_id}?tab=${tab}`,
-      tab,
-      skillNodeId: firstRecommendation.skill_node_id,
-      source: 'recommendation',
-      loopStep: stepFromRecommendationType(firstRecommendation.action_type),
     };
   }
 

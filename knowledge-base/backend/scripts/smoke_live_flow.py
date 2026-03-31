@@ -98,13 +98,13 @@ def main() -> None:
         if not chat.get('answer'):
             raise RuntimeError('Chat returned empty answer.')
 
-        print('7) recommendations')
-        recs = expect_ok(
-            client.get(f'{args.api_base}/topics/{topic_id}/recommendations', headers=headers),
-            'recommendations',
+        print('7) retention loop')
+        retention = expect_ok(
+            client.get(f'{args.api_base}/topics/{topic_id}/retention-loop', headers=headers),
+            'retention loop',
         )
-        if not recs.get('recommendations'):
-            raise RuntimeError('No recommendations returned.')
+        if not retention.get('next_actions'):
+            raise RuntimeError('No retention next actions returned.')
 
         print('8) generate lesson')
         lesson = expect_ok(

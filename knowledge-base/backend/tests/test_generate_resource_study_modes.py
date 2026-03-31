@@ -43,4 +43,4 @@ def test_resource_generation_models_and_agent_support_exemplar_compare_response_
     assert 'practice_hooks: list[str] = Field(default_factory=list' in llm_content
     assert '_practice_balance_rules(' in agent_content
     assert '_ensure_studio_balance_fields(' in agent_content
-    assert '_attach_supporting_media_if_relevant(' in agent_content
+    assert '_clear_legacy_supporting_media_fields(' in agent_content

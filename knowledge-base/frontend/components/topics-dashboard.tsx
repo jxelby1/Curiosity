@@ -11,7 +11,6 @@ import {
   getMyProgressSummary,
   getTopicRetentionLoop,
   listTopics,
-  upgradeMyAccountToDev,
 } from '@/lib/api';
 import {
   ASSESSMENT_STYLE_OPTIONS,
@@ -20,7 +19,6 @@ import {
   STARTING_SKILL_LEVEL_OPTIONS,
   TECHNICAL_DEPTH_OPTIONS,
 } from '@/lib/course-options';
-import { formatDisplayTag } from '@/lib/display-format';
 import { derivePrimaryTopicNextStep, LEARNING_LOOP_LABELS } from '@/lib/next-step';
 import { PRODUCT_NAME } from '@/lib/brand';
 import { AssessmentStyle, CourseDepth, StartingSkillLevel, TechnicalDepth, Topic, TopicMode, TopicPlausibilityCheck, UserProgressSummary } from '@/lib/types';
@@ -28,6 +26,7 @@ import { AssessmentStyle, CourseDepth, StartingSkillLevel, TechnicalDepth, Topic
 const TOPIC_NAME_MAX = 120;
 const TOPIC_DESC_MAX = 500;
 const TOPIC_GOAL_MAX = 500;
+const STARTER_PREVIEW_LIMIT = 6;
 
 type StudioStarter = {
   area: string;
@@ -130,9 +129,16 @@ function stageLabel(stage: number): string {
   return 'Seed';
 }
 
+function topicModeLabel(mode: TopicMode): string {
+  if (mode === 'factual') return 'Grounded';
+  if (mode === 'creative') return 'Creative Practice';
+  if (mode === 'fictional') return 'Invented World';
+  return 'Speculative';
+}
+
 export function TopicsDashboard() {
   const router = useRouter();
-  const { user, refreshUser } = useAuth();
+  const { user } = useAuth();
 
   const [topics, setTopics] = useState<Topic[]>([]);
   const [progressSummary, setProgressSummary] = useState<UserProgressSummary | null>(null);
@@ -150,9 +156,8 @@ export function TopicsDashboard() {
   const [advancedOptionsOpen, setAdvancedOptionsOpen] = useState(false);
   const [assessmentPickerOpen, setAssessmentPickerOpen] = useState(false);
   const [plausibilityPrompt, setPlausibilityPrompt] = useState<TopicPlausibilityCheck | null>(null);
+  const [showAllStarters, setShowAllStarters] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [upgradingDev, setUpgradingDev] = useState(false);
-  const [devUpgradeMessage, setDevUpgradeMessage] = useState('');
   const [continueRetention, setContinueRetention] = useState<Awaited<ReturnType<typeof getTopicRetentionLoop>> | null>(null);
   const [loadingContinueAction, setLoadingContinueAction] = useState(false);
 
@@ -222,7 +227,6 @@ export function TopicsDashboard() {
     const resolved = derivePrimaryTopicNextStep({
       topicId: String(continueTopic.topic_id),
       retention: continueRetention,
-      recommendations: [],
       tree: null,
     });
     return {
@@ -232,6 +236,11 @@ export function TopicsDashboard() {
       loopStep: resolved.loopStep,
     };
   }, [continueRetention, continueTopic]);
+
+  const visibleStarters = useMemo(
+    () => (showAllStarters ? STUDIO_TOPIC_STARTERS : STUDIO_TOPIC_STARTERS.slice(0, STARTER_PREVIEW_LIMIT)),
+    [showAllStarters]
+  );
 
   async function loadDashboard() {
     setLoading(true);
@@ -294,6 +303,7 @@ export function TopicsDashboard() {
           (plausibility.status === 'clarify' || plausibility.status === 'needs_context' || plausibility.status === 'block')
           && effectiveMode === 'factual'
         ) {
+          setAdvancedOptionsOpen(true);
           setPlausibilityPrompt(plausibility);
           return;
         }
@@ -322,25 +332,13 @@ export function TopicsDashboard() {
     await runTopicCreation();
   }
 
-  async function onUpgradeToDev() {
-    setUpgradingDev(true);
-    setDevUpgradeMessage('');
-    try {
-      await upgradeMyAccountToDev();
-      await refreshUser();
-      setDevUpgradeMessage('Developer tools enabled for this account.');
-    } catch (err) {
-      setDevUpgradeMessage(err instanceof Error ? err.message : 'Unable to enable developer tools.');
-    } finally {
-      setUpgradingDev(false);
-    }
-  }
-
   function applyStarter(starter: StudioStarter) {
     setName(starter.name);
     setGoal(starter.goal);
     setDescription(starter.description);
     setTopicMode(starter.mode);
+    setAdvancedOptionsOpen(false);
+    setAssessmentPickerOpen(false);
     setPlausibilityPrompt(null);
     setError('');
   }
@@ -355,17 +353,28 @@ export function TopicsDashboard() {
           <div>
             <p className="badge mb-3">{PRODUCT_NAME} Studio</p>
             <h1 className="text-3xl leading-tight md:text-4xl">
-              Welcome back{user?.display_name ? `, ${user.display_name}` : ''}.
+              {continueTopic
+                ? `Welcome back${user?.display_name ? `, ${user.display_name}` : ''}.`
+                : 'Begin your first living study.'}
             </h1>
             <p className="mt-3 max-w-2xl text-sm text-black/70 md:text-base">
-              Continue with one clear next move, selective branching, and a practical creative rhythm.
+              {continueTopic
+                ? 'Return to one clear next move, keep the core trunk steady, and let branching stay selective.'
+                : 'Start with one meaningful study and let Canopy prepare a calm, exemplar-led opening path.'}
             </p>
             <div className="mt-4 rounded-xl border border-black/10 bg-white/80 p-3">
-              <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">Primary Next Step</p>
+              <p className="text-[10px] uppercase tracking-[0.16em] text-black/55">
+                {continueTopic ? 'Continue your studio' : 'Begin your first study'}
+              </p>
               <p className="mt-1 text-base font-semibold">{primaryNextStep.label}</p>
               <p className="mt-1 text-sm text-black/68">
                 {loadingContinueAction ? 'Updating your next step…' : primaryNextStep.reason}
               </p>
+              {continueTopic && (
+                <p className="mt-2 text-xs text-black/58">
+                  Current study: <span className="font-medium text-black/72">{continueTopic.topic_name}</span>
+                </p>
+              )}
               <ol className="mt-2 flex flex-wrap gap-1.5 text-[11px]">
                 {LEARNING_LOOP_LABELS.map((item, index) => (
                   <li
@@ -387,7 +396,7 @@ export function TopicsDashboard() {
                   href={primaryNextStep.href}
                   className="studio-button-primary px-4 py-2 text-sm"
                 >
-                  {primaryNextStep.label}
+                  Continue current study
                 </Link>
               ) : (
                 <button
@@ -398,32 +407,23 @@ export function TopicsDashboard() {
                   Start your first study
                 </button>
               )}
-              <Link href="/garden" className="studio-button-secondary px-4 py-2 text-sm">
-                View garden
-              </Link>
-              {!user?.dev_tools_enabled && (
-                <button
-                  type="button"
-                  onClick={onUpgradeToDev}
-                  className="rounded-lg border border-fuchsia-300 bg-fuchsia-50 px-4 py-2 text-sm text-fuchsia-900 disabled:opacity-60"
-                  disabled={upgradingDev}
-                >
-                  {upgradingDev ? 'Enabling dev tools...' : 'Enable dev tools (local)'}
-                </button>
-              )}
-              {user?.dev_tools_enabled && (
-                <span className="rounded-lg border border-fuchsia-300 bg-fuchsia-50 px-3 py-2 text-xs text-fuchsia-900">
-                  Dev tools enabled
-                </span>
-              )}
+              <button
+                type="button"
+                onClick={() => document.getElementById('create-topic-form')?.scrollIntoView({ behavior: 'smooth' })}
+                className="studio-button-secondary px-4 py-2 text-sm"
+              >
+                {continueTopic ? 'Begin another study' : 'Browse studio starters'}
+              </button>
             </div>
-            {devUpgradeMessage && (
-              <p className="mt-2 text-xs text-black/70">{devUpgradeMessage}</p>
+            {topics.length > 0 && (
+              <Link href="/garden" className="mt-3 inline-flex text-xs text-black/62 underline underline-offset-4">
+                Visit your garden
+              </Link>
             )}
           </div>
 
           <article className="rounded-xl border border-black/10 bg-white/80 p-4 backdrop-blur-sm">
-            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/60">Studio pulse</h2>
+            <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/60">At a glance</h2>
             {loading ? (
               <div className="mt-3 space-y-2">
                 <div className="skeleton h-12 w-full" />
@@ -456,12 +456,18 @@ export function TopicsDashboard() {
         <article className="panel p-6">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <h2 className="text-xl font-semibold">Active studies</h2>
-              <p className="muted mt-1 text-sm">Your current study paths and how they are maturing.</p>
+              <h2 className="text-xl font-semibold">{topics.length > 0 ? 'Continue your studies' : 'Your studio will grow here'}</h2>
+              <p className="muted mt-1 text-sm">
+                {topics.length > 0
+                  ? 'Keep one study moving, then let the rest wait quietly in the background.'
+                  : 'Once you begin, your studies will gather here with one clear next move at the front.'}
+              </p>
             </div>
-            <button className="text-sm underline underline-offset-4" onClick={loadDashboard}>
-              Refresh
-            </button>
+            {topics.length > 0 && (
+              <Link href="/garden" className="text-sm underline underline-offset-4">
+                Open garden
+              </Link>
+            )}
           </div>
 
           {loading && (
@@ -501,18 +507,25 @@ export function TopicsDashboard() {
               {rankedTopics.map((item) => {
                 const topic = topicById.get(item.topic_id);
                 const progress = item.total_nodes > 0 ? item.verified_nodes / item.total_nodes : 0;
+                const isPrimaryTopic = continueTopic?.topic_id === item.topic_id;
+                const topicSummary = topic?.goal || topic?.description || 'Continue the study to keep this path alive.';
                 return (
                   <Link
                     key={item.topic_id}
                     href={`/topics/${item.topic_id}`}
-                    className="block rounded-xl border border-black/10 bg-white p-4 transition hover:-translate-y-0.5 hover:shadow-sm"
+                    className={`block rounded-xl border bg-white p-4 transition hover:-translate-y-0.5 hover:shadow-sm ${
+                      isPrimaryTopic ? 'border-ink/30 shadow-[0_10px_28px_rgba(20,26,24,0.08)]' : 'border-black/10'
+                    }`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div>
                         <p className="text-base font-semibold">{item.topic_name}</p>
-                        <p className="muted mt-1 text-sm">{topic?.description || 'No description yet.'}</p>
+                        <p className="muted mt-1 line-clamp-2 text-sm">{topicSummary}</p>
                       </div>
-                      <span className="badge">{stageLabel(item.tree_stage)}</span>
+                      <div className="flex flex-col items-end gap-1">
+                        {isPrimaryTopic && <span className="badge border border-ink/20 bg-ink/5 text-black">Next</span>}
+                        <span className="badge">{stageLabel(item.tree_stage)}</span>
+                      </div>
                     </div>
                     <div className="mt-3 space-y-2">
                       <div className="h-2 overflow-hidden rounded-full bg-black/10">
@@ -524,11 +537,9 @@ export function TopicsDashboard() {
                       <p className="text-xs text-black/70">
                         {item.verified_nodes}/{item.total_nodes} verified · mastery {pct(item.mastery_average)}
                       </p>
-                      {topic && (
-                        <p className="text-xs text-black/60">
-                          {formatDisplayTag(topic.course_depth)} · {formatDisplayTag(topic.starting_skill_level)} · {formatDisplayTag(topic.technical_depth)} depth · {topic.assessment_styles.length} assessment styles
-                        </p>
-                      )}
+                      <p className="text-xs text-black/58">
+                        {isPrimaryTopic ? 'This is your current lead study.' : 'Quietly waiting until you return to it.'}
+                      </p>
                     </div>
                   </Link>
                 );
@@ -538,18 +549,31 @@ export function TopicsDashboard() {
         </article>
 
         <article id="create-topic-form" className="panel p-6">
-          <h2 className="mb-2 text-xl font-semibold">Start a new study path</h2>
+          <h2 className="mb-2 text-xl font-semibold">Begin a new study</h2>
           <p className="muted mb-4 text-sm">
-            Frame one meaningful creative practice or cultural inquiry. We&apos;ll prepare a coherent path you can refine through doing.
+            Start with a title and one clear intention. The studio defaults will take you into a calm first session without extra setup work.
           </p>
           <form className="space-y-3" onSubmit={onCreateTopic}>
             <div className="rounded-xl border border-black/10 bg-white/85 p-3">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Studio starters</p>
-              <p className="mt-1 text-xs text-black/68">
-                Practice-forward starters across art, literature, philosophy, film, music, design, and place-based exploration.
-              </p>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Studio starters</p>
+                  <p className="mt-1 text-xs text-black/68">
+                    Practice-forward starting points across art, literature, philosophy, film, music, design, and place.
+                  </p>
+                </div>
+                {STUDIO_TOPIC_STARTERS.length > STARTER_PREVIEW_LIMIT && (
+                  <button
+                    type="button"
+                    className="rounded-md border border-black/15 bg-white px-2.5 py-1.5 text-xs text-black/72"
+                    onClick={() => setShowAllStarters((prev) => !prev)}
+                  >
+                    {showAllStarters ? 'Show fewer starters' : `Show all ${STUDIO_TOPIC_STARTERS.length} starters`}
+                  </button>
+                )}
+              </div>
               <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                {STUDIO_TOPIC_STARTERS.map((starter) => (
+                {visibleStarters.map((starter) => (
                   <button
                     key={starter.name}
                     type="button"
@@ -561,35 +585,45 @@ export function TopicsDashboard() {
                   </button>
                 ))}
               </div>
+              <p className="mt-2 text-xs text-black/58">
+                Selecting a starter fills the study title and intent. You can refine it before starting.
+              </p>
             </div>
 
-            <input
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              className="w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="Study title (e.g. Photographing your city with stronger composition)"
-              maxLength={TOPIC_NAME_MAX}
-              required
-            />
-            <p className="text-right text-xs text-black/60">{name.length}/{TOPIC_NAME_MAX}</p>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Study title</label>
+              <input
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+                className="mt-2 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
+                placeholder="Photographing your city with stronger composition"
+                maxLength={TOPIC_NAME_MAX}
+                required
+              />
+              <p className="mt-1 text-xs text-black/58">Start with the practice, work, place, or question you want to stay with.</p>
+            </div>
 
-            <textarea
-              value={goal}
-              onChange={(event) => setGoal(event.target.value)}
-              className="min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
-              placeholder="What practice, taste, or creative ability do you want to build over the next few weeks?"
-              maxLength={TOPIC_GOAL_MAX}
-            />
-            <p className="text-right text-xs text-black/60">{goal.length}/{TOPIC_GOAL_MAX}</p>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Study intention</label>
+              <textarea
+                value={goal}
+                onChange={(event) => setGoal(event.target.value)}
+                className="mt-2 min-h-20 w-full rounded-lg border border-black/10 bg-white px-3 py-2 text-sm"
+                placeholder="Optional: what kind of taste, understanding, or creative ability do you want to build?"
+                maxLength={TOPIC_GOAL_MAX}
+              />
+            </div>
 
             <div className="rounded-xl border border-black/10 bg-white/80 p-3">
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Quick start defaults</p>
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Studio defaults</p>
                   <p className="mt-1 text-sm text-black/75">
                     Grounded mode, standard depth, beginner start, and a balanced loop of exemplars, practice, and verification.
                   </p>
-                  <p className="mt-1 text-xs text-black/60">Refine framing and rigor before starting if you want tighter control.</p>
+                  <p className="mt-1 text-xs text-black/60">
+                    Most studies can begin well from here. Refine setup only when you want tighter control over framing or rigor.
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -614,16 +648,16 @@ export function TopicsDashboard() {
                     <path d="M10 2.4v2.1M10 15.5v2.1M3.8 10h2.1M14.1 10h2.1M5.4 5.4l1.5 1.5M13.1 13.1l1.5 1.5M14.6 5.4l-1.5 1.5M6.9 13.1l-1.5 1.5" />
                     <circle cx="10" cy="10" r="3.1" />
                   </svg>
-                  {advancedOptionsOpen ? 'Hide settings' : 'Customize'}
+                  {advancedOptionsOpen ? 'Hide advanced setup' : 'Refine setup'}
                 </button>
               </div>
             </div>
 
             {advancedOptionsOpen && (
               <div className="rounded-xl border border-black/10 bg-black/[0.02] p-3">
-                <h3 className="text-sm font-semibold">Advanced options</h3>
+                <h3 className="text-sm font-semibold">Advanced setup</h3>
                 <p className="muted mt-1 text-xs">
-                  Tune framing and study controls. Defaults are calibrated for a calm, high-signal first run.
+                  Tune framing and rigor only if this study needs it. The defaults are calibrated for a calm, high-signal first run.
                 </p>
 
                 <div className="mt-3">
@@ -635,7 +669,6 @@ export function TopicsDashboard() {
                     placeholder="Optional context (period, movement, works, creators, place, or interpretive lens)"
                     maxLength={TOPIC_DESC_MAX}
                   />
-                  <p className="mt-1 text-right text-xs text-black/60">{description.length}/{TOPIC_DESC_MAX}</p>
                 </div>
 
                 <div className="mt-3 rounded-xl border border-black/10 bg-white/70 p-3">
@@ -669,70 +702,60 @@ export function TopicsDashboard() {
                   </p>
                 </div>
 
-                <div className="mt-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Course depth</p>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    {COURSE_DEPTH_OPTIONS.map((item) => (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => setCourseDepth(item.value)}
-                        className={`rounded-md border p-2 text-left ${
-                          courseDepth === item.value
-                            ? 'border-ink bg-white shadow-sm'
-                            : 'border-black/10 bg-white/80'
-                        }`}
-                      >
-                        <p className="text-sm font-semibold">{item.label}</p>
-                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
+                  <label className="rounded-xl border border-black/10 bg-white/75 p-3">
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Course depth</span>
+                    <select
+                      value={courseDepth}
+                      onChange={(event) => setCourseDepth(event.target.value as CourseDepth)}
+                      className="mt-2 w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                    >
+                      {COURSE_DEPTH_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-2 text-xs text-black/60">
+                      {COURSE_DEPTH_OPTIONS.find((item) => item.value === courseDepth)?.description}
+                    </p>
+                  </label>
 
-                <div className="mt-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Starting skill level</p>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
-                    {STARTING_SKILL_LEVEL_OPTIONS.map((item) => (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => setStartingSkillLevel(item.value)}
-                        className={`rounded-md border p-2 text-left ${
-                          startingSkillLevel === item.value
-                            ? 'border-ink bg-white shadow-sm'
-                            : 'border-black/10 bg-white/80'
-                        }`}
-                      >
-                        <p className="text-sm font-semibold">{item.label}</p>
-                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
+                  <label className="rounded-xl border border-black/10 bg-white/75 p-3">
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Starting skill level</span>
+                    <select
+                      value={startingSkillLevel}
+                      onChange={(event) => setStartingSkillLevel(event.target.value as StartingSkillLevel)}
+                      className="mt-2 w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                    >
+                      {STARTING_SKILL_LEVEL_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-2 text-xs text-black/60">
+                      {STARTING_SKILL_LEVEL_OPTIONS.find((item) => item.value === startingSkillLevel)?.description}
+                    </p>
+                  </label>
 
-                <div className="mt-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Technical depth</p>
-                  <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                    {TECHNICAL_DEPTH_OPTIONS.map((item) => (
-                      <button
-                        key={item.value}
-                        type="button"
-                        onClick={() => setTechnicalDepth(item.value)}
-                        className={`rounded-md border p-2 text-left ${
-                          technicalDepth === item.value
-                            ? 'border-ink bg-white shadow-sm'
-                            : 'border-black/10 bg-white/80'
-                        }`}
-                      >
-                        <p className="text-sm font-semibold">{item.label}</p>
-                        <p className="mt-1 text-xs text-black/60">{item.description}</p>
-                      </button>
-                    ))}
-                  </div>
-                  <p className="mt-2 text-xs text-black/60">
-                    Controls how rigorous lessons, exemplars, and assessments should be.
-                  </p>
+                  <label className="rounded-xl border border-black/10 bg-white/75 p-3">
+                    <span className="text-xs font-semibold uppercase tracking-[0.14em] text-black/60">Technical depth</span>
+                    <select
+                      value={technicalDepth}
+                      onChange={(event) => setTechnicalDepth(event.target.value as TechnicalDepth)}
+                      className="mt-2 w-full rounded-md border border-black/15 bg-white px-3 py-2 text-sm"
+                    >
+                      {TECHNICAL_DEPTH_OPTIONS.map((item) => (
+                        <option key={item.value} value={item.value}>
+                          {item.label}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-2 text-xs text-black/60">
+                      {TECHNICAL_DEPTH_OPTIONS.find((item) => item.value === technicalDepth)?.description}
+                    </p>
+                  </label>
                 </div>
 
                 <div className="mt-3 rounded-lg border border-black/10 bg-white/75 p-2">
@@ -746,11 +769,11 @@ export function TopicsDashboard() {
                       Assessment methods
                     </span>
                     <span className="text-xs text-black/65">
-                      {assessmentStyles.length} selected · {assessmentPickerOpen ? 'Hide' : 'Customize'}
+                      {assessmentStyles.length} selected · {assessmentPickerOpen ? 'Hide' : 'Refine'}
                     </span>
                   </button>
                   <p className="px-2 pb-2 text-xs text-black/60">
-                    Default: multiple choice.
+                    Default: a balanced set of recall and explanation checks.
                   </p>
                   {assessmentPickerOpen && (
                     <div className="grid gap-2 px-2 pb-2 sm:grid-cols-2">
@@ -803,12 +826,15 @@ export function TopicsDashboard() {
               <div className="rounded-xl border border-amber-300 bg-amber-50 p-3 text-sm">
                 <p className="font-semibold text-amber-900">
                   {plausibilityPrompt.status === 'needs_context'
-                    ? 'This study needs stronger grounding'
-                    : 'This framing may need clarification'}
+                    ? 'Add one stronger anchor before we build this study'
+                    : 'Refine the framing before we start'}
                 </p>
                 <p className="mt-1 text-amber-900/90">{plausibilityPrompt.reason}</p>
                 {plausibilityPrompt.suggested_reframe && (
-                  <p className="mt-1 text-amber-900/80">{plausibilityPrompt.suggested_reframe}</p>
+                  <div className="mt-2 rounded-lg border border-amber-300/70 bg-white/70 p-2">
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-900/70">Suggested framing</p>
+                    <p className="mt-1 text-amber-900/80">{plausibilityPrompt.suggested_reframe}</p>
+                  </div>
                 )}
                 {plausibilityPrompt.context_hint && (
                   <p className="mt-1 text-amber-900/80">{plausibilityPrompt.context_hint}</p>
@@ -818,34 +844,25 @@ export function TopicsDashboard() {
                     type="button"
                     className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs"
                     onClick={() => {
-                      setTopicMode('factual');
+                      setAdvancedOptionsOpen(true);
                       setPlausibilityPrompt(null);
                     }}
                   >
-                    Add more context
+                    Open advanced setup
                   </button>
-                  <button
-                    type="button"
-                    className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
-                    disabled={creating}
-                    onClick={() => {
-                      setTopicMode('fictional');
-                      void runTopicCreation('fictional', true);
-                    }}
-                  >
-                    Continue as invented world
-                  </button>
-                  <button
-                    type="button"
-                    className="rounded-md border border-black/20 bg-white px-3 py-1.5 text-xs disabled:opacity-60"
-                    disabled={creating}
-                    onClick={() => {
-                      setTopicMode('hypothetical');
-                      void runTopicCreation('hypothetical', true);
-                    }}
-                  >
-                    Continue as speculative
-                  </button>
+                  {plausibilityPrompt.suggested_mode !== 'factual' && (
+                    <button
+                      type="button"
+                      className="rounded-md bg-ink px-3 py-1.5 text-xs text-white disabled:opacity-60"
+                      disabled={creating}
+                      onClick={() => {
+                        setTopicMode(plausibilityPrompt.suggested_mode);
+                        void runTopicCreation(plausibilityPrompt.suggested_mode, true);
+                      }}
+                    >
+                      Continue as {topicModeLabel(plausibilityPrompt.suggested_mode).toLowerCase()}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
