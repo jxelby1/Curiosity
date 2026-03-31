@@ -38,9 +38,8 @@ def test_source_policy_blocks_social_and_stock_domains() -> None:
     assert filtered[0].source_domain == 'wikipedia.org'
 
 
-def test_search_prefers_openai_web_provider_path() -> None:
+def test_search_uses_openai_web_path_only() -> None:
     service = ExternalSearchService()
-    service.settings.search_provider = 'openai_web'
 
     async def fake_openai_web_search(**_: object) -> list[SearchResult]:
         return [
@@ -106,3 +105,46 @@ def test_search_images_keeps_direct_image_urls_even_when_kind_is_article() -> No
     assert len(output) == 1
     assert output[0].url.endswith('.jpg')
     assert output[0].source_domain == 'cdn.example.org'
+
+
+def test_lesson_media_salvage_extracts_image_and_video_urls() -> None:
+    service = ExternalSearchService()
+    raw = (
+        "Study these references: "
+        "[Street Light Timing](https://cdn.example.org/images/street-light-timing.jpg) "
+        "and "
+        "[Lesson Walkthrough](https://www.youtube.com/watch?v=abc123)."
+    )
+
+    salvaged = service._salvage_media_candidates_from_text(  # noqa: SLF001
+        raw,
+        image_query='Photograph with Intention: Light, Timing, and Editing',
+        video_query='Photograph with Intention: Light, Timing, and Editing',
+        limit_images=6,
+        limit_videos=6,
+    )
+
+    assert len(salvaged.image_candidates) >= 1
+    assert len(salvaged.video_candidates) >= 1
+    assert salvaged.image_candidates[0].media_url.endswith('.jpg')
+    assert 'youtube.com' in salvaged.video_candidates[0].source_url
+
+
+def test_openai_lesson_media_schema_is_strict_and_complete() -> None:
+    service = ExternalSearchService()
+    format_config = service._structured_media_selection_format()  # noqa: SLF001
+    schema = format_config['format']['schema']
+    image_item = schema['properties']['image_candidates']['items']
+
+    assert schema['type'] == 'object'
+    assert schema['additionalProperties'] is False
+    assert schema['required'] == ['image_query', 'video_query', 'image_candidates', 'video_candidates', 'agent_decision']
+    assert image_item['additionalProperties'] is False
+    assert image_item['required'] == [
+        'title',
+        'source_url',
+        'media_url',
+        'source_domain',
+        'relevance_score',
+        'relevance_reason',
+    ]

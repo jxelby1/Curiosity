@@ -1,7 +1,5 @@
 'use client';
 
-import { useEffect } from 'react';
-
 import { formatDisplayTag } from '@/lib/display-format';
 import { MarkdownContent } from '@/components/markdown-content';
 
@@ -69,10 +67,14 @@ type SupportingMediaShape = {
   relevance_reason: string;
 };
 
-type VideoEmbedSource = {
-  kind: 'iframe' | 'native';
-  src: string;
-};
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000/api';
+const API_ORIGIN = (() => {
+  try {
+    return new URL(API_BASE).origin;
+  } catch {
+    return '';
+  }
+})();
 
 const LESSON_SUMMARY_MAX = 300;
 const LESSON_KEY_CONCEPT_DESC_MAX = 260;
@@ -104,7 +106,7 @@ function toSupportingMediaArray(value: unknown): SupportingMediaShape[] {
       const mediaType = String(raw.media_type || '').trim().toLowerCase();
       if (mediaType !== 'image' && mediaType !== 'video') return null;
       const url = String(raw.url || '').trim();
-      const previewUrl = String(raw.preview_url || '').trim();
+      const previewUrl = resolveApiMediaUrl(String(raw.preview_url || '').trim());
       if (!url) return null;
       if (mediaType === 'image' && !isDirectImageUrl(url) && !isDirectImageUrl(previewUrl)) return null;
       const normalized: SupportingMediaShape = {
@@ -336,56 +338,21 @@ export function parseDeepLessonContent(value: unknown): DeepLessonShape | null {
   return result;
 }
 
-function toYouTubeEmbedUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.replace(/^www\./, '');
-    if (host === 'youtu.be') {
-      const id = parsed.pathname.replace('/', '').trim();
-      return id ? `https://www.youtube.com/embed/${id}` : null;
-    }
-    if (host === 'youtube.com' || host === 'm.youtube.com') {
-      if (parsed.pathname === '/watch') {
-        const id = parsed.searchParams.get('v')?.trim();
-        return id ? `https://www.youtube.com/embed/${id}` : null;
-      }
-      const match = parsed.pathname.match(/^\/(embed|shorts)\/([A-Za-z0-9_-]{6,})/);
-      if (match) return `https://www.youtube.com/embed/${match[2]}`;
-    }
-    return null;
-  } catch {
-    return null;
+function resolveApiMediaUrl(url: string): string {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.startsWith('/api/')) {
+    return API_ORIGIN ? `${API_ORIGIN}${trimmed}` : trimmed;
   }
+  return trimmed;
 }
 
-function toVimeoEmbedUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-    if (!host.includes('vimeo.com')) return null;
-    const segments = parsed.pathname.split('/').filter(Boolean);
-    const id = segments.find((segment) => /^\d+$/.test(segment));
-    return id ? `https://player.vimeo.com/video/${id}` : null;
-  } catch {
-    return null;
-  }
-}
-
-function isDirectVideoUrl(url: string): boolean {
-  return /\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(url);
-}
-
-function toVideoEmbedSource(url: string): VideoEmbedSource | null {
-  const youtubeEmbed = toYouTubeEmbedUrl(url);
-  if (youtubeEmbed) return { kind: 'iframe', src: youtubeEmbed };
-  const vimeoEmbed = toVimeoEmbedUrl(url);
-  if (vimeoEmbed) return { kind: 'iframe', src: vimeoEmbed };
-  if (isDirectVideoUrl(url)) return { kind: 'native', src: url };
-  return null;
+function isMediaProxyUrl(url: string): boolean {
+  return /\/api\/media-cache\/proxy\//i.test((url || '').trim());
 }
 
 function isDirectImageUrl(url: string): boolean {
-  return /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url);
+  return /\.(png|jpe?g|webp|gif|svg|avif)(\?.*)?$/i.test(url) || isMediaProxyUrl(url);
 }
 
 function StudioPromptPanel({
@@ -413,117 +380,7 @@ function StudioPromptPanel({
   );
 }
 
-function SupportingMediaSection({
-  media,
-  title = 'Visual References',
-  subtitle = 'Curated references selected to support observation, comparison, and interpretation.',
-}: {
-  media: SupportingMediaShape[];
-  title?: string;
-  subtitle?: string;
-}) {
-  const imageCount = media.filter((item) => item.media_type === 'image').length;
-  const videoCount = media.filter((item) => item.media_type === 'video').length;
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const debugEnabled = window.localStorage.getItem('canopy_debug_media') === '1' || process.env.NODE_ENV !== 'production';
-    if (!debugEnabled) return;
-    console.info('ui.supporting_media_render', {
-      mediaCount: media.length,
-      imageCount,
-      videoCount,
-    });
-  }, [media, imageCount, videoCount]);
-  if (media.length === 0) return null;
-
-  const heroItem =
-    media.find(
-      (item) =>
-        item.media_type === 'image' &&
-        ((item.preview_url && isDirectImageUrl(item.preview_url)) || isDirectImageUrl(item.url))
-    ) || media[0];
-  const remainingItems = media.filter((item) => item.url !== heroItem.url);
-
-  const renderMediaCard = (item: SupportingMediaShape, { hero = false }: { hero?: boolean } = {}) => {
-    const embedSource = item.media_type === 'video' ? toVideoEmbedSource(item.url) : null;
-    const imageUrl =
-      item.media_type === 'image'
-        ? item.preview_url && isDirectImageUrl(item.preview_url)
-          ? item.preview_url
-          : isDirectImageUrl(item.url)
-            ? item.url
-            : null
-        : null;
-    const showImage = Boolean(imageUrl);
-    return (
-      <article key={item.url} className={`rounded-lg border border-black/10 bg-paper/40 p-3 ${hero ? 'md:p-4' : ''}`}>
-        <div className="mb-2 flex flex-wrap items-center gap-2 text-[11px]">
-          <span className="badge">{item.media_type === 'video' ? 'Video' : 'Image'}</span>
-          {item.source_domain && <span className="badge">{item.source_domain}</span>}
-        </div>
-        <p className={`${hero ? 'text-base' : 'text-sm'} font-semibold`}>{item.title}</p>
-        {item.relevance_reason && <p className="muted mt-1 text-xs">{item.relevance_reason}</p>}
-        {embedSource?.kind === 'iframe' && (
-          <div className={`mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5 ${hero ? 'max-w-4xl' : ''}`}>
-            <iframe
-              src={embedSource.src}
-              title={item.title}
-              className={hero ? 'h-64 w-full' : 'h-52 w-full'}
-              loading="lazy"
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-              allowFullScreen
-            />
-          </div>
-        )}
-        {embedSource?.kind === 'native' && (
-          <div className={`mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5 ${hero ? 'max-w-4xl' : ''}`}>
-            <video
-              controls
-              preload="metadata"
-              className={hero ? 'h-64 w-full bg-black' : 'h-52 w-full bg-black'}
-            >
-              <source src={embedSource.src} />
-            </video>
-          </div>
-        )}
-        {showImage && (
-          <img
-            src={imageUrl || item.url}
-            alt={item.title}
-            loading="lazy"
-            data-testid="supporting-media-image"
-            className={`mt-3 w-full rounded-md border border-black/10 object-contain bg-white ${hero ? 'max-h-[26rem]' : 'max-h-72'}`}
-          />
-        )}
-        <a
-          href={item.url}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
-        >
-          Open source
-        </a>
-      </article>
-    );
-  };
-
-  return (
-    <section className="rounded-xl border border-black/10 bg-white p-4">
-      <h4 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">{title}</h4>
-      <p className="muted mt-1 text-xs">{subtitle}</p>
-      <div className="mt-3">{renderMediaCard(heroItem, { hero: true })}</div>
-      <div className="mt-3 grid gap-3 md:grid-cols-2">
-        {remainingItems.map((item) => renderMediaCard(item))}
-      </div>
-    </section>
-  );
-}
-
 export function LessonRenderer({ content }: { content: LessonShape }) {
-  const lessonImages = content.supporting_media.filter((item) => item.media_type === 'image');
-  const lessonVideos = content.supporting_media.filter((item) => item.media_type === 'video');
-
   return (
     <div className="space-y-6">
       <div className="space-y-2">
@@ -557,12 +414,6 @@ export function LessonRenderer({ content }: { content: LessonShape }) {
         </ul>
       </section>
 
-      <SupportingMediaSection
-        media={lessonImages}
-        title="Visual Reference"
-        subtitle="A concrete image selected to ground this lesson in direct observation."
-      />
-
       <section className="grid gap-3 md:grid-cols-2">
         {content.key_concepts.map((concept) => (
           <article key={concept.term} className="rounded-xl border border-black/10 bg-white p-4">
@@ -580,12 +431,6 @@ export function LessonRenderer({ content }: { content: LessonShape }) {
           </article>
         ))}
       </section>
-
-      <SupportingMediaSection
-        media={lessonVideos}
-        title="Supporting Video"
-        subtitle="A closely matched video reference you can play inline while studying this node."
-      />
 
       <section className="grid gap-4 md:grid-cols-2">
         <article className="rounded-xl border border-black/10 bg-white p-4">
@@ -649,8 +494,6 @@ export function ExamplesRenderer({ content }: { content: ExamplesShape }) {
           </ul>
         </section>
       )}
-
-      <SupportingMediaSection media={content.supporting_media} />
 
       <div className="space-y-3">
         {content.examples.map((example) => (
@@ -747,8 +590,6 @@ export function DeepLessonRenderer({ content }: { content: DeepLessonShape }) {
           </ul>
         </section>
       )}
-
-      <SupportingMediaSection media={content.supporting_media} />
 
       <section className="rounded-xl border border-black/10 bg-white p-5">
         <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">Essential Questions</h3>

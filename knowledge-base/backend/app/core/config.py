@@ -50,11 +50,15 @@ class Settings(BaseSettings):
     max_note_chunk_chars: int = 900
     exercise_proof_storage_dir: str = './data/exercise-proofs'
     exercise_proof_max_mb: int = 8
+    media_cache_storage_dir: str = './data/media-cache'
+    media_cache_max_mb: int = 12
+    media_cache_timeout_seconds: float = 10.0
+    media_cache_token_ttl_seconds: int = 60 * 60 * 24 * 14
+    media_cache_min_image_pixels: int = 220_000
+    media_cache_min_image_long_edge: int = 640
+    media_cache_domain_block_ttl_seconds: int = 60 * 60 * 6
 
-    search_provider: Literal['openai_web', 'serper'] = 'openai_web'
     openai_web_search_model: str = 'gpt-4.1-mini'
-    search_api_key: str = Field(default='')
-    search_base_url: str = 'https://google.serper.dev/search'
 
     enable_dev_unlocks: bool = True
     dev_unlock_emails: str = ''

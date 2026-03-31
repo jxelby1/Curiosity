@@ -126,6 +126,7 @@ from app.services.embedding import EmbeddingService
 from app.services.llm import LLMService
 from app.services.course_memory import CourseMemoryService
 from app.services.course_research import CourseResearchService
+from app.services.media_cache import MediaCacheService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 from app.services.retention import RetentionService
@@ -142,6 +143,7 @@ embedding_service = EmbeddingService()
 retrieval_service = RetrievalService(embedding_service)
 llm_service = LLMService()
 search_service = ExternalSearchService()
+media_cache_service = MediaCacheService()
 course_memory_service = CourseMemoryService()
 course_research_service = CourseResearchService(search_service)
 
@@ -160,6 +162,8 @@ resource_agent = ResourceAgent(
     retrieval_service,
     course_memory_service=course_memory_service,
     course_research_service=course_research_service,
+    media_cache_service=media_cache_service,
+    supporting_media_enabled=False,
 )
 assessment_agent = AssessmentAgent(llm_service)
 retention_service = RetentionService()
@@ -2415,41 +2419,14 @@ async def get_deep_lesson(
     except Exception as exc:  # noqa: BLE001
         _raise_service_error(exc)
 
-    supporting_media = resource_agent.normalize_supporting_media(structured_content.get('supporting_media'))
-    try:
-        remaining = max(0, 3 - len(supporting_media))
-        if remaining > 0:
-            fetched = resource_agent.normalize_supporting_media(
-                await resource_agent.fetch_strict_supporting_media(
-                topic=topic,
-                skill_node=skill,
-                deep_lesson=structured_content,
-                kind='deep_lesson',
-                study_mode='standard',
-                limit=remaining,
-                )
-            )
-            seen_urls = {item['url'] for item in supporting_media}
-            for item in fetched:
-                if item['url'] in seen_urls:
-                    continue
-                seen_urls.add(item['url'])
-                supporting_media.append(item)
-        logger.info(
-            'resource.deep_lesson_media_payload topic_id=%s skill_id=%s selected=%s images=%s videos=%s',
-            topic.id,
-            skill.id,
-            len(supporting_media),
-            sum(1 for item in supporting_media if item.get('media_type') == 'image'),
-            sum(1 for item in supporting_media if item.get('media_type') == 'video'),
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            'resource.deep_lesson_media_error topic_id=%s skill_id=%s error=%s',
-            topic.id,
-            skill.id,
-            exc,
-        )
+    supporting_media: list[dict[str, str]] = []
+    if isinstance(structured_content, dict):
+        structured_content['supporting_media'] = []
+    logger.info(
+        'resource.deep_lesson_media_disabled topic_id=%s skill_id=%s reason=feature_temporarily_disabled',
+        topic.id,
+        skill.id,
+    )
 
     return DeepLessonResponse(
         skill_node_id=skill.id,
@@ -2653,6 +2630,26 @@ def get_exercise_completion_proof(
         path=proof_path,
         media_type=completion.proof_content_type or 'application/octet-stream',
         filename=completion.proof_filename or proof_path.name,
+    )
+
+
+@router.get('/media-cache/proxy/{token}')
+async def get_media_cache_proxy(
+    token: str,
+) -> FileResponse:
+    try:
+        cached_path, media_type = await media_cache_service.resolve_proxy_token(token)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.info('media_cache.proxy_error token=%s error=%s', token[:24], exc)
+        raise HTTPException(status_code=502, detail='Unable to resolve media cache proxy image.') from exc
+
+    return FileResponse(
+        path=cached_path,
+        media_type=media_type,
+        filename=cached_path.name,
+        headers={'Cache-Control': 'public, max-age=604800, immutable'},
     )
 
 

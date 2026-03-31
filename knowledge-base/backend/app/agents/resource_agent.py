@@ -28,6 +28,7 @@ from app.schemas.llm import (
 from app.services.llm import LLMService
 from app.services.course_memory import CourseMemoryService, CourseMemorySnapshot
 from app.services.course_research import CourseResearchService
+from app.services.media_cache import MediaCacheService
 from app.services.retrieval import RetrievalService
 from app.services.search import ExternalSearchService
 
@@ -337,6 +338,8 @@ class ResourceAgent:
         retrieval_service: RetrievalService,
         course_memory_service: CourseMemoryService | None = None,
         course_research_service: CourseResearchService | None = None,
+        media_cache_service: MediaCacheService | None = None,
+        supporting_media_enabled: bool = True,
     ) -> None:
         self.llm_service = llm_service
         self.search_service = search_service
@@ -344,7 +347,12 @@ class ResourceAgent:
         self.course_memory_service = course_memory_service or CourseMemoryService()
         self.course_research_service = course_research_service or CourseResearchService(search_service)
         self.settings = get_settings()
-        self.lesson_image_agent = LessonImageAgent(search_service=search_service, settings=self.settings)
+        self.supporting_media_enabled = bool(supporting_media_enabled)
+        self.lesson_image_agent = LessonImageAgent(
+            search_service=search_service,
+            settings=self.settings,
+            media_cache_service=media_cache_service,
+        )
 
     def _difficulty_band(self, difficulty: int) -> str:
         if difficulty <= 2:
@@ -718,6 +726,22 @@ class ResourceAgent:
             return structured_content
         if not isinstance(structured_content, dict):
             return structured_content
+        if not self.supporting_media_enabled:
+            prior_media = structured_content.get('supporting_media')
+            prior_count = len(prior_media) if isinstance(prior_media, list) else 0
+            structured_content['supporting_media'] = []
+            structured_content['visual_support_needed'] = False
+            structured_content['visual_priority'] = 'low'
+            structured_content['visual_support_reason'] = 'Supporting media is temporarily disabled.'
+            structured_content['visual_support_selected_count'] = 0
+            logger.info(
+                'resource.supporting_media_disabled topic_id=%s skill_id=%s kind=%s cleared_existing=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                prior_count,
+            )
+            return structured_content
 
         media_limit = 3 if kind == 'deep_lesson' else 2
         visual_decision = self.lesson_image_agent.assess_visual_support(
@@ -765,10 +789,11 @@ class ResourceAgent:
             existing_diagnostics['dropped_generic_filename']
             or existing_diagnostics['dropped_insufficient_context_match']
             or existing_diagnostics.get('dropped_mode_mismatch', 0)
+            or existing_diagnostics.get('dropped_source_fetch_blocked', 0)
             or dropped_used_existing
         ):
             logger.info(
-                'resource.supporting_media_existing_revalidated topic_id=%s skill_id=%s kind=%s kept=%s dropped_generic=%s dropped_context=%s dropped_mode=%s dropped_used=%s',
+                'resource.supporting_media_existing_revalidated topic_id=%s skill_id=%s kind=%s kept=%s dropped_generic=%s dropped_context=%s dropped_mode=%s dropped_fetch_blocked=%s dropped_used=%s',
                 topic.id,
                 skill_node.id,
                 kind,
@@ -776,6 +801,7 @@ class ResourceAgent:
                 existing_diagnostics['dropped_generic_filename'],
                 existing_diagnostics['dropped_insufficient_context_match'],
                 existing_diagnostics.get('dropped_mode_mismatch', 0),
+                existing_diagnostics.get('dropped_source_fetch_blocked', 0),
                 dropped_used_existing,
             )
         structured_content['supporting_media'] = normalized_existing
@@ -1312,6 +1338,8 @@ class ResourceAgent:
         return host
 
     def _is_direct_image_url(self, url: str) -> bool:
+        if '/api/media-cache/proxy/' in (url or '').lower():
+            return True
         lowered = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
         if '/wiki/file:' in lowered:
             return False
@@ -1354,8 +1382,10 @@ class ResourceAgent:
         wikimedia_preview = self._wikimedia_preview_url(url)
         if wikimedia_preview:
             return wikimedia_preview
-        if kind == 'external_image' and any(token in lowered_meta for token in _VISUAL_MEDIA_HINTS):
-            return None
+        # Allow article/source URLs to flow into the media-cache proxy, which can extract
+        # og:image/twitter:image and first renderable inline assets.
+        if kind == 'external_image' and (url.startswith('http://') or url.startswith('https://')):
+            return url
         return None
 
     def _extract_media_keywords(self, *, topic: Topic, skill_node: SkillNode, deep_lesson: dict[str, Any]) -> list[str]:
@@ -1564,7 +1594,11 @@ class ResourceAgent:
                 )
                 if not resolved_preview:
                     continue
-                normalized_item['preview_url'] = resolved_preview
+                proxied_preview = self.lesson_image_agent.media_cache_service.build_proxy_url(
+                    preferred_url=resolved_preview,
+                    source_url=url,
+                )
+                normalized_item['preview_url'] = proxied_preview or resolved_preview
             elif preview_url:
                 normalized_item['preview_url'] = preview_url
 
@@ -1856,13 +1890,22 @@ class ResourceAgent:
         limit: int = 2,
         exclude_media_keys: set[str] | None = None,
     ) -> list[dict[str, str]]:
+        if not self.supporting_media_enabled:
+            logger.info(
+                'resource.deep_lesson_media_selected topic_id=%s skill_id=%s selected=0 images=0 videos=0 requested_limit=%s diagnostics=%s',
+                topic.id,
+                skill_node.id,
+                limit,
+                {'kind': kind, 'study_mode': study_mode, 'disabled': True},
+            )
+            return []
+
         normalized_kind = kind if kind in {'lesson', 'examples', 'deep_lesson'} else 'lesson'
         normalized_study_mode = (study_mode or 'standard').strip().lower()
         blocked_media_keys = {item for item in (exclude_media_keys or set()) if item}
-        seed_media: list[dict[str, str]] = []
-        image_agent_diagnostics: dict[str, Any] = {}
+
         try:
-            image_selection = await self.lesson_image_agent.select_supporting_images(
+            media_selection = await self.lesson_image_agent.select_supporting_media(
                 topic=topic,
                 skill_node=skill_node,
                 lesson_content=deep_lesson,
@@ -1871,411 +1914,62 @@ class ResourceAgent:
                 limit=limit,
                 exclude_media_keys=blocked_media_keys,
             )
-            seed_media = self._normalize_supporting_media_items(image_selection.media_items)
-            seed_media, dropped_used_seed = self._filter_out_used_media_items(
-                media_items=seed_media,
-                used_media_keys=blocked_media_keys,
-            )
-            image_agent_diagnostics = image_selection.diagnostics
-            if dropped_used_seed:
-                logger.info(
-                    'resource.lesson_image_selection_seed_deduped topic_id=%s skill_id=%s kind=%s dropped_used=%s',
-                    topic.id,
-                    skill_node.id,
-                    normalized_kind,
-                    dropped_used_seed,
-                )
         except Exception as exc:  # noqa: BLE001
             logger.info(
-                'resource.lesson_image_selection_skip topic_id=%s skill_id=%s kind=%s reason=%s',
+                'resource.lesson_media_selection_skip topic_id=%s skill_id=%s kind=%s lesson_title=%s reason=%s',
                 topic.id,
                 skill_node.id,
                 normalized_kind,
-                exc,
-            )
-            seed_media = []
-            image_agent_diagnostics = {}
-        if len(seed_media) >= limit:
-            logger.info(
-                'resource.lesson_image_selection_seed_only topic_id=%s skill_id=%s kind=%s selected=%s diagnostics=%s',
-                topic.id,
-                skill_node.id,
-                normalized_kind,
-                len(seed_media[:limit]),
-                image_agent_diagnostics,
-            )
-            return seed_media[:limit]
-
-        keywords = self._extract_media_keywords(topic=topic, skill_node=skill_node, deep_lesson=deep_lesson)
-        query_seed = self._compact_media_query_seed(topic=topic, skill_node=skill_node, keywords=keywords)
-        query = (
-            f'{query_seed} artwork photograph scene still architecture design map diagram '
-            'visual analysis documentary educational video museum archive gallery'
-        )[:260]
-
-        try:
-            search_results = await self.search_service.search(
-                topic.name,
-                skill_node.name,
-                query=query,
-                limit=max(8, limit * 4),
-                source_policy='strict_media',
-            )
-        except (ConfigurationError, ProviderError) as exc:
-            logger.info(
-                'resource.deep_lesson_media_skipped topic_id=%s skill_id=%s reason=%s',
-                topic.id,
-                skill_node.id,
+                str(deep_lesson.get('title') or skill_node.name),
                 exc,
             )
             return []
-        logger.info(
-            'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=strict count=%s query=%s',
-            topic.id,
-            skill_node.id,
-            len(search_results),
-            query,
+
+        normalized_items = self._normalize_supporting_media_items(media_selection.media_items)
+        normalized_items, dropped_used = self._filter_out_used_media_items(
+            media_items=normalized_items,
+            used_media_keys=blocked_media_keys,
         )
-
-        def _fresh_diagnostics() -> dict[str, int]:
-            return {
-                'candidates_total': 0,
-                'selected': 0,
-                'selected_images': 0,
-                'selected_videos': 0,
-                'skip_duplicate': 0,
-                'skip_blocked_social': 0,
-                'skip_blocked_stock': 0,
-                'skip_deemphasized_source': 0,
-                'skip_untrusted': 0,
-                'skip_used_elsewhere': 0,
-                'skip_no_media_type': 0,
-                'skip_video_not_embeddable': 0,
-                'skip_video_title_mismatch': 0,
-                'skip_no_renderable_image': 0,
-                'skip_visual_hint': 0,
-                'skip_below_threshold': 0,
-            }
-
-        ranking_diagnostics: dict[str, dict[str, int]] = {
-            'strict': _fresh_diagnostics(),
-            'fallback': _fresh_diagnostics(),
-            'broad': _fresh_diagnostics(),
-        }
-
-        def rank_candidates(
-            candidates: list[Any],
-            *,
-            threshold: float,
-            require_visual_hint: bool,
-            selected_urls: set[str],
-            enforce_trusted_sources: bool,
-            allow_article_fallback: bool,
-            reason_text: str,
-            phase: Literal['strict', 'fallback', 'broad'],
-        ) -> list[tuple[float, dict[str, str]]]:
-            ranked: list[tuple[float, dict[str, str]]] = []
-            diagnostics = ranking_diagnostics[phase]
-            for candidate in candidates:
-                diagnostics['candidates_total'] += 1
-                kind_key = f'kind_{candidate.kind}'
-                diagnostics[kind_key] = diagnostics.get(kind_key, 0) + 1
-
-                candidate_key = self._media_key(candidate.url)
-                if candidate_key and candidate_key in blocked_media_keys:
-                    diagnostics['skip_used_elsewhere'] += 1
-                    continue
-                if candidate_key in selected_urls:
-                    diagnostics['skip_duplicate'] += 1
-                    continue
-
-                domain = self._domain_for_url(candidate.url)
-                if any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _BLOCKED_SOCIAL_MEDIA_DOMAINS):
-                    diagnostics['skip_blocked_social'] += 1
-                    continue
-                if any(domain == blocked or domain.endswith(f'.{blocked}') for blocked in _BLOCKED_STOCK_MEDIA_DOMAINS):
-                    diagnostics['skip_blocked_stock'] += 1
-                    continue
-                if self._is_deemphasized_media_domain(domain):
-                    diagnostics['skip_deemphasized_source'] += 1
-                    continue
-                if enforce_trusted_sources:
-                    if not self._is_trusted_media_candidate(
-                        domain=domain,
-                        title=candidate.title,
-                        summary=candidate.summary,
-                        kind=candidate.kind,
-                    ):
-                        diagnostics['skip_untrusted'] += 1
-                        continue
-
-                lowered_meta = f'{candidate.title} {candidate.summary}'.lower()
-                media_type = self._infer_media_type(
-                    kind=candidate.kind,
-                    url=candidate.url,
-                    lowered_meta=lowered_meta,
-                    allow_article_fallback=allow_article_fallback,
-                )
-                if media_type is None:
-                    diagnostics['skip_no_media_type'] += 1
-                    continue
-
-                if media_type == 'video':
-                    if not self._is_embeddable_video_url(candidate.url):
-                        diagnostics['skip_video_not_embeddable'] += 1
-                        continue
-                    title_similarity = self._video_title_similarity(
-                        node_title=skill_node.name,
-                        candidate_title=candidate.title,
-                    )
-                    if title_similarity < 0.18:
-                        diagnostics['skip_video_title_mismatch'] += 1
-                        continue
-
-                preview_url = ''
-                if media_type == 'image':
-                    preview = self._resolve_image_preview_url(
-                        url=candidate.url,
-                        kind=candidate.kind,
-                        lowered_meta=lowered_meta,
-                    )
-                    if not preview:
-                        diagnostics['skip_no_renderable_image'] += 1
-                        continue
-                    preview_url = preview
-
-                if require_visual_hint and media_type == 'image':
-                    if not any(token in lowered_meta for token in _VISUAL_MEDIA_HINTS):
-                        diagnostics['skip_visual_hint'] += 1
-                        continue
-
-                score = self._media_relevance_score(
-                    title=candidate.title,
-                    summary=candidate.summary,
-                    url=candidate.url,
-                    keywords=keywords,
-                    skill_name=skill_node.name,
-                )
-                if media_type == 'image':
-                    score = min(1.0, score + 0.04)
-                if score < threshold:
-                    diagnostics['skip_below_threshold'] += 1
-                    continue
-
-                selected_urls.add(candidate_key)
-                selected_item: dict[str, str] = {
-                    'title': candidate.title,
-                    'url': candidate.url,
-                    'media_type': media_type,
-                    'source_domain': domain,
-                    'relevance_reason': reason_text,
-                }
-                if preview_url:
-                    selected_item['preview_url'] = preview_url
-                ranked.append((score, selected_item))
-
-                diagnostics['selected'] += 1
-                if media_type == 'image':
-                    diagnostics['selected_images'] += 1
-                else:
-                    diagnostics['selected_videos'] += 1
-            return ranked
-
-        selected_urls: set[str] = {self._media_key(item['url']) for item in seed_media if item.get('url')}
-        scored: list[tuple[float, dict[str, str]]] = []
-        strict_scored = rank_candidates(
-            search_results,
-            threshold=_STRICT_MEDIA_SCORE_THRESHOLD,
-            require_visual_hint=False,
-            selected_urls=selected_urls,
-            enforce_trusted_sources=True,
-            allow_article_fallback=False,
-            reason_text='Selected because it directly supports this deep-dive node and comes from a trusted source.',
-            phase='strict',
-        )
-        scored.extend(strict_scored)
-        strict_count = len(strict_scored)
-
-        fallback_results: list[Any] = []
-        if len(seed_media) + len(scored) < limit:
-            fallback_query = (
-                f'{query_seed} map diagram archival image educational video '
-                'site:britannica.com site:khanacademy.org site:metmuseum.org site:moma.org site:tate.org.uk'
-            )[:220]
-            try:
-                fallback_results = await self.search_service.search(
-                    topic.name,
-                    skill_node.name,
-                    query=fallback_query,
-                    limit=max(8, limit * 4),
-                    source_policy='strict_media',
-                )
-            except (ConfigurationError, ProviderError):
-                fallback_results = []
+        if dropped_used:
             logger.info(
-                'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=fallback count=%s query=%s',
+                'resource.lesson_media_selection_deduped topic_id=%s skill_id=%s kind=%s dropped_used=%s',
                 topic.id,
                 skill_node.id,
-                len(fallback_results),
-                fallback_query,
+                normalized_kind,
+                dropped_used,
             )
 
-            fallback_scored = rank_candidates(
-                fallback_results,
-                threshold=_RELAXED_MEDIA_SCORE_THRESHOLD,
-                require_visual_hint=True,
-                selected_urls=selected_urls,
-                enforce_trusted_sources=False,
-                allow_article_fallback=False,
-                reason_text='Selected as a supplemental reference likely helpful for this deep-dive topic.',
-                phase='fallback',
-            )
-            scored.extend(fallback_scored)
-        else:
-            fallback_scored = []
-        fallback_count = len(fallback_scored)
-        broad_count = 0
-        broad_results: list[Any] = []
-        if len(seed_media) + len(scored) < limit and len(scored) == 0:
-            broad_query = f'{query_seed} exemplar comparison image video museum archive visual reference'[:220]
-            try:
-                broad_results = await self.search_service.search(
-                    topic.name,
-                    skill_node.name,
-                    query=broad_query,
-                    limit=max(8, limit * 4),
-                    source_policy='standard',
-                )
-            except (ConfigurationError, ProviderError):
-                broad_results = search_results
-            logger.info(
-                'resource.deep_lesson_media_candidates topic_id=%s skill_id=%s phase=broad count=%s query=%s',
-                topic.id,
-                skill_node.id,
-                len(broad_results),
-                broad_query,
-            )
-            broad_scored = rank_candidates(
-                broad_results,
-                threshold=_BROAD_MEDIA_SCORE_THRESHOLD,
-                require_visual_hint=False,
-                selected_urls=selected_urls,
-                enforce_trusted_sources=False,
-                allow_article_fallback=False,
-                reason_text='Selected from non-social public sources as a high-relevance fallback for this lesson.',
-                phase='broad',
-            )
-            scored.extend(broad_scored)
-            broad_count = len(broad_scored)
-        emergency_count = 0
-        if len(seed_media) + len(scored) == 0:
-            emergency_results = [*search_results, *fallback_results, *broad_results]
-            emergency_scored = rank_candidates(
-                emergency_results,
-                threshold=0.08,
-                require_visual_hint=False,
-                selected_urls=selected_urls,
-                enforce_trusted_sources=False,
-                allow_article_fallback=False,
-                reason_text='Selected from top web results when no higher-confidence media candidate passed strict filters.',
-                phase='broad',
-            )
-            emergency_count = len(emergency_scored)
-            scored.extend(emergency_scored[: max(1, limit)])
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        top_items = list(seed_media)
-        selected_urls = {self._media_key(item['url']) for item in top_items if item.get('url')}
-        for _, item in scored:
-            candidate_key = self._media_key(item['url'])
-            if len(top_items) >= limit:
-                break
-            if candidate_key in selected_urls:
-                continue
-            top_items.append(item)
-            selected_urls.add(candidate_key)
         if normalized_kind == 'lesson' and limit >= 2:
-            candidate_pool = [*top_items, *(entry for _, entry in scored)]
-            best_image = next((item for item in candidate_pool if item['media_type'] == 'image'), None)
-            best_video = next((item for item in candidate_pool if item['media_type'] == 'video'), None)
-            if best_image and best_video:
-                balanced: list[dict[str, str]] = []
-                balanced_keys: set[str] = set()
-                for item in (best_image, best_video):
-                    key = self._media_key(item['url'])
-                    if key and key not in balanced_keys:
-                        balanced.append(item)
-                        balanced_keys.add(key)
-                for item in top_items:
-                    if len(balanced) >= limit:
-                        break
-                    key = self._media_key(item['url'])
-                    if key and key in balanced_keys:
-                        continue
-                    balanced.append(item)
-                    if key:
-                        balanced_keys.add(key)
-                top_items = balanced[:limit]
-        if top_items:
-            has_image = any(item['media_type'] == 'image' for item in top_items)
-            if not has_image:
-                fallback_image = next(
-                    (item for item in [*seed_media, *(entry for _, entry in scored)] if item['media_type'] == 'image'),
-                    None,
-                )
-                if fallback_image:
-                    replace_idx = next(
-                        (idx for idx in range(len(top_items) - 1, -1, -1) if top_items[idx]['media_type'] != 'image'),
-                        None,
-                    )
-                    if replace_idx is not None:
-                        top_items[replace_idx] = fallback_image
+            best_image = next((item for item in normalized_items if item.get('media_type') == 'image'), None)
+            best_video = next((item for item in normalized_items if item.get('media_type') == 'video'), None)
+            balanced: list[dict[str, str]] = []
+            if best_image:
+                balanced.append(best_image)
+            if best_video and (not best_image or best_video.get('url') != best_image.get('url')):
+                balanced.append(best_video)
+            for item in normalized_items:
+                if len(balanced) >= limit:
+                    break
+                key = item.get('url')
+                if key and any(existing.get('url') == key for existing in balanced):
+                    continue
+                balanced.append(item)
+            normalized_items = balanced[:limit]
+        else:
+            normalized_items = normalized_items[:limit]
 
-        revalidated_items, revalidation_diagnostics = self.lesson_image_agent.filter_existing_media_items(
-            topic=topic,
-            skill_node=skill_node,
-            lesson_content=deep_lesson,
-            media_items=top_items,
-        )
-        if (
-            revalidation_diagnostics['dropped_generic_filename']
-            or revalidation_diagnostics['dropped_insufficient_context_match']
-            or revalidation_diagnostics.get('dropped_mode_mismatch', 0)
-        ):
-            logger.info(
-                'resource.deep_lesson_media_revalidated topic_id=%s skill_id=%s kept=%s dropped_generic=%s dropped_context=%s dropped_mode=%s',
-                topic.id,
-                skill_node.id,
-                revalidation_diagnostics['kept'],
-                revalidation_diagnostics['dropped_generic_filename'],
-                revalidation_diagnostics['dropped_insufficient_context_match'],
-                revalidation_diagnostics.get('dropped_mode_mismatch', 0),
-            )
-        top_items = revalidated_items
-
+        diagnostics = media_selection.diagnostics if isinstance(media_selection.diagnostics, dict) else {}
         logger.info(
-            'resource.deep_lesson_media_selected topic_id=%s skill_id=%s selected=%s seed=%s strict=%s fallback=%s broad=%s emergency=%s requested_limit=%s environment=%s image_agent=%s',
+            'resource.deep_lesson_media_selected topic_id=%s skill_id=%s selected=%s images=%s videos=%s requested_limit=%s diagnostics=%s',
             topic.id,
             skill_node.id,
-            len(top_items),
-            len(seed_media),
-            strict_count,
-            fallback_count,
-            broad_count,
-            emergency_count,
+            len(normalized_items),
+            sum(1 for item in normalized_items if item.get('media_type') == 'image'),
+            sum(1 for item in normalized_items if item.get('media_type') == 'video'),
             limit,
-            self.settings.environment,
-            image_agent_diagnostics,
+            diagnostics,
         )
-        logger.info(
-            'resource.deep_lesson_media_diagnostics topic_id=%s skill_id=%s strict=%s fallback=%s broad=%s',
-            topic.id,
-            skill_node.id,
-            ranking_diagnostics['strict'],
-            ranking_diagnostics['fallback'],
-            ranking_diagnostics['broad'],
-        )
-        return top_items
+        return normalized_items
 
     def _get_active_generated_resource(
         self,

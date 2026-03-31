@@ -8,7 +8,7 @@ LEARNING_CONTENT = ROOT / 'frontend' / 'components' / 'learning-content.tsx'
 SKILL_PAGE = ROOT / 'frontend' / 'app' / 'topics' / '[topicId]' / 'skills' / '[skillId]' / 'page.tsx'
 
 
-def test_learning_renderers_include_exemplar_compare_response_and_visual_reference_sections() -> None:
+def test_learning_renderers_include_exemplar_compare_response_sections_without_media_cards() -> None:
     content = LEARNING_CONTENT.read_text(encoding='utf-8')
 
     assert 'exemplar_focus: string[]' in content
@@ -17,15 +17,16 @@ def test_learning_renderers_include_exemplar_compare_response_and_visual_referen
     assert 'response_prompts: string[]' in content
     assert 'practice_hooks: string[]' in content
     assert 'supporting_media: SupportingMediaShape[]' in content
-    assert 'function SupportingMediaSection' in content
-    assert 'Visual References' in content
+    assert 'function SupportingMediaSection' not in content
+    assert 'Visual References' not in content
     assert 'Notice This' in content
     assert 'Compare This' in content
     assert 'Try This' in content
 
 
-def test_skill_workspace_avoids_duplicate_deep_lesson_media_sections_when_inline_media_exists() -> None:
+def test_skill_workspace_does_not_render_deep_lesson_media_fallback_section() -> None:
     content = SKILL_PAGE.read_text(encoding='utf-8')
 
-    assert 'deepLessonHasInlineMedia' in content
-    assert '{deepLesson && !deepLessonHasInlineMedia && (' in content
+    assert 'deepLessonHasInlineMedia' not in content
+    assert '{deepLesson && !deepLessonHasInlineMedia && (' not in content
+    assert 'Supporting media (strict relevance)' not in content

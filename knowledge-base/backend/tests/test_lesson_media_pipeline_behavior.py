@@ -128,10 +128,10 @@ def test_lesson_media_attachment_adds_renderable_images_to_payload() -> None:
     assert isinstance(media, list)
     assert len(media) == 1
     assert media[0]['media_type'] == 'image'
-    assert media[0]['preview_url'] == 'https://upload.wikimedia.org/wikipedia/commons/2/24/Street_photo_composition.jpg'
+    assert '/api/media-cache/proxy/' in media[0]['preview_url']
 
 
-def test_lesson_media_attachment_rejects_non_renderable_image_links() -> None:
+def test_lesson_media_attachment_proxies_article_image_links_for_rendering() -> None:
     topic, skill = _topic_and_skill()
     agent = _AttachAgent(
         [
@@ -160,7 +160,11 @@ def test_lesson_media_attachment_rejects_non_renderable_image_links() -> None:
         )
     )
 
-    assert updated.get('supporting_media') in (None, [])
+    media = updated.get('supporting_media')
+    assert isinstance(media, list)
+    assert len(media) == 1
+    assert media[0]['media_type'] == 'image'
+    assert '/api/media-cache/proxy/' in media[0].get('preview_url', '')
 
 
 def test_lesson_and_deep_lesson_media_paths_keep_expected_limits() -> None:

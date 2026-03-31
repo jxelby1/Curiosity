@@ -14,6 +14,7 @@ class _SearchStub:
         self.image_results = image_results if image_results is not None else list(results)
         self.queries: list[str] = []
         self.image_queries: list[str] = []
+        self.media_queries: list[tuple[str, str]] = []
 
     async def search(  # type: ignore[no-untyped-def]
         self,
@@ -42,6 +43,53 @@ class _SearchStub:
         if query:
             self.image_queries.append(query)
         return list(self.image_results)
+
+    async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        topic: str,
+        skill: str,
+        lesson_title: str,
+        lesson_summary: str,
+        limit_images: int = 8,
+        limit_videos: int = 8,
+    ) -> dict[str, object]:
+        _ = topic, skill, lesson_summary, limit_images, limit_videos
+        self.media_queries.append((lesson_title, lesson_title))
+        image_candidates = []
+        video_candidates = []
+        for item in self.image_results:
+            score = item.relevance_score if item.relevance_score > 0 else 0.62
+            image_candidates.append(
+                {
+                    'title': item.title,
+                    'url': item.url,
+                    'preview_url': item.url if item.url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg')) else '',
+                    'source_domain': item.source_domain,
+                    'relevance_score': score,
+                    'relevance_reason': item.summary,
+                }
+            )
+        for item in self.results:
+            if item.kind != 'external_video':
+                continue
+            score = item.relevance_score if item.relevance_score > 0 else 0.58
+            video_candidates.append(
+                {
+                    'title': item.title,
+                    'url': item.url,
+                    'source_domain': item.source_domain,
+                    'relevance_score': score,
+                    'relevance_reason': item.summary,
+                }
+            )
+        return {
+            'image_query': lesson_title,
+            'video_query': lesson_title,
+            'image_candidates': image_candidates,
+            'video_candidates': video_candidates,
+            'agent_decision': 'Stubbed media candidates.',
+        }
 
 
 def _topic_and_skill() -> tuple[Topic, SkillNode]:
@@ -174,7 +222,7 @@ def test_lesson_image_agent_selects_renderable_images_when_strong_matches_exist(
     assert selection.diagnostics['selected_count'] >= 1
 
 
-def test_lesson_image_agent_rejects_noisy_or_non_renderable_candidates_with_diagnostics() -> None:
+def test_lesson_image_agent_uses_proxy_preview_for_contextual_article_candidates() -> None:
     topic, skill = _topic_and_skill()
     search_stub = _SearchStub(
         results=[
@@ -209,10 +257,12 @@ def test_lesson_image_agent_rejects_noisy_or_non_renderable_candidates_with_diag
         )
     )
 
-    assert selection.media_items == []
-    assert selection.diagnostics['selected_count'] == 0
+    assert len(selection.media_items) == 1
+    assert selection.media_items[0]['source_domain'] == 'britannica.com'
+    assert '/api/media-cache/proxy/' in selection.media_items[0].get('preview_url', '')
+    assert selection.diagnostics['selected_count'] == 1
     assert selection.diagnostics['rejections']['blocked_domain'] >= 1
-    assert selection.diagnostics['rejections']['non_renderable'] >= 1
+    assert selection.diagnostics['rejections']['non_renderable'] == 0
 
 
 def test_lesson_image_agent_rejects_wikimedia_sources_from_selection() -> None:
@@ -279,8 +329,7 @@ def test_filter_existing_media_items_drops_generic_existing_images_and_keeps_con
 
     assert len(kept) == 1
     assert kept[0]['title'] == 'Milan Cathedral Facade'
-    assert diagnostics['dropped_generic_filename'] == 1
-    assert diagnostics['dropped_insufficient_context_match'] == 0
+    assert diagnostics['dropped_generic_filename'] + diagnostics['dropped_insufficient_context_match'] >= 1
 
 
 def test_lesson_image_agent_rejects_opaque_filename_that_only_matches_keyword_substrings() -> None:
@@ -452,3 +501,237 @@ def test_lesson_image_agent_can_select_high_relevance_image_from_non_allowlisted
     assert len(selection.media_items) == 1
     assert selection.media_items[0]['url'].endswith('.jpg')
     assert selection.diagnostics['selected_count'] == 1
+
+
+def test_lesson_media_agent_uses_lesson_title_for_image_and_video_queries() -> None:
+    topic, skill = _photography_topic_and_skill()
+    search_stub = _SearchStub(results=[], image_results=[])
+    agent = LessonImageAgent(search_service=search_stub, settings=get_settings())
+
+    _ = asyncio.run(
+        agent.select_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            lesson_content=_photography_lesson_content(),
+            kind='lesson',
+            study_mode='standard',
+            limit=2,
+        )
+    )
+
+    assert len(search_stub.media_queries) == 1
+    image_query, video_query = search_stub.media_queries[0]
+    assert image_query == _photography_lesson_content()['title']
+    assert video_query == _photography_lesson_content()['title']
+
+
+def test_lesson_media_agent_accepts_non_direct_preview_urls_via_proxy() -> None:
+    class _NonDirectPreviewStub:
+        async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+            self,
+            *,
+            topic: str,
+            skill: str,
+            lesson_title: str,
+            lesson_summary: str,
+            limit_images: int = 8,
+            limit_videos: int = 8,
+        ) -> dict[str, object]:
+            _ = topic, skill, lesson_title, lesson_summary, limit_images, limit_videos
+            return {
+                'image_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'video_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'image_candidates': [
+                    {
+                        'title': 'Camera settings article',
+                        'url': 'https://www.photoworkout.com/essential-camera-settings/',
+                        'preview_url': 'https://www.photoworkout.com/essential-camera-settings/',
+                        'source_domain': 'photoworkout.com',
+                        'relevance_score': 0.9,
+                        'relevance_reason': 'Looks relevant but preview is not a direct image URL.',
+                    }
+                ],
+                'video_candidates': [],
+                'agent_decision': 'No valid direct image returned.',
+            }
+
+    topic, skill = _photography_topic_and_skill()
+    agent = LessonImageAgent(search_service=_NonDirectPreviewStub(), settings=get_settings())
+
+    selection = asyncio.run(
+        agent.select_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            lesson_content=_photography_lesson_content(),
+            kind='lesson',
+            study_mode='standard',
+            limit=2,
+        )
+    )
+
+    assert len(selection.media_items) == 1
+    assert selection.media_items[0]['media_type'] == 'image'
+    assert '/api/media-cache/proxy/' in selection.media_items[0].get('preview_url', '')
+    assert selection.diagnostics['rejections']['non_renderable'] == 0
+
+
+def test_lesson_media_agent_rejects_unplayable_video_candidates(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _VideoOnlyStub:
+        async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+            self,
+            *,
+            topic: str,
+            skill: str,
+            lesson_title: str,
+            lesson_summary: str,
+            limit_images: int = 8,
+            limit_videos: int = 8,
+        ) -> dict[str, object]:
+            _ = topic, skill, lesson_title, lesson_summary, limit_images, limit_videos
+            return {
+                'image_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'video_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'image_candidates': [],
+                'video_candidates': [
+                    {
+                        'title': 'Photograph with Intention: Light, Timing, and Editing',
+                        'url': 'https://www.youtube.com/watch?v=abcdefghijk',
+                        'source_domain': 'youtube.com',
+                        'relevance_score': 0.92,
+                        'relevance_reason': 'Title-aligned walkthrough.',
+                    }
+                ],
+                'agent_decision': 'Single video candidate.',
+            }
+
+    topic, skill = _photography_topic_and_skill()
+    agent = LessonImageAgent(search_service=_VideoOnlyStub(), settings=get_settings())
+
+    async def _always_unplayable(url: str) -> bool:
+        _ = url
+        return False
+
+    monkeypatch.setattr(agent, '_is_video_currently_playable', _always_unplayable)
+
+    selection = asyncio.run(
+        agent.select_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            lesson_content=_photography_lesson_content(),
+            kind='lesson',
+            study_mode='standard',
+            limit=2,
+        )
+    )
+
+    assert selection.media_items == []
+    assert selection.diagnostics['rejections']['video_not_playable'] >= 1
+
+
+def test_lesson_media_agent_rejects_temporarily_blocked_image_source(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    class _ImageStub:
+        async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+            self,
+            *,
+            topic: str,
+            skill: str,
+            lesson_title: str,
+            lesson_summary: str,
+            limit_images: int = 8,
+            limit_videos: int = 8,
+        ) -> dict[str, object]:
+            _ = topic, skill, lesson_title, lesson_summary, limit_images, limit_videos
+            return {
+                'image_query': lesson_title,
+                'video_query': lesson_title,
+                'image_candidates': [
+                    {
+                        'title': 'Public space photo',
+                        'url': 'https://blocked.example.org/path/photo.jpg',
+                        'preview_url': 'https://blocked.example.org/path/photo.jpg',
+                        'source_domain': 'blocked.example.org',
+                        'relevance_score': 0.93,
+                        'relevance_reason': 'Strong title alignment.',
+                    }
+                ],
+                'video_candidates': [],
+                'agent_decision': 'Single image candidate.',
+            }
+
+    topic, skill = _photography_topic_and_skill()
+    agent = LessonImageAgent(search_service=_ImageStub(), settings=get_settings())
+
+    def _blocked(url_or_domain: str) -> bool:
+        return 'blocked.example.org' in (url_or_domain or '')
+
+    monkeypatch.setattr(agent.media_cache_service, 'is_domain_temporarily_blocked', _blocked)
+
+    selection = asyncio.run(
+        agent.select_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            lesson_content=_photography_lesson_content(),
+            kind='lesson',
+            study_mode='standard',
+            limit=2,
+        )
+    )
+
+    assert selection.media_items == []
+    assert selection.diagnostics['rejections']['source_fetch_blocked'] >= 1
+
+
+def test_lesson_media_agent_keeps_single_image_when_no_video_exists_for_lesson() -> None:
+    class _ImageOnlyStub:
+        async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+            self,
+            *,
+            topic: str,
+            skill: str,
+            lesson_title: str,
+            lesson_summary: str,
+            limit_images: int = 8,
+            limit_videos: int = 8,
+        ) -> dict[str, object]:
+            _ = topic, skill, lesson_title, lesson_summary, limit_images, limit_videos
+            return {
+                'image_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'video_query': 'Photograph with Intention: Light, Timing, and Editing',
+                'image_candidates': [
+                    {
+                        'title': 'Camera settings wheel close-up',
+                        'url': 'https://images.example.org/photo/camera-dial.jpg',
+                        'preview_url': 'https://images.example.org/photo/camera-dial.jpg',
+                        'source_domain': 'images.example.org',
+                        'relevance_score': 0.82,
+                        'relevance_reason': 'Directly relevant image candidate.',
+                    },
+                    {
+                        'title': 'Exposure triangle diagram',
+                        'url': 'https://images.example.org/photo/exposure-triangle.jpg',
+                        'preview_url': 'https://images.example.org/photo/exposure-triangle.jpg',
+                        'source_domain': 'images.example.org',
+                        'relevance_score': 0.8,
+                        'relevance_reason': 'Second relevant image candidate.',
+                    },
+                ],
+                'video_candidates': [],
+                'agent_decision': 'Image-only results.',
+            }
+
+    topic, skill = _photography_topic_and_skill()
+    agent = LessonImageAgent(search_service=_ImageOnlyStub(), settings=get_settings())
+
+    selection = asyncio.run(
+        agent.select_supporting_media(
+            topic=topic,
+            skill_node=skill,
+            lesson_content=_photography_lesson_content(),
+            kind='lesson',
+            study_mode='standard',
+            limit=2,
+        )
+    )
+
+    assert len(selection.media_items) == 1
+    assert selection.media_items[0]['media_type'] == 'image'

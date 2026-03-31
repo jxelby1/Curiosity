@@ -35,6 +35,51 @@ class _SearchStub:
         _ = topic, skill, query, limit, source_policy
         return list(self._results)
 
+    async def search_lesson_media_candidates(  # type: ignore[no-untyped-def]
+        self,
+        *,
+        topic: str,
+        skill: str,
+        lesson_title: str,
+        lesson_summary: str,
+        limit_images: int = 8,
+        limit_videos: int = 8,
+    ) -> dict[str, object]:
+        _ = topic, skill, lesson_summary, limit_images, limit_videos
+        image_candidates = []
+        video_candidates = []
+        for item in self._results:
+            domain = item.source_domain
+            score = item.relevance_score if item.relevance_score > 0 else (0.58 if item.kind == 'external_video' else 0.62)
+            if item.kind == 'external_video':
+                video_candidates.append(
+                    {
+                        'title': item.title,
+                        'url': item.url,
+                        'source_domain': domain,
+                        'relevance_score': score,
+                        'relevance_reason': item.summary,
+                    }
+                )
+                continue
+            image_candidates.append(
+                {
+                    'title': item.title,
+                    'url': item.url,
+                    'preview_url': item.url if item.url.lower().endswith(('.png', '.jpg', '.jpeg', '.webp', '.gif', '.svg')) else '',
+                    'source_domain': domain,
+                    'relevance_score': score,
+                    'relevance_reason': item.summary,
+                }
+            )
+        return {
+            'image_query': lesson_title,
+            'video_query': lesson_title,
+            'image_candidates': image_candidates,
+            'video_candidates': video_candidates,
+            'agent_decision': 'Stubbed media candidates.',
+        }
+
 
 def _agent_with_results(results: list[SearchResult]) -> ResourceAgent:
     return ResourceAgent(
@@ -112,7 +157,8 @@ def test_strict_media_filter_returns_empty_for_low_relevance_candidates() -> Non
             title='Completely unrelated economics article',
             url='https://www.britannica.com/money/finance',
             kind='external_article',
-            summary='No mention of art history or Klimt.',
+            summary='Macroeconomic indicators and central banking overview.',
+            relevance_score=0.03,
         ),
         SearchResult(
             title='Travel vlog',
@@ -229,7 +275,7 @@ def test_strict_media_filter_keeps_map_references_from_trusted_sources() -> None
     assert len(media) == 1
     assert media[0]['source_domain'] == 'loc.gov'
     assert media[0]['media_type'] == 'image'
-    assert media[0].get('preview_url', '').endswith('.jpg')
+    assert '/api/media-cache/proxy/' in media[0].get('preview_url', '')
 
 
 def test_social_media_candidates_are_blocked_even_in_development_fallback() -> None:

@@ -124,60 +124,6 @@ function questionTypeLabel(questionType: Assessment['questions'][number]['questi
   return 'Reflection';
 }
 
-function isDirectImageUrl(url: string): boolean {
-  return /\.(png|jpe?g|webp|gif|svg)(\?.*)?$/i.test(url);
-}
-
-function renderableImageUrl(url: string, previewUrl?: string | null): string | null {
-  const normalizedPreview = (previewUrl || '').trim();
-  if (normalizedPreview && isDirectImageUrl(normalizedPreview)) return normalizedPreview;
-  return isDirectImageUrl(url) ? url : null;
-}
-
-function toYouTubeEmbedUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.toLowerCase();
-    if (host.includes('youtu.be')) {
-      const id = parsed.pathname.replace('/', '').trim();
-      return id ? `https://www.youtube-nocookie.com/embed/${id}` : null;
-    }
-    if (host.includes('youtube.com')) {
-      const id = parsed.searchParams.get('v');
-      return id ? `https://www.youtube-nocookie.com/embed/${id}` : null;
-    }
-  } catch {
-    return null;
-  }
-  return null;
-}
-
-function toVimeoEmbedUrl(url: string): string | null {
-  try {
-    const parsed = new URL(url);
-    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
-    if (!host.includes('vimeo.com')) return null;
-    const segments = parsed.pathname.split('/').filter(Boolean);
-    const id = segments.find((segment) => /^\d+$/.test(segment));
-    return id ? `https://player.vimeo.com/video/${id}` : null;
-  } catch {
-    return null;
-  }
-}
-
-function isDirectVideoUrl(url: string): boolean {
-  return /\.(mp4|webm|ogg|mov|m4v)(\?.*)?$/i.test(url);
-}
-
-function toVideoEmbedSource(url: string): { kind: 'iframe' | 'native'; src: string } | null {
-  const youtube = toYouTubeEmbedUrl(url);
-  if (youtube) return { kind: 'iframe', src: youtube };
-  const vimeo = toVimeoEmbedUrl(url);
-  if (vimeo) return { kind: 'iframe', src: vimeo };
-  if (isDirectVideoUrl(url)) return { kind: 'native', src: url };
-  return null;
-}
-
 function assessmentStyleLabel(style: AssessmentStyle | string): string {
   if (style === 'open_text') return 'Open Text';
   if (style === 'short_answer') return 'Short Answer';
@@ -976,47 +922,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
     }
   }
 
-  useEffect(() => {
-    const skillId = selectedSkill?.id;
-    if (!skillId) return;
-    if (typeof window === 'undefined') return;
-    const debugEnabled = window.localStorage.getItem('canopy_debug_media') === '1' || process.env.NODE_ENV !== 'production';
-    if (!debugEnabled) return;
-
-    const lessonContent = parseLessonContent(contentCache[skillId]?.resources?.lesson?.structured_content);
-    if (!lessonContent) return;
-    const media = lessonContent.supporting_media || [];
-    const renderableImages = media.filter((item) => !!renderableImageUrl(item.url, item.preview_url)).length;
-    console.info('ui.lesson_media_render', {
-      topicId,
-      skillId,
-      mediaCount: media.length,
-      renderableImages,
-      videoCount: media.filter((item) => item.media_type === 'video').length,
-    });
-  }, [topicId, selectedSkill?.id, contentCache]);
-
-  useEffect(() => {
-    const skillId = selectedSkill?.id;
-    if (!skillId) return;
-    if (typeof window === 'undefined') return;
-    const debugEnabled = window.localStorage.getItem('canopy_debug_media') === '1' || process.env.NODE_ENV !== 'production';
-    if (!debugEnabled) return;
-
-    const deepLessonPayload = contentCache[skillId]?.deepLesson;
-    const deepLessonParsed = parseDeepLessonContent(deepLessonPayload?.structured_content);
-    if (!deepLessonParsed) return;
-    const media = deepLessonParsed.supporting_media || [];
-    const renderableImages = media.filter((item) => !!renderableImageUrl(item.url, item.preview_url)).length;
-    console.info('ui.deep_lesson_media_render', {
-      topicId,
-      skillId,
-      mediaCount: media.length,
-      renderableImages,
-      videoCount: media.filter((item) => item.media_type === 'video').length,
-    });
-  }, [topicId, selectedSkill?.id, contentCache]);
-
   if (!tree && loadingTree) return <SkillWorkspaceSkeleton />;
 
   if (!tree || !selectedSkill) {
@@ -1071,7 +976,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
   const deepLessonContent = parseDeepLessonContent(deepLesson?.structured_content);
   const examples = parseExamplesContent(examplesResource?.structured_content);
   const exercises = parseExercisesContent(exercisesResource?.structured_content);
-  const deepLessonHasInlineMedia = (deepLessonContent?.supporting_media?.length || 0) > 0;
   const lessonComplete = selectedSkill.lesson_completed;
   const exercisesComplete = selectedSkill.exercises_completed;
   const quizTaken = selectedSkill.quiz_taken;
@@ -1544,79 +1448,6 @@ export default function SkillWorkspacePage({ params }: { params: { topicId: stri
                 <div className="rounded-xl border border-black/10 bg-white p-4 text-sm">
                   Deep-lesson format was invalid. Regenerate to refresh this content.
                 </div>
-              )}
-
-              {deepLesson && !deepLessonHasInlineMedia && (
-                <section className="rounded-xl border border-black/10 bg-white p-4">
-                  <div className="mb-2">
-                    <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-black/65">
-                      Supporting media (strict relevance)
-                    </h3>
-                    <p className="muted mt-1 text-xs">
-                      Only high-confidence supporting media from established sources is shown here.
-                    </p>
-                  </div>
-                  {deepLesson.supporting_media.length === 0 ? (
-                    <p className="muted rounded-md border border-dashed border-black/15 bg-paper/40 p-3 text-sm">
-                      No clearly relevant supporting media found for this node yet.
-                    </p>
-                  ) : (
-                    <div className="space-y-3">
-                      {deepLesson.supporting_media.map((item) => {
-                        const embedSource = item.media_type === 'video' ? toVideoEmbedSource(item.url) : null;
-                        const imageUrl = item.media_type === 'image' ? renderableImageUrl(item.url, item.preview_url) : null;
-                        const showImage = Boolean(imageUrl);
-                        return (
-                          <article key={item.url} className="rounded-lg border border-black/10 bg-paper/40 p-3">
-                            <div className="mb-2 flex flex-wrap items-center gap-2 text-xs">
-                              <span className="badge">{item.media_type === 'video' ? 'Video' : 'Image'}</span>
-                              <span className="badge">{item.source_domain}</span>
-                            </div>
-                            <p className="text-sm font-semibold">{item.title}</p>
-                            <p className="muted mt-1 text-xs">{item.relevance_reason}</p>
-
-                            {embedSource?.kind === 'iframe' && (
-                              <div className="mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5">
-                                <iframe
-                                  src={embedSource.src}
-                                  title={item.title}
-                                  className="h-64 w-full"
-                                  loading="lazy"
-                                  referrerPolicy="strict-origin-when-cross-origin"
-                                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                                  allowFullScreen
-                                />
-                              </div>
-                            )}
-                            {embedSource?.kind === 'native' && (
-                              <div className="mt-3 overflow-hidden rounded-md border border-black/10 bg-black/5">
-                                <video controls preload="metadata" className="h-64 w-full bg-black">
-                                  <source src={embedSource.src} />
-                                </video>
-                              </div>
-                            )}
-                            {showImage && (
-                              <img
-                                src={imageUrl || item.url}
-                                alt={item.title}
-                                loading="lazy"
-                                className="mt-3 max-h-80 w-full rounded-md border border-black/10 object-contain bg-white"
-                              />
-                            )}
-                            <a
-                              href={item.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="mt-2 inline-flex text-xs text-ink underline underline-offset-4"
-                            >
-                              Open source
-                            </a>
-                          </article>
-                        );
-                      })}
-                    </div>
-                  )}
-                </section>
               )}
             </div>
           )}

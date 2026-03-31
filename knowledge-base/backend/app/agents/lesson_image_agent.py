@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import parse_qs, unquote, urlparse
 
+import httpx
+
 from app.core.config import Settings
 from app.db.models import SkillNode, Topic
-from app.services.search import ExternalSearchService, SearchResult
+from app.services.media_cache import MediaCacheService
+from app.services.search import ExternalSearchService, LessonMediaCandidate
 
 
 logger = logging.getLogger(__name__)
@@ -155,6 +158,9 @@ _GENERIC_FILE_PREFIXES = (
     'chapter',
     'image',
     'img',
+    'logo',
+    'icon',
+    'banner',
     'photo',
     'picture',
     'figure',
@@ -304,10 +310,24 @@ class LessonImageSelection:
     diagnostics: dict[str, Any]
 
 
+@dataclass
+class LessonMediaSelection:
+    media_items: list[dict[str, str]]
+    diagnostics: dict[str, Any]
+
+
 class LessonImageAgent:
-    def __init__(self, *, search_service: ExternalSearchService, settings: Settings) -> None:
+    def __init__(
+        self,
+        *,
+        search_service: ExternalSearchService,
+        settings: Settings,
+        media_cache_service: MediaCacheService | None = None,
+    ) -> None:
         self.search_service = search_service
         self.settings = settings
+        self.media_cache_service = media_cache_service or MediaCacheService(settings=settings)
+        self._video_playable_cache: dict[str, bool] = {}
 
     def _domain_for_url(self, url: str) -> str:
         host = urlparse(url).netloc.lower().strip()
@@ -321,10 +341,21 @@ class LessonImageAgent:
             return False
         return lowered.endswith(_DIRECT_IMAGE_EXTENSIONS)
 
+    def _is_media_proxy_url(self, url: str) -> bool:
+        return '/api/media-cache/proxy/' in (url or '').lower()
+
     def _preview_url_for_candidate(self, url: str) -> str | None:
         if self._is_direct_image_url(url):
             return url
         return None
+
+    def _proxy_preview_url(self, *, preview_url: str, source_url: str) -> str:
+        proxied = self.media_cache_service.build_proxy_url(preferred_url=preview_url, source_url=source_url)
+        if proxied:
+            return proxied
+        if self._is_direct_image_url(preview_url) or self._is_media_proxy_url(preview_url):
+            return preview_url
+        return ''
 
     def canonical_media_url(self, url: str) -> str:
         raw = (url or '').strip()
@@ -357,6 +388,133 @@ class LessonImageAgent:
         if not normalized_path:
             normalized_path = '/'
         return f'{host}{normalized_path}'
+
+    def _is_direct_video_url(self, url: str) -> bool:
+        lowered = (url or '').lower().split('?', 1)[0].split('#', 1)[0]
+        return lowered.endswith(('.mp4', '.webm', '.ogg', '.mov', '.m4v'))
+
+    def _is_embeddable_video_url(self, url: str) -> bool:
+        host = self._domain_for_url(url)
+        if host in {'youtube.com', 'm.youtube.com', 'youtu.be', 'vimeo.com', 'player.vimeo.com'}:
+            return True
+        return self._is_direct_video_url(url)
+
+    def _youtube_video_id(self, url: str) -> str:
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return ''
+        host = (parsed.netloc or '').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if host in {'youtube.com', 'm.youtube.com'}:
+            query = parse_qs(parsed.query or '')
+            candidate = (query.get('v') or [''])[0].strip()
+            if len(candidate) == 11:
+                return candidate
+            parts = [part for part in (parsed.path or '').split('/') if part]
+            if len(parts) >= 2 and parts[0] in {'embed', 'shorts'} and len(parts[1]) == 11:
+                return parts[1]
+        if host == 'youtu.be':
+            candidate = (parsed.path or '').strip('/').split('/', 1)[0].strip()
+            if len(candidate) == 11:
+                return candidate
+        return ''
+
+    def _vimeo_video_id(self, url: str) -> str:
+        try:
+            parsed = urlparse(url)
+        except ValueError:
+            return ''
+        host = (parsed.netloc or '').lower()
+        if host.startswith('www.'):
+            host = host[4:]
+        if 'vimeo.com' not in host:
+            return ''
+        for segment in (parsed.path or '').split('/'):
+            if segment.isdigit():
+                return segment
+        return ''
+
+    async def _is_video_currently_playable(self, url: str) -> bool:
+        cache_key = self.canonical_media_url(url) or (url or '').strip().lower()
+        if cache_key in self._video_playable_cache:
+            return self._video_playable_cache[cache_key]
+
+        target = (url or '').strip()
+        if not target:
+            self._video_playable_cache[cache_key] = False
+            return False
+
+        try:
+            youtube_id = self._youtube_video_id(target)
+            if youtube_id:
+                endpoint = f'https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={youtube_id}&format=json'
+                async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                    response = await client.get(endpoint)
+                playable = response.status_code == 200
+                self._video_playable_cache[cache_key] = playable
+                return playable
+
+            vimeo_id = self._vimeo_video_id(target)
+            if vimeo_id:
+                endpoint = f'https://vimeo.com/api/oembed.json?url=https://vimeo.com/{vimeo_id}'
+                async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                    response = await client.get(endpoint)
+                playable = response.status_code == 200
+                self._video_playable_cache[cache_key] = playable
+                return playable
+
+            if self._is_direct_video_url(target):
+                async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as client:
+                    response = await client.head(target)
+                    if response.status_code >= 400:
+                        response = await client.get(target, headers={'Range': 'bytes=0-0'})
+                content_type = (response.headers.get('content-type') or '').lower()
+                playable = response.status_code < 400 and ('video/' in content_type or target.lower().endswith(('.mp4', '.webm', '.ogg', '.mov', '.m4v')))
+                self._video_playable_cache[cache_key] = playable
+                return playable
+        except Exception:  # noqa: BLE001
+            self._video_playable_cache[cache_key] = False
+            return False
+
+        self._video_playable_cache[cache_key] = True
+        return True
+
+    def _video_title_similarity(self, *, node_title: str, candidate_title: str) -> float:
+        node_tokens = set(self._tokenize(node_title))
+        candidate_tokens = set(self._tokenize(candidate_title))
+        if not node_tokens or not candidate_tokens:
+            return 0.0
+        overlap = len(node_tokens.intersection(candidate_tokens))
+        return overlap / max(len(node_tokens), 1)
+
+    def _coerce_media_candidate(self, value: Any, *, media_type: Literal['image', 'video']) -> LessonMediaCandidate | None:
+        if isinstance(value, LessonMediaCandidate):
+            if value.media_type != media_type:
+                return None
+            return value
+        if not isinstance(value, dict):
+            return None
+        url = str(value.get('url') or '').strip()
+        if not url:
+            return None
+        preview_url = str(value.get('preview_url') or '').strip()
+        source_domain = str(value.get('source_domain') or '').strip()
+        score_raw = value.get('relevance_score')
+        try:
+            score = float(score_raw)
+        except (TypeError, ValueError):
+            score = 0.0
+        return LessonMediaCandidate(
+            title=str(value.get('title') or '').strip() or 'Supporting reference',
+            url=url,
+            media_type=media_type,
+            source_domain=source_domain,
+            relevance_score=max(0.0, min(1.0, score)),
+            relevance_reason=str(value.get('relevance_reason') or '').strip(),
+            preview_url=preview_url,
+        )
 
     def _tokenize(self, text: str) -> list[str]:
         raw = re.findall(r'[a-z0-9]{3,}', (text or '').lower())
@@ -661,6 +819,7 @@ class LessonImageAgent:
             'dropped_generic_filename': 0,
             'dropped_insufficient_context_match': 0,
             'dropped_mode_mismatch': 0,
+            'dropped_source_fetch_blocked': 0,
         }
         kept: list[dict[str, str]] = []
         for item in media_items:
@@ -671,6 +830,21 @@ class LessonImageAgent:
             title = str(item.get('title') or '').strip()
             summary = str(item.get('relevance_reason') or '').strip()
             url = str(item.get('url') or '').strip()
+            source_domain = self._domain_for_url(url)
+            if self.media_cache_service.is_domain_temporarily_blocked(url) or (
+                source_domain and self.media_cache_service.is_domain_temporarily_blocked(source_domain)
+            ):
+                diagnostics['dropped_source_fetch_blocked'] += 1
+                continue
+            preview_url = str(item.get('preview_url') or '').strip()
+            normalized_preview = ''
+            if preview_url and (self._is_direct_image_url(preview_url) or self._is_media_proxy_url(preview_url)):
+                normalized_preview = preview_url
+            if not normalized_preview and (self._is_direct_image_url(url) or url.startswith('http')):
+                normalized_preview = url
+            if not normalized_preview:
+                diagnostics['dropped_insufficient_context_match'] += 1
+                continue
             passed, reason = self._context_match_reason(
                 title=title,
                 summary=summary,
@@ -687,9 +861,319 @@ class LessonImageAgent:
                 else:
                     diagnostics['dropped_insufficient_context_match'] += 1
                 continue
+            proxied_preview = self._proxy_preview_url(preview_url=normalized_preview, source_url=url)
+            if not proxied_preview:
+                diagnostics['dropped_insufficient_context_match'] += 1
+                continue
+            item['preview_url'] = proxied_preview
             kept.append(item)
             diagnostics['kept'] += 1
         return kept, diagnostics
+
+    async def select_supporting_media(
+        self,
+        *,
+        topic: Topic,
+        skill_node: SkillNode,
+        lesson_content: dict[str, Any],
+        kind: str,
+        study_mode: str,
+        limit: int,
+        exclude_media_keys: set[str] | None = None,
+    ) -> LessonMediaSelection:
+        visual_decision = self.assess_visual_support(
+            topic=topic,
+            skill_node=skill_node,
+            lesson_content=lesson_content,
+            kind=kind,
+            study_mode=study_mode,
+        )
+        lesson_title = str(lesson_content.get('title') or skill_node.name).strip() or skill_node.name
+        lesson_summary = str(lesson_content.get('summary') or skill_node.description or '').strip()
+        diagnostics: dict[str, Any] = {
+            'topic_id': topic.id,
+            'skill_id': skill_node.id,
+            'kind': kind,
+            'study_mode': study_mode,
+            'lesson_title': lesson_title,
+            'visual_support_needed': visual_decision['visual_support_needed'],
+            'visual_priority': visual_decision['visual_priority'],
+            'visual_mode': visual_decision.get('visual_mode', 'general'),
+            'decision_reason': visual_decision['reason'],
+            'image_query': lesson_title,
+            'video_query': lesson_title,
+            'candidate_counts': {'images': 0, 'videos': 0},
+            'selected_counts': {'images': 0, 'videos': 0},
+            'candidate_domains': [],
+            'selected_image_url': '',
+            'selected_image_preview_url': '',
+            'selected_video_url': '',
+            'agent_decision': '',
+            'rejections': {
+                'blocked_domain': 0,
+                'deemphasized_domain': 0,
+                'untrusted_domain': 0,
+                'non_renderable': 0,
+                'generic_filename': 0,
+                'insufficient_context_match': 0,
+                'mode_mismatch': 0,
+                'low_relevance': 0,
+                'video_not_embeddable': 0,
+                'video_not_playable': 0,
+                'video_title_mismatch': 0,
+                'source_fetch_blocked': 0,
+                'duplicate': 0,
+                'used_by_other_node': 0,
+            },
+        }
+
+        if not visual_decision['visual_support_needed']:
+            logger.info(
+                'resource.lesson_media_selection topic_id=%s skill_id=%s kind=%s selected=0 reason=%s',
+                topic.id,
+                skill_node.id,
+                kind,
+                visual_decision['reason'],
+            )
+            return LessonMediaSelection(media_items=[], diagnostics=diagnostics)
+
+        keywords = self._extract_keywords(topic=topic, skill_node=skill_node, lesson_content=lesson_content)
+        keyword_tokens = self._keyword_tokens(keywords=keywords)
+        anchor_tokens = self._anchor_tokens(topic=topic, skill_node=skill_node)
+        visual_mode = str(visual_decision.get('visual_mode') or 'general')
+        blocked_keys = {item for item in (exclude_media_keys or set()) if item}
+        required_video_for_lesson = kind == 'lesson'
+
+        try:
+            media_payload = await self.search_service.search_lesson_media_candidates(
+                topic=topic.name,
+                skill=skill_node.name,
+                lesson_title=lesson_title,
+                lesson_summary=lesson_summary,
+                limit_images=max(6, limit * 3),
+                limit_videos=max(6, limit * 3),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                'resource.lesson_media_web_search_error topic_id=%s skill_id=%s lesson_title=%s error=%s',
+                topic.id,
+                skill_node.id,
+                lesson_title,
+                exc,
+            )
+            return LessonMediaSelection(media_items=[], diagnostics=diagnostics)
+
+        diagnostics['image_query'] = str(media_payload.get('image_query') or lesson_title)
+        diagnostics['video_query'] = str(media_payload.get('video_query') or lesson_title)
+        diagnostics['agent_decision'] = str(media_payload.get('agent_decision') or '')
+
+        raw_image_candidates = media_payload.get('image_candidates') or []
+        raw_video_candidates = media_payload.get('video_candidates') or []
+        image_candidates = [
+            candidate
+            for candidate in (
+                self._coerce_media_candidate(item, media_type='image') for item in raw_image_candidates
+            )
+            if candidate is not None
+        ]
+        video_candidates = [
+            candidate
+            for candidate in (
+                self._coerce_media_candidate(item, media_type='video') for item in raw_video_candidates
+            )
+            if candidate is not None
+        ]
+        diagnostics['candidate_counts']['images'] = len(image_candidates)
+        diagnostics['candidate_counts']['videos'] = len(video_candidates)
+        diagnostics['candidate_domains'] = sorted(
+            {
+                self._domain_for_url(candidate.url)
+                or str(candidate.source_domain or '').lower()
+                for candidate in [*image_candidates, *video_candidates]
+                if candidate.url
+            }
+        )[:16]
+
+        selected_images: list[tuple[float, dict[str, str]]] = []
+        selected_videos: list[tuple[float, dict[str, str]]] = []
+        seen_keys: set[str] = set()
+        base_threshold = 0.22 if visual_decision['visual_priority'] == 'high' else 0.28
+
+        for candidate in image_candidates:
+            candidate_key = self.canonical_media_url(candidate.url)
+            if candidate_key and candidate_key in blocked_keys:
+                diagnostics['rejections']['used_by_other_node'] += 1
+                continue
+            if candidate_key and candidate_key in seen_keys:
+                diagnostics['rejections']['duplicate'] += 1
+                continue
+
+            source_domain = candidate.source_domain or self._domain_for_url(candidate.url)
+            if self._is_blocked_domain(source_domain):
+                diagnostics['rejections']['blocked_domain'] += 1
+                continue
+            if self.media_cache_service.is_domain_temporarily_blocked(candidate.url) or (
+                source_domain and self.media_cache_service.is_domain_temporarily_blocked(source_domain)
+            ):
+                diagnostics['rejections']['source_fetch_blocked'] += 1
+                continue
+            if self._is_deemphasized_domain(source_domain):
+                diagnostics['rejections']['deemphasized_domain'] += 1
+                continue
+
+            preview_hint = candidate.preview_url.strip() or self._preview_url_for_candidate(candidate.url) or candidate.url
+            if not preview_hint:
+                diagnostics['rejections']['non_renderable'] += 1
+                continue
+            preview_url = self._proxy_preview_url(preview_url=preview_hint, source_url=candidate.url)
+            if not preview_url:
+                diagnostics['rejections']['non_renderable'] += 1
+                continue
+
+            context_ok, context_reason = self._context_match_reason(
+                title=candidate.title,
+                summary=candidate.relevance_reason,
+                url=candidate.url,
+                anchor_tokens=anchor_tokens,
+                keyword_tokens=keyword_tokens,
+                visual_mode=visual_mode,
+            )
+            if not context_ok:
+                diagnostics['rejections'][context_reason] += 1
+                continue
+
+            score = max(
+                candidate.relevance_score,
+                self._candidate_relevance_score(
+                    title=candidate.title,
+                    summary=candidate.relevance_reason,
+                    url=candidate.url,
+                    keywords=keywords,
+                    visual_mode=visual_mode,
+                ),
+            )
+            if self._is_trusted_domain(source_domain):
+                score = min(1.0, score + 0.05)
+            elif score < (base_threshold + 0.08):
+                diagnostics['rejections']['untrusted_domain'] += 1
+                continue
+            if score < base_threshold:
+                diagnostics['rejections']['low_relevance'] += 1
+                continue
+
+            selected_images.append(
+                (
+                    score,
+                    {
+                        'title': candidate.title,
+                        'url': candidate.url,
+                        'preview_url': self._proxy_preview_url(preview_url=preview_url, source_url=candidate.url),
+                        'media_type': 'image',
+                        'source_domain': source_domain,
+                        'relevance_reason': candidate.relevance_reason
+                        or 'Selected because this image concretely supports observation in this lesson.',
+                    },
+                )
+            )
+            if candidate_key:
+                seen_keys.add(candidate_key)
+
+        for candidate in video_candidates:
+            candidate_key = self.canonical_media_url(candidate.url)
+            if candidate_key and candidate_key in blocked_keys:
+                diagnostics['rejections']['used_by_other_node'] += 1
+                continue
+            if candidate_key and candidate_key in seen_keys:
+                diagnostics['rejections']['duplicate'] += 1
+                continue
+
+            source_domain = candidate.source_domain or self._domain_for_url(candidate.url)
+            if self._is_blocked_domain(source_domain):
+                diagnostics['rejections']['blocked_domain'] += 1
+                continue
+            if not self._is_embeddable_video_url(candidate.url):
+                diagnostics['rejections']['video_not_embeddable'] += 1
+                continue
+            if not await self._is_video_currently_playable(candidate.url):
+                diagnostics['rejections']['video_not_playable'] += 1
+                continue
+            title_similarity = self._video_title_similarity(node_title=skill_node.name, candidate_title=candidate.title)
+            if title_similarity < 0.16:
+                diagnostics['rejections']['video_title_mismatch'] += 1
+                continue
+
+            score = max(candidate.relevance_score, title_similarity)
+            if score < 0.18:
+                diagnostics['rejections']['low_relevance'] += 1
+                continue
+
+            selected_videos.append(
+                (
+                    score,
+                    {
+                        'title': candidate.title,
+                        'url': candidate.url,
+                        'media_type': 'video',
+                        'source_domain': source_domain,
+                        'relevance_reason': candidate.relevance_reason
+                        or 'Selected because this video is closely aligned with the lesson title and objective.',
+                    },
+                )
+            )
+            if candidate_key:
+                seen_keys.add(candidate_key)
+
+        selected_images.sort(key=lambda item: item[0], reverse=True)
+        selected_videos.sort(key=lambda item: item[0], reverse=True)
+
+        selected_items: list[dict[str, str]] = []
+        if selected_images:
+            selected_items.append(selected_images[0][1])
+        if selected_videos and (required_video_for_lesson or len(selected_items) < limit):
+            selected_items.append(selected_videos[0][1])
+
+        # For lesson nodes, prefer one clear image + one clear video, not multiple images/videos.
+        if required_video_for_lesson:
+            selected_items = selected_items[:2]
+        else:
+            overflow_pool = [*(entry for _, entry in selected_images[1:]), *(entry for _, entry in selected_videos[1:])]
+            for entry in overflow_pool:
+                if len(selected_items) >= limit:
+                    break
+                entry_key = self.canonical_media_url(entry.get('url', ''))
+                existing = {self.canonical_media_url(item.get('url', '')) for item in selected_items if item.get('url')}
+                if entry_key and entry_key in existing:
+                    continue
+                selected_items.append(entry)
+
+        selected_items = selected_items[:limit]
+        diagnostics['selected_counts']['images'] = sum(1 for item in selected_items if item['media_type'] == 'image')
+        diagnostics['selected_counts']['videos'] = sum(1 for item in selected_items if item['media_type'] == 'video')
+        diagnostics['selected_image_url'] = next((item['url'] for item in selected_items if item['media_type'] == 'image'), '')
+        diagnostics['selected_image_preview_url'] = next(
+            (str(item.get('preview_url') or '') for item in selected_items if item['media_type'] == 'image'),
+            '',
+        )
+        diagnostics['selected_video_url'] = next((item['url'] for item in selected_items if item['media_type'] == 'video'), '')
+
+        logger.info(
+            'resource.lesson_media_selection topic_id=%s skill_id=%s kind=%s lesson_title=%s image_query=%s video_query=%s candidates=%s selected=%s selected_image=%s selected_image_preview=%s selected_video=%s domains=%s rejections=%s agent_decision=%s',
+            topic.id,
+            skill_node.id,
+            kind,
+            lesson_title,
+            diagnostics['image_query'],
+            diagnostics['video_query'],
+            diagnostics['candidate_counts'],
+            diagnostics['selected_counts'],
+            diagnostics['selected_image_url'],
+            diagnostics['selected_image_preview_url'],
+            diagnostics['selected_video_url'],
+            diagnostics['candidate_domains'],
+            diagnostics['rejections'],
+            diagnostics['agent_decision'],
+        )
+        return LessonMediaSelection(media_items=selected_items, diagnostics=diagnostics)
 
     async def select_supporting_images(
         self,
@@ -702,209 +1186,22 @@ class LessonImageAgent:
         limit: int,
         exclude_media_keys: set[str] | None = None,
     ) -> LessonImageSelection:
-        visual_decision = self.assess_visual_support(
+        media_selection = await self.select_supporting_media(
             topic=topic,
             skill_node=skill_node,
             lesson_content=lesson_content,
             kind=kind,
             study_mode=study_mode,
+            limit=max(2, limit),
+            exclude_media_keys=exclude_media_keys,
         )
-        diagnostics: dict[str, Any] = {
-            'topic_id': topic.id,
-            'skill_id': skill_node.id,
-            'kind': kind,
-            'study_mode': study_mode,
-            'visual_support_needed': visual_decision['visual_support_needed'],
-            'visual_priority': visual_decision['visual_priority'],
-            'visual_mode': visual_decision.get('visual_mode', 'general'),
-            'decision_reason': visual_decision['reason'],
-            'queries': [],
-            'candidate_count': 0,
-            'candidate_domains': [],
-            'renderable_urls_found': 0,
-            'selected_count': 0,
-            'rejections': {
-                'blocked_domain': 0,
-                'deemphasized_domain': 0,
-                'untrusted_domain': 0,
-                'non_renderable': 0,
-                'generic_filename': 0,
-                'insufficient_context_match': 0,
-                'mode_mismatch': 0,
-                'low_relevance': 0,
-                'duplicate': 0,
-                'used_by_other_node': 0,
-            },
-        }
-        if not visual_decision['visual_support_needed']:
-            logger.info(
-                'resource.lesson_image_selection topic_id=%s skill_id=%s kind=%s visual_support_needed=%s priority=%s selected=0 reason=%s',
-                topic.id,
-                skill_node.id,
-                kind,
-                False,
-                visual_decision['visual_priority'],
-                visual_decision['reason'],
-            )
-            return LessonImageSelection(media_items=[], diagnostics=diagnostics)
+        image_items = [item for item in media_selection.media_items if item.get('media_type') == 'image'][:limit]
 
-        queries = self._build_image_queries(
-            topic=topic,
-            skill_node=skill_node,
-            lesson_content=lesson_content,
-            visual_priority=visual_decision['visual_priority'],
-            visual_mode=str(visual_decision.get('visual_mode') or 'general'),
-        )
-        diagnostics['queries'] = queries
-        keywords = self._extract_keywords(topic=topic, skill_node=skill_node, lesson_content=lesson_content)
-        keyword_tokens = self._keyword_tokens(keywords=keywords)
-        anchor_tokens = self._anchor_tokens(topic=topic, skill_node=skill_node)
-        visual_mode = str(visual_decision.get('visual_mode') or 'general')
-
-        raw_candidates: list[dict[str, str]] = []
-        for query in queries:
-            try:
-                if hasattr(self.search_service, 'search_images'):
-                    web_results = await self.search_service.search_images(
-                        topic.name,
-                        skill_node.name,
-                        query=query,
-                        limit=max(8, limit * 4),
-                        source_policy='strict_media',
-                    )
-                else:
-                    web_results = await self.search_service.search(
-                        topic.name,
-                        skill_node.name,
-                        query=query,
-                        limit=max(8, limit * 4),
-                        source_policy='strict_media',
-                    )
-            except TypeError:
-                web_results = await self.search_service.search(
-                    topic.name,
-                    skill_node.name,
-                    query=query,
-                    limit=max(8, limit * 4),
-                    source_policy='strict_media',
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.info(
-                    'resource.lesson_image_web_search_error topic_id=%s skill_id=%s query=%s error=%s',
-                    topic.id,
-                    skill_node.id,
-                    query,
-                    exc,
-                )
-                web_results = []
-
-            for item in web_results:
-                raw_candidates.append(
-                    {
-                        'title': item.title,
-                        'url': item.url,
-                        'summary': item.summary,
-                        'source_domain': item.source_domain or self._domain_for_url(item.url),
-                        'origin': 'web',
-                        'kind': item.kind,
-                    }
-                )
-
-        diagnostics['candidate_count'] = len(raw_candidates)
-        diagnostics['candidate_domains'] = sorted({self._domain_for_url(item.get('url', '')) for item in raw_candidates if item.get('url')})[:16]
-
-        selected: list[tuple[float, dict[str, str]]] = []
-        seen_urls: set[str] = set()
-        blocked_keys = {item for item in (exclude_media_keys or set()) if item}
-        threshold = 0.16 if visual_decision['visual_priority'] == 'high' else 0.2
-        for candidate in raw_candidates:
-            url = str(candidate.get('url') or '').strip()
-            if not url:
-                continue
-            candidate_key = self.canonical_media_url(url)
-            if candidate_key and candidate_key in blocked_keys:
-                diagnostics['rejections']['used_by_other_node'] += 1
-                continue
-            if url in seen_urls:
-                diagnostics['rejections']['duplicate'] += 1
-                continue
-            seen_urls.add(url)
-
-            source_domain = str(candidate.get('source_domain') or self._domain_for_url(url))
-            if self._is_blocked_domain(source_domain):
-                diagnostics['rejections']['blocked_domain'] += 1
-                continue
-            if self._is_deemphasized_domain(source_domain):
-                diagnostics['rejections']['deemphasized_domain'] += 1
-                continue
-            trusted_domain = self._is_trusted_domain(source_domain)
-
-            preview_url = str(candidate.get('preview_url') or '').strip() or self._preview_url_for_candidate(url) or ''
-            if not preview_url:
-                diagnostics['rejections']['non_renderable'] += 1
-                continue
-            diagnostics['renderable_urls_found'] += 1
-
-            title = str(candidate.get('title') or '').strip() or 'Supporting image'
-            summary = str(candidate.get('summary') or '').strip()
-            context_ok, context_reason = self._context_match_reason(
-                title=title,
-                summary=summary,
-                url=url,
-                anchor_tokens=anchor_tokens,
-                keyword_tokens=keyword_tokens,
-                visual_mode=visual_mode,
-            )
-            if not context_ok:
-                diagnostics['rejections'][context_reason] += 1
-                continue
-
-            relevance_score = self._candidate_relevance_score(
-                title=title,
-                summary=summary,
-                url=url,
-                keywords=keywords,
-                visual_mode=visual_mode,
-            )
-            if trusted_domain:
-                relevance_score = min(1.0, relevance_score + 0.06)
-            elif relevance_score < (threshold + 0.08):
-                diagnostics['rejections']['untrusted_domain'] += 1
-                continue
-            if relevance_score < threshold:
-                diagnostics['rejections']['low_relevance'] += 1
-                continue
-
-            selected.append(
-                (
-                    relevance_score,
-                    {
-                        'title': title,
-                        'url': url,
-                        'preview_url': preview_url,
-                        'media_type': 'image',
-                        'source_domain': source_domain,
-                        'relevance_reason': 'Selected because this image directly supports observation and interpretation in this lesson.',
-                    },
-                )
-            )
-
-        selected.sort(key=lambda item: item[0], reverse=True)
-        media_items = [item for _, item in selected[:limit]]
-        diagnostics['selected_count'] = len(media_items)
-
-        logger.info(
-            'resource.lesson_image_selection topic_id=%s skill_id=%s kind=%s visual_support_needed=%s priority=%s queries=%s candidates=%s renderable=%s selected=%s domains=%s rejections=%s',
-            topic.id,
-            skill_node.id,
-            kind,
-            diagnostics['visual_support_needed'],
-            diagnostics['visual_priority'],
-            diagnostics['queries'],
-            diagnostics['candidate_count'],
-            diagnostics['renderable_urls_found'],
-            diagnostics['selected_count'],
-            diagnostics['candidate_domains'],
-            diagnostics['rejections'],
-        )
-        return LessonImageSelection(media_items=media_items, diagnostics=diagnostics)
+        diagnostics = dict(media_selection.diagnostics)
+        candidate_counts = diagnostics.get('candidate_counts', {}) if isinstance(diagnostics, dict) else {}
+        selected_counts = diagnostics.get('selected_counts', {}) if isinstance(diagnostics, dict) else {}
+        diagnostics['candidate_count'] = int(candidate_counts.get('images') or 0)
+        diagnostics['selected_count'] = int(selected_counts.get('images') or len(image_items))
+        diagnostics['renderable_urls_found'] = diagnostics['selected_count']
+        diagnostics['queries'] = [diagnostics.get('image_query', '')] if diagnostics.get('image_query') else []
+        return LessonImageSelection(media_items=image_items, diagnostics=diagnostics)

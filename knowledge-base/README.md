@@ -385,7 +385,15 @@ Required:
 
 Required for web resource retrieval:
 
-- `SEARCH_API_KEY`
+- `OPENAI_WEB_SEARCH_MODEL` (defaults to `gpt-4.1-mini` if omitted)
+- media cache (recommended defaults):
+  - `MEDIA_CACHE_STORAGE_DIR`
+  - `MEDIA_CACHE_MAX_MB`
+  - `MEDIA_CACHE_TIMEOUT_SECONDS`
+  - `MEDIA_CACHE_TOKEN_TTL_SECONDS`
+  - `MEDIA_CACHE_MIN_IMAGE_PIXELS`
+  - `MEDIA_CACHE_MIN_IMAGE_LONG_EDGE`
+  - `MEDIA_CACHE_DOMAIN_BLOCK_TTL_SECONDS`
 
 ## Local setup
 
